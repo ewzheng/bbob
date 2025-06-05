@@ -1,3 +1,9 @@
+'''
+File: projector.py
+Author: Elias Zheng and Claude
+Description: This script contains the projector class.
+'''
+
 import torch 
 import torch.nn as nn
 
@@ -67,6 +73,9 @@ class Projector(nn.Module):
         if vision_in.dim() == 4:  
                     # Flatten spatial dimensions to create visual tokens
                     vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
+        
+        # match dtype to projector weights
+        vision_in = vision_in.to(next(self.net.parameters()).dtype)
         
         return self.net(vision_in)
 

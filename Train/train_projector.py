@@ -8,93 +8,75 @@ Usage: python train_projector.py -m <model_path> -d <dataset_path> -e <epochs> -
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp import autocast, GradScaler
 import argparse
-import os
 import time
+import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
-import torch._logging as logging
+
 
 # utils
-from model.model import BBOB
-from train_common import load_and_prepare_dataset, load_model
+import sys
+import os
 
-# configure torch logging
-logging.set_logs(all=logging.INFO)
-logger = torch._logging.getArtifactLogger(__name__, "training_stats")
+from train_common import load_and_prepare_dataset, load_model, collate, compute_embedding_similarity, compute_gradient_norm, compute_parameter_norm
 
-def projector_loss(vision_features, text_embeddings, temperature=0.07):
+# configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+
+
+def projector_loss(model, vision_features, input_ids, attention_mask):
     """
-    Compute contrastive loss between vision and text embeddings
+    Compute language modeling loss using model's forward pass
+    This is the correct LLaVA Stage 1 approach
     
     Parameters:
-        - vision_features: projected vision features tensor
-        - text_embeddings: text embedding vectors
-        - temperature: scaling parameter for contrastive learning
+        - model: BBOB model with projector and language model
+        - vision_features: raw vision features from encoder [batch, seq_len, hidden_dim]  
+        - input_ids: tokenized text input [batch, seq_len]
+        - attention_mask: attention mask for text [batch, seq_len]
         
     Returns:
-        - cross entropy loss for vision-text alignment
+        - language modeling loss from model forward pass
     """
-    vision_norm = nn.functional.normalize(vision_features, dim=-1)
-    text_norm = nn.functional.normalize(text_embeddings, dim=-1)
+    # Project vision features to get the number of visual tokens
+    projected_vision = model.projector(vision_features)
+    num_visual_tokens = projected_vision.shape[1]  # Number of visual tokens per batch
     
-    logits = torch.matmul(vision_norm, text_norm.T) / temperature
-    labels = torch.arange(len(logits)).to(logits.device)
+    # Create labels accounting for visual tokens
+    # Visual tokens should be ignored in loss (set to -100)
+    batch_size = input_ids.shape[0]
+    device = input_ids.device
     
-    return nn.functional.cross_entropy(logits, labels)
+    # Create visual token labels (all -100 to ignore in loss)
+    visual_labels = torch.full(
+        (batch_size, num_visual_tokens), 
+        -100, 
+        dtype=input_ids.dtype, 
+        device=device
+    )
+    
+    # Create text labels (same as input_ids, with -100 for padding)
+    text_labels = input_ids.clone()
+    text_labels[attention_mask == 0] = -100
+    
+    # Concatenate visual and text labels to match the combined sequence
+    labels = torch.cat([visual_labels, text_labels], dim=1)
+    
+    # Forward pass through the model with vision features and text
+    outputs = model(
+        vision_features=vision_features,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        labels=labels
+    )
+    
+    return outputs.loss
 
-def compute_embedding_similarity(vision_features, text_embeddings):
-    """
-    Compute average cosine similarity between vision and text embeddings
-    
-    Parameters:
-        - vision_features: projected vision features tensor
-        - text_embeddings: text embedding vectors
-        
-    Returns:
-        - average cosine similarity score as float
-    """
-    vision_norm = nn.functional.normalize(vision_features, dim=-1)
-    text_norm = nn.functional.normalize(text_embeddings, dim=-1)
-    
-    # compute pairwise similarities for diagonal (matching pairs)
-    similarities = torch.sum(vision_norm * text_norm, dim=-1)
-    return similarities.mean().item()
 
-def compute_gradient_norm(model):
-    """
-    Compute gradient norm for monitoring gradient health
-    
-    Parameters:
-        - model: BBOB model with projector parameters
-        
-    Returns:
-        - L2 norm of gradients across all projector parameters
-    """
-    total_norm = 0
-    param_count = 0
-    for p in model.projector.parameters():
-        if p.grad is not None:
-            param_norm = p.grad.data.norm(2)
-            total_norm += param_norm.item() ** 2
-            param_count += 1
-    return (total_norm ** 0.5) if param_count > 0 else 0.0
-
-def compute_parameter_norm(model):
-    """
-    Compute parameter norm to track weight magnitudes
-    
-    Parameters:
-        - model: BBOB model with projector parameters
-        
-    Returns:
-        - L2 norm of all projector parameters
-    """
-    total_norm = 0
-    for p in model.projector.parameters():
-        param_norm = p.data.norm(2)
-        total_norm += param_norm.item() ** 2
-    return total_norm ** 0.5
 
 def train(model, train, test, epochs, output_dir):
     """
@@ -118,25 +100,40 @@ def train(model, train, test, epochs, output_dir):
     logger.info(f"Model device: {device}")
     logger.info(f"Projector device: {next(model.projector.parameters()).device}")
     logger.info(f"Base model device: {next(model.base_model.parameters()).device}")
+    logger.info(f"Vision encoder device: {next(model.vision_encoder.parameters()).device}")
     
-    optimizer = torch.optim.AdamW(
+    # set frozen components to eval mode once (they stay frozen throughout training)
+    model.base_model.eval()
+    model.vision_encoder.eval()
+    
+    optimizer = optim.AdamW(
         model.projector.parameters(),
-        lr=1e-4,       
-        weight_decay=0.01  
+        lr=1e-3,      
+        weight_decay=0.0  
     )
     
-    # create data loaders with shuffling
-    train_loader = DataLoader(train, batch_size=32, shuffle=True)
-    test_loader = DataLoader(test, batch_size=32, shuffle=False)
+    # initialize mixed precision scaler
+    scaler = GradScaler("cuda") if torch.cuda.is_available() else None
+    logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
+    
+    # create data loaders with custom collate function to handle variable-sized tensors
+    train_loader = DataLoader(train, batch_size=32, shuffle=True, collate_fn=collate, pin_memory=True, 
+                             num_workers=2, persistent_workers=True, prefetch_factor=1) 
+    test_loader = DataLoader(test, batch_size=32, shuffle=False, collate_fn=collate, pin_memory=True,
+                            num_workers=2, persistent_workers=True, prefetch_factor=1)
     
     # training tracking variables
-    best_val_loss = float('inf')
+    best_train_loss = float('inf')
     start_time = time.time()
     
     # create checkpoint directory
     checkpoint_dir = f"{output_dir}/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # log initial memory usage (baseline) 
+    initial_memory = torch.cuda.memory_allocated(device) / 1024**3 if torch.cuda.is_available() else 0
+    logger.info(f"Initial GPU memory usage: {initial_memory:.2f}GB")
+    
     logger.info(f"Starting projector training for {epochs} epochs")
     logger.info(f"Device: {device}")
     logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(test_loader)}")
@@ -144,10 +141,13 @@ def train(model, train, test, epochs, output_dir):
     for epoch in range(epochs):
         epoch_start_time = time.time()
         
-        # training phase
+        # set projector to training mode 
         model.projector.train()
+        
+        # training phase
         total_train_loss = 0
         total_similarity = 0
+        similarity_count = 0
         
         for batch_idx, batch in enumerate(train_loader):
             batch_start_time = time.time()
@@ -155,43 +155,88 @@ def train(model, train, test, epochs, output_dir):
             # move data to device
             vision_features = batch["vision_features"].to(device)
             input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             
-            # get text embeddings and project vision features
-            with torch.cuda.device(device) if torch.cuda.is_available() else torch.no_grad():
-                text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-            projected_vision = model.projector(vision_features)
-            
-            assert projected_vision.device == text_embeddings.device == device, f"Device mismatch: projected_vision={projected_vision.device}, text_embeddings={text_embeddings.device}, expected={device}"
-            
-            # compute loss and similarity
+            # compute loss using language modeling approach with mixed precision
             optimizer.zero_grad()
-            loss = projector_loss(projected_vision, text_embeddings)
-            similarity = compute_embedding_similarity(projected_vision, text_embeddings)
             
-            loss.backward()
-            
-            # compute gradient norm before clipping
-            grad_norm = compute_gradient_norm(model)
-            
-            optimizer.step()
+            if scaler is not None:
+                # mixed precision forward pass
+                with autocast("cuda"):
+                    loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                
+                # compute similarity for monitoring (optional) - only every 128 batches for speed
+                if batch_idx % 128 == 0:
+                    with torch.no_grad():
+                        with autocast("cuda"):
+                            text_embeddings = model.base_model.get_input_embeddings()(input_ids)
+                            projected_vision = model.projector(vision_features)
+                            similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                    similarity_count += 1
+                else:
+                    similarity = 0.0  # placeholder
+                
+                # mixed precision backward pass
+                scaler.scale(loss).backward()
+                
+                # compute gradient norm before clipping (unscale first for accurate norm)
+                scaler.unscale_(optimizer)
+                grad_norm = compute_gradient_norm(model)
+                
+                # mixed precision optimizer step
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # standard precision training (fallback)
+                loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                
+                # compute similarity for monitoring (optional) - only every 128 batches for speed
+                if batch_idx % 128 == 0:
+                    with torch.no_grad():
+                        text_embeddings = model.base_model.get_input_embeddings()(input_ids)
+                        projected_vision = model.projector(vision_features)
+                        similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                    similarity_count += 1
+                else:
+                    similarity = 0.0  # placeholder
+                
+                loss.backward()
+                
+                # compute gradient norm before clipping
+                grad_norm = compute_gradient_norm(model)
+                
+                optimizer.step()
             
             # accumulate statistics
             total_train_loss += loss.item()
             total_similarity += similarity
             
-            # log batch-level statistics every 10 batches
-            if batch_idx % 10 == 0:
+            # log batch-level statistics every 128 batches
+            if batch_idx % 128 == 0:
                 batch_time = time.time() - batch_start_time
                 samples_per_sec = len(vision_features) / max(batch_time, 1e-6)
-                memory_used = torch.cuda.memory_allocated(device) / 1024**3 if torch.cuda.is_available() else 0
                 
                 logger.info(f"Epoch {epoch+1}/{epochs} Batch {batch_idx}/{len(train_loader)}: "
                            f"Loss={loss.item():.4f}, Sim={similarity:.3f}, "
-                           f"GradNorm={grad_norm:.3f}, Speed={samples_per_sec:.1f} samples/s, "
-                           f"Memory={memory_used:.2f}GB")
+                           f"GradNorm={grad_norm:.2e}, Speed={samples_per_sec:.1f} samples/s")
+            
+            # checkpoint every 512 batches using training loss
+            if batch_idx > 0 and batch_idx % 512 == 0:
+                # use current training loss for checkpointing (maintains train/val separation)
+                current_train_loss = loss.item()
+                
+                # save checkpoint if this is the best training loss so far
+                if current_train_loss < best_train_loss:
+                    best_train_loss = current_train_loss
+                    best_model_dir = f"{checkpoint_dir}/best_model-batch_{batch_idx}"
+                    os.makedirs(best_model_dir, exist_ok=True)
+                    model.save_pretrained(best_model_dir)
+                    logger.info(f"NEW BEST MODEL at batch {batch_idx}: Train Loss={current_train_loss:.4f}")
         
+
         # validation phase
         model.projector.eval()
+
         total_val_loss = 0
         total_val_similarity = 0
         
@@ -199,12 +244,25 @@ def train(model, train, test, epochs, output_dir):
             for batch in test_loader:
                 vision_features = batch["vision_features"].to(device)
                 input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
                 
-                text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                projected_vision = model.projector(vision_features)
-                
-                loss = projector_loss(projected_vision, text_embeddings)
-                similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                # compute validation loss using language modeling with mixed precision
+                if scaler is not None:
+                    with autocast("cuda"):
+                        loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                        
+                        # compute similarity for monitoring
+                        text_embeddings = model.base_model.get_input_embeddings()(input_ids)
+                        projected_vision = model.projector(vision_features)
+                        similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                else:
+                    # standard precision validation (fallback)
+                    loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                    
+                    # compute similarity for monitoring
+                    text_embeddings = model.base_model.get_input_embeddings()(input_ids)
+                    projected_vision = model.projector(vision_features)
+                    similarity = compute_embedding_similarity(projected_vision, text_embeddings)
                 
                 total_val_loss += loss.item()
                 total_val_similarity += similarity
@@ -212,7 +270,7 @@ def train(model, train, test, epochs, output_dir):
         # calculate epoch statistics
         avg_train_loss = total_train_loss / max(len(train_loader), 1)
         avg_val_loss = total_val_loss / max(len(test_loader), 1)
-        avg_train_similarity = total_similarity / max(len(train_loader), 1)
+        avg_train_similarity = total_similarity / max(similarity_count, 1)  # only divide by batches where similarity was computed
         avg_val_similarity = total_val_similarity / max(len(test_loader), 1)
         
         # compute model statistics
@@ -221,7 +279,7 @@ def train(model, train, test, epochs, output_dir):
         
         # compute convergence indicators
         train_val_gap = avg_train_loss - avg_val_loss
-        improvement = best_val_loss - avg_val_loss if best_val_loss != float('inf') else 0
+        improvement = best_train_loss - avg_train_loss if best_train_loss != float('inf') else 0
         
         # log comprehensive epoch statistics
         logger.info(f"=== EPOCH {epoch+1}/{epochs} SUMMARY ===")
@@ -230,21 +288,17 @@ def train(model, train, test, epochs, output_dir):
         logger.info(f"Model: ParamNorm={param_norm:.3f}, LR={optimizer.param_groups[0]['lr']:.2e}")
         logger.info(f"Performance: EpochTime={epoch_time:.1f}s, Improvement={improvement:.4f}")
         
-        # save best model checkpoint
-        if avg_val_loss < best_val_loss:
-            best_val_loss = avg_val_loss
-            best_model_dir = f"{checkpoint_dir}/best_model"
-            os.makedirs(best_model_dir, exist_ok=True)
-            model.save_pretrained(best_model_dir)
-            logger.info(f"NEW BEST MODEL: Val Loss improved to {avg_val_loss:.4f}")
-        else:
-            logger.info(f"No improvement. Best Val Loss: {best_val_loss:.4f}")
+        # save epoch checkpoint (always save latest, validation is for monitoring only)
+        current_dir = f"{checkpoint_dir}/latest-{epoch+1}"
+        os.makedirs(current_dir, exist_ok=True)
+        model.save_pretrained(current_dir)
+        logger.info(f"Epoch {epoch+1} checkpoint saved. Current Val Loss: {avg_val_loss:.4f}, Best Train Loss: {best_train_loss:.4f}")
     
     # final training summary
     total_time = time.time() - start_time
     logger.info(f"=== TRAINING COMPLETE ===")
     logger.info(f"Total time: {total_time:.1f}s ({total_time/60:.1f}min)")
-    logger.info(f"Best validation loss: {best_val_loss:.4f}")
+    logger.info(f"Best training loss: {best_train_loss:.4f}")
     logger.info(f"Final train/val gap: {train_val_gap:.4f}")
 
 def main():
@@ -261,7 +315,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train BBOB projector")
     parser.add_argument("-m", "--model", required=True, help="Model location/path")
     parser.add_argument("-d", "--dataset", required=True, help="Dataset location/path")
-    parser.add_argument("-e", "--epochs", type=int, default=5, help="Maximum number of training epochs (default: 5)")
+    parser.add_argument("-e", "--epochs", type=int, default=100, help="Maximum number of training epochs (default: 100)")
     parser.add_argument("-v", "--vision_tower", required=True, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
     args = parser.parse_args()
@@ -272,21 +326,21 @@ def main():
     print(f"Vision tower: {args.vision_tower}")
     print(f"Instruction: {args.instruction}")
 
-    # create output directory
-    current_date = datetime.now().strftime("%Y-%m-%d")
-    output_dir = f"Output/{current_date}"
+    # create output directory 
+    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_dir = f"Output/{current_datetime}"
     os.makedirs(output_dir, exist_ok=True)
 
     # load model
     model = load_model(args.model, args.vision_tower, None)
-    train, test = load_and_prepare_dataset(args.dataset, model.tokenizer, model.image_processor, model.vision_encoder, args.instruction, None)
+    train_dataset, test_dataset = load_and_prepare_dataset(args.dataset, model.get_tokenizer(), model.image_processor, model.vision_encoder, args.instruction, None)
     
-    # freeze model, vision tower, train only the projector
+    # freeze model, vision tower, train only the projector (LLaVA Stage 1 approach)
     model.freeze_model()
-    model.freeze_vision_tower()
+    model.freeze_vision_tower() 
     model.unfreeze_projector()
 
-    train(model, train, test, args.epochs, output_dir)
+    train(model, train_dataset, test_dataset, args.epochs, output_dir)
 
     # save final model in main output directory
     print(f"Saving final model to: {output_dir}")

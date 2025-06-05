@@ -1,9 +1,15 @@
+'''
+File: model.py
+Author: Elias Zheng and Claude
+Description: This script contains the BBOB model class.
+'''
+
 import torch
 import torch.nn as nn
 import transformers
 import bitsandbytes as bnb
 import os
-from projector import Projector
+from .projector import Projector
 
 class BBOB(nn.Module):
     """
@@ -23,19 +29,56 @@ class BBOB(nn.Module):
         # informational print, initialize gpu
         print("Loading BBOB with " + base_model + " and " + vision_encoder + "...\n") 
         n_gpus = torch.cuda.device_count()
-        max_memory = torch.cuda.get_device_properties(0).total_memory/1024**2
-        print("Max Memory (GB)",max_memory/1024)
-        max_memory=f'{max_memory}MB'
+        max_memory_bytes = torch.cuda.get_device_properties(0).total_memory
+        max_memory_gb = max_memory_bytes / (1024**3)
+        print("Max Memory (GB)", max_memory_gb)
+        
+        # format max_memory correctly for transformers library
+        usable_memory_mb = int((max_memory_bytes * 0.8) / (1024**2))
+        max_memory = {0: f"{usable_memory_mb}MB"}
 
         print("Present working Directory",os.getcwd())
         print(f"Number of GPUs: {n_gpus}")
+        print(f"Using max_memory: {max_memory}")
 
         # initialize components
         self.base_model = transformers.AutoModelForCausalLM.from_pretrained(base_model, max_memory=max_memory, quantization_config=bnb_config, device_map="auto")
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(base_model)
-        self.image_processor = transformers.AutoImageProcessor.from_pretrained(vision_encoder)
+        self.image_processor = transformers.AutoImageProcessor.from_pretrained(vision_encoder, use_fast=True)
         self.vision_encoder = transformers.AutoModel.from_pretrained(vision_encoder)
-        self.projector = Projector(self.vision_encoder.config.hidden_size, self.base_model.config.hidden_size)
+
+        # get vision encoder hidden size (different attributes for different vision models)
+        # always use dummy forward pass for MobileViTV2 to get actual output dimensions
+        print(f"Detecting vision encoder hidden size for {vision_encoder}...")
+        dummy_input = torch.randn(1, 3, 256, 256).to(next(self.vision_encoder.parameters()).device)
+        with torch.no_grad():
+            dummy_output = self.vision_encoder(dummy_input)
+            vision_features = dummy_output.last_hidden_state
+            print(f"Vision encoder output shape: {vision_features.shape}")
+            
+            # handle different output formats
+            if vision_features.dim() == 4:  # [batch, height, width, channels]
+                # flatten spatial dimensions like the projector does
+                vision_features = vision_features.flatten(2).transpose(1, 2)  # [batch, seq_len, channels]
+                vision_hidden_size = vision_features.shape[-1]
+            elif vision_features.dim() == 3:  # [batch, seq_len, channels]
+                vision_hidden_size = vision_features.shape[-1]
+            else:
+                vision_hidden_size = vision_features.shape[1]
+                
+        print(f"Detected vision hidden size: {vision_hidden_size}")
+
+        self.projector = Projector(vision_hidden_size, self.base_model.config.hidden_size)
+        
+        # move components to GPU and match base model dtype
+        if torch.cuda.is_available():
+            base_model_dtype = next(self.base_model.parameters()).dtype
+            self.vision_encoder = self.vision_encoder.to('cuda', dtype=base_model_dtype)
+            print(f"Vision encoder loaded on: {next(self.vision_encoder.parameters()).device}, dtype: {next(self.vision_encoder.parameters()).dtype}")
+            self.projector = self.projector.to('cuda', dtype=base_model_dtype)
+            print(f"Projector loaded on: {next(self.projector.parameters()).device}, dtype: {next(self.projector.parameters()).dtype}")
+        
+
 
     ''' Helpers for interacting with internal components'''
     def get_tokenizer(self):
@@ -88,8 +131,7 @@ class BBOB(nn.Module):
         """
         for weights in self.vision_encoder.parameters():
             weights.requires_grad = False
-        for weights in self.image_processor.parameters():
-            weights.requires_grad = False
+        # image processor typically has no trainable parameters
 
     def unfreeze_vision_tower(self):
         """
@@ -97,8 +139,7 @@ class BBOB(nn.Module):
         """
         for weights in self.vision_encoder.parameters():
             weights.requires_grad = True
-        for weights in self.image_processor.parameters():
-            weights.requires_grad = True
+        # image processor typically has no trainable parameters
 
     def train(self):
         """
@@ -383,7 +424,7 @@ class BBOB(nn.Module):
                 'output_dim': self.projector.net[0].out_features,
                 'hidden_dim': self.projector.net[2].out_features
             },
-            'vision_hidden_size': self.vision_encoder.config.hidden_size,
+            'vision_hidden_size': self.projector.net[0].in_features,  # get actual input size from projector
             'text_hidden_size': self.base_model.config.hidden_size
         }
         
