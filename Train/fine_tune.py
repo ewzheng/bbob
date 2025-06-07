@@ -11,13 +11,14 @@ import time
 import argparse
 import logging
 from datetime import datetime
+import math
 
 import torch
 import torchvision
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
 
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup, get_cosine_with_hard_restarts_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import bitsandbytes as bnb
 from transformers.pytorch_utils import Conv1D
@@ -59,24 +60,10 @@ def lora_loss(model, batch, composite_loss_fn, tokenizer, return_components=Fals
     # Detection/classification outputs
     class_logits = outputs["class_logits"]  # [B, num_visual_tokens, num_classes]
     box_preds = outputs["box_preds"]        # [B, num_visual_tokens, 4]
-    # Debug print for first batch of each epoch
-    if not hasattr(lora_loss, '_debug_printed') or not lora_loss._debug_printed:
-        logging.info(f"[lora_loss] input_ids shape: {input_ids.shape}, attention_mask shape: {attention_mask.shape}")
-        logging.info(f"[lora_loss] vision_features shape: {vision_features.shape if vision_features is not None else None}")
-        logging.info(f"[lora_loss] target_labels: {target_labels}")
-        logging.info(f"[lora_loss] target_boxes: {target_boxes}")
-        logging.info(f"[lora_loss] class_logits shape: {class_logits.shape}, box_preds shape: {box_preds.shape}")
-        logging.info(f"[lora_loss] First 5 class_logits: {class_logits.view(-1, class_logits.shape[-1])[:5]}")
-        logging.info(f"[lora_loss] First 5 box_preds: {box_preds.view(-1, 4)[:5]}")
-        lora_loss._debug_printed = True
     # Compute composite loss
     result = composite_loss_fn(
         lm_logits, lm_labels, class_logits, box_preds, target_labels, target_boxes, target_text, class_map=class_map, return_components=return_components
     )
-    if isinstance(result, tuple):
-        logging.info(f"[lora_loss] Loss tuple: {result}")
-    else:
-        logging.info(f"[lora_loss] Loss: {result}")
     return result
 
 def find_lora_target_modules(model):
@@ -113,6 +100,7 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
     model.base_model = prepare_model_for_kbit_training(model.base_model)
     model.base_model = get_peft_model(model.base_model, lora_config)
     model.base_model.print_trainable_parameters()
+
     scaler = GradScaler("cuda") if torch.cuda.is_available() else None
     logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate, num_workers=2, prefetch_factor=1, persistent_workers=True)
@@ -121,24 +109,21 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=learning_rate, weight_decay=0
     )
-    scaler = GradScaler("cuda") if torch.cuda.is_available() else None
-    logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate, num_workers=2, prefetch_factor=1, persistent_workers=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=2, prefetch_factor=1, persistent_workers=True)
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=learning_rate, weight_decay=0
-    )
+
     steps_per_epoch = (len(train_loader) + gradient_accumulation_steps - 1) // gradient_accumulation_steps
-    total_steps = min(steps_per_epoch * epochs, max_steps)
+    val_freq = 512//gradient_accumulation_steps
     logger.info(f"Starting LoRA fine-tuning for {epochs} epochs, max {max_steps} steps")
     logger.info(f"Device: {device}")
     logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(test_loader)}")
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
         optimizer,
         num_warmup_steps=warmup_steps,
-        num_training_steps=max_steps
+        num_training_steps=(steps_per_epoch*epochs)-warmup_steps,
+        num_cycles=epochs
     )
+
+    loss_fn = CompositeLoss()
+
     best_val_loss = float('inf')
     start_time = time.time()
     checkpoint_dir = f"{output_dir}/checkpoints"
@@ -168,13 +153,14 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
             batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
             if scaler is not None:
                 with autocast("cuda"):
-                    loss_tuple = lora_loss(model, batch, CompositeLoss(), tokenizer, return_components=True, class_map=class_map)
+                    loss_tuple = lora_loss(model, batch, loss_fn, tokenizer, return_components=True, class_map=class_map)
                 loss = loss_tuple[0] / gradient_accumulation_steps
                 scaler.scale(loss).backward()
             else:
-                loss_tuple = lora_loss(model, batch, CompositeLoss(), tokenizer, return_components=True, class_map=class_map)
+                loss_tuple = lora_loss(model, batch, loss_fn, tokenizer, return_components=True, class_map=class_map)
                 loss = loss_tuple[0] / gradient_accumulation_steps
                 loss.backward()
+
             # Accumulate metrics from loss_tuple
             total_train_loss += loss_tuple[0].item() * gradient_accumulation_steps
             total_cls_correct += loss_tuple[1]
@@ -199,35 +185,44 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                 period_iou_sum += loss_tuple[3]
                 period_iou_count += loss_tuple[4]
             accumulation_counter += 1
+            logger.info(f"Accumulation counter: {accumulation_counter}")
             if accumulation_counter == gradient_accumulation_steps or (batch_idx + 1 == len(train_loader)):
+                logger.info(f"==> OPTIMIZER STEP about to start at batch {batch_idx}, global_step {global_step}")
                 if scaler is not None:
+                    logger.info("Calling backward() (mixed precision)")
+                    # backward already called above
                     scaler.unscale_(optimizer)
                     grad_norm = compute_gradient_norm(model)
+                    logger.info("Finished backward() (mixed precision)")
                     scaler.step(optimizer)
                     scaler.update()
                 else:
+                    logger.info("Calling backward() (fp32)")
+                    # backward already called above
                     grad_norm = compute_gradient_norm(model)
+                    logger.info("Finished backward() (fp32)")
                     optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
+                logger.info(f"==> OPTIMIZER STEP DONE at batch {batch_idx}, global_step {global_step}")
                 accumulation_counter = 0
                 global_step += 1
-                if batch_idx % 128 == 0:
-                    batch_time = time.time() - batch_start_time
-                    samples_per_sec = len(batch["input_ids"]) / max(batch_time, 1e-6)
-                    period_cls_acc = period_cls_correct / max(period_cls_total, 1)
-                    period_mean_iou = period_iou_sum / max(period_iou_count, 1)
-                    period_mean_iou = min(max(period_mean_iou, 0.0), 1.0)
-                    logger.info(f"[TRAIN] Epoch {epoch+1}/{epochs} | Step {global_step} | Batch {batch_idx}/{len(train_loader)} | "
-                                f"Loss: {loss_tuple[0].item() * gradient_accumulation_steps:.4f} | ClsAcc: {period_cls_acc:.4f} | MeanIoU: {period_mean_iou:.4f} | "
-                                f"IoU Matches: {period_iou_count} | GT Objects: {period_cls_total} | "
-                                f"GradNorm: {grad_norm:.2e} | Speed: {samples_per_sec:.1f} samples/s | LR: {scheduler.get_last_lr()[0]:.2e}")
-                    # Reset period counters
-                    period_cls_correct = 0
-                    period_cls_total = 0
-                    period_iou_sum = 0.0
-                    period_iou_count = 0
-                if global_step > 0 and global_step % 512 == 0:
+
+                batch_time = time.time() - batch_start_time
+                samples_per_sec = len(batch["input_ids"]) / max(batch_time, 1e-6)
+                period_cls_acc = period_cls_correct / max(period_cls_total, 1)
+                period_mean_iou = period_iou_sum / max(period_iou_count, 1)
+                period_mean_iou = min(max(period_mean_iou, 0.0), 1.0)
+                logger.info(f"[TRAIN] Epoch {epoch+1}/{epochs} | Step {global_step} | Batch {batch_idx}/{len(train_loader)} | "
+                            f"Loss: {loss_tuple[0].item() * gradient_accumulation_steps:.4f} | ClsAcc: {period_cls_acc:.4f} | MeanIoU: {period_mean_iou:.4f} | "
+                            f"IoU Matches: {period_iou_count} | GT Objects: {period_cls_total} | "
+                            f"GradNorm: {grad_norm:.2e} | Speed: {samples_per_sec:.1f} samples/s | LR: {scheduler.get_last_lr()[0]:.2e}")
+                # Reset period counters
+                period_cls_correct = 0
+                period_cls_total = 0
+                period_iou_sum = 0.0
+                period_iou_count = 0
+                if global_step > 0 and global_step % val_freq == 0:
                     model.eval()
                     total_val_loss = 0
                     total_val_cls_correct = 0
@@ -254,7 +249,7 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                             total_val_iou_count += val_loss_tuple[4]
                             total_val_l1 += val_loss_tuple[5]
                             val_batches += 1
-                            period_iou_matches += val_loss_tuple[4]
+                            period_iou_matches = val_loss_tuple[4]  # Non-cumulative, per-batch
                             if val_batch_idx % 32 == 0:
                                 val_bt = time.time() - val_batch_time
                                 val_sps = len(val_batch["input_ids"]) / max(val_bt, 1e-6)
@@ -262,8 +257,7 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                                 val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
                                 val_mean_iou = min(max(val_mean_iou, 0.0), 1.0)
                                 logger.info(f"[VAL]   Epoch {epoch+1}/{epochs} | Step {global_step} | ValBatch {val_batch_idx}/{len(test_loader)} | "
-                                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {total_val_cls_total} | L1: {val_loss_tuple[5]:.4f} | Speed: {val_sps:.1f} samples/s")
-                                period_iou_matches = 0
+                                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {val_loss_tuple[2]} | L1: {val_loss_tuple[5]:.4f} | Speed: {val_sps:.1f} samples/s")
                     avg_val_loss = total_val_loss / max(val_batches, 1)
                     avg_val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
                     avg_val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
@@ -321,6 +315,7 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
             total_val_iou_count += val_loss_tuple[4]
             total_val_l1 += val_loss_tuple[5]
             val_batches += 1
+            period_iou_matches = val_loss_tuple[4]  # Non-cumulative, per-batch
             if val_batch_idx % 32 == 0:
                 val_bt = time.time() - val_batch_time
                 val_sps = len(val_batch["input_ids"]) / max(val_bt, 1e-6)
@@ -430,14 +425,14 @@ def main():
     parser.add_argument("-d", "--dataset", required=True, help="Dataset name from HuggingFace Hub")  
     parser.add_argument("-v", "--vision_tower", required=False, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
-    parser.add_argument("--lora_rank", type=int, default=16, help="LoRA rank (default: 16)")
-    parser.add_argument("--lora_alpha", type=int, default=32, help="LoRA alpha (default: 32)")
+    parser.add_argument("--lora_rank", type=int, default=64, help="LoRA rank (default: 64)")
+    parser.add_argument("--lora_alpha", type=int, default=128, help="LoRA alpha (default: 128)")
     parser.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
     parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate (default: 2e-5)")
-    parser.add_argument("--bias", type=str, default="none", help="LoRA bias type: 'none', 'all', or 'lora_only' (default: 'none')")
+    parser.add_argument("--bias", type=str, default="lora_only", help="LoRA bias type: 'none', 'all', or 'lora_only' (default: 'lora_only')")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size (default: 32)")
-    parser.add_argument("--warmup_steps", type=int, default=200, help="Warmup steps (default: 200)")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps (default: 1)")
+    parser.add_argument("--warmup_steps", type=int, default=64, help="Warmup steps (default: 64)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps (default: 4)")
     parser.add_argument("-e", "--epochs", type=int, default=1, help="Number of training epochs (default: 1)")
     parser.add_argument("--max_steps", type=int, default=2048, help="Maximum number of training steps (default: 2048)")
     parser.add_argument("--label_file", type=str, default=None, help="Optional path to YAML label file")
@@ -464,7 +459,15 @@ def main():
     output_dir = f"Tuning/{current_datetime}"
     os.makedirs(output_dir, exist_ok=True)
 
-    model = BBOB.from_pretrained(args.model)
+    # Add file handler for logging to file in output_dir
+    logfile = os.path.join(output_dir, "training.log")
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(logfile) for h in logger.handlers):
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+
+    model = BBOB.from_pretrained(args.model, num_classes=80)
     train_dataset, test_dataset = load_and_prepare_dataset(
         args.dataset,
         model.get_tokenizer(),

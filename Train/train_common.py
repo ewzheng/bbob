@@ -30,76 +30,76 @@ import os
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 import Model.model as model
 
-def dynamic_image_resize(image, target_size=None, max_size=512, min_size=224):
-    """
-    Dynamically resize images with robust format handling to prevent channel dimension errors
-    
-    Parameters:
-        - image: PIL Image, numpy array, or torch tensor to resize
-        - target_size: tuple (width, height) for specific size, or None for auto-sizing
-        - max_size: maximum dimension size for auto-sizing
-        - min_size: minimum dimension size for auto-sizing
-        
-    Returns:
-        - PIL Image in RGB format, ready for processing
-    """
-    # convert to PIL Image if needed
-    if hasattr(image, 'numpy'):  # torch tensor
-        image = Image.fromarray((image.numpy() * 255).astype(np.uint8))
-    elif isinstance(image, np.ndarray):  # numpy array
-        if image.dtype != np.uint8:
-            image = (image * 255).astype(np.uint8) if image.max() <= 1.0 else image.astype(np.uint8)
-        image = Image.fromarray(image)
-    elif not isinstance(image, Image.Image):
-        raise ValueError(f"Unsupported image type: {type(image)}")
-    
-    # ensure RGB format (fixes channel dimension issues)
-    if image.mode != 'RGB':
-        if image.mode == 'RGBA':
-            # handle transparency by adding white background
-            background = Image.new('RGB', image.size, (255, 255, 255))
-            background.paste(image, mask=image.split()[-1])  # use alpha channel as mask
-            image = background
-        elif image.mode in ['L', 'P', '1']:  # grayscale or palette modes
-            image = image.convert('RGB')
-        else:
-            image = image.convert('RGB')
-    
-    if target_size is None:
-        # auto-size based on aspect ratio
-        width, height = image.size
-        aspect_ratio = width / height
-        
-        if max(width, height) > max_size:
-            if width > height:
-                new_width = max_size
-                new_height = int(max_size / aspect_ratio)
-            else:
-                new_height = max_size
-                new_width = int(max_size * aspect_ratio)
-        elif min(width, height) < min_size:
-            if width < height:
-                new_width = min_size
-                new_height = int(min_size / aspect_ratio)
-            else:
-                new_height = min_size
-                new_width = int(min_size * aspect_ratio)
-        else:
-            # image is within acceptable range
-            return image
-            
-        target_size = (new_width, new_height)
-    
-    # resize with high-quality resampling
-    try:
-        resized_image = image.resize(target_size, Image.Resampling.LANCZOS)
-    except AttributeError:
-        # fallback for older PIL versions
-        resized_image = image.resize(target_size, Image.ANTIALIAS)
-    
-    return resized_image
+import logging
+import yaml
 
-def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category_mapping=None, gpu_batch_size=64):
+def jitter_bboxes(bboxes, img_width, img_height, jitter_ratio=0.05):
+    """
+    Randomly jitter bounding boxes by a fraction of their size (COCO format).
+    Args:
+        bboxes: Tensor or list of [N, 4] boxes (x, y, w, h) (COCO format)
+        img_width: Width of the image
+        img_height: Height of the image
+        jitter_ratio: Max fraction of box size to jitter (default 5%)
+    Returns:
+        Jittered bboxes (same shape/type as input, COCO format)
+    """
+    if isinstance(bboxes, torch.Tensor):
+        bboxes = bboxes.clone().detach().cpu().numpy()
+    bboxes_jittered = []
+    
+    for box in bboxes:
+        x, y, w, h = box  # COCO format
+        # Convert to corners
+        x1 = x
+        y1 = y
+        x2 = x + w
+        y2 = y + h
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        # Jitter center and size
+        jitter_cx = cx + np.random.uniform(-jitter_ratio, jitter_ratio) * w
+        jitter_cy = cy + np.random.uniform(-jitter_ratio, jitter_ratio) * h
+        jitter_w = w * (1 + np.random.uniform(-jitter_ratio, jitter_ratio))
+        jitter_h = h * (1 + np.random.uniform(-jitter_ratio, jitter_ratio))
+        # Clamp to image bounds
+        new_x1 = np.clip(jitter_cx - jitter_w / 2, 0, img_width - 1)
+        new_y1 = np.clip(jitter_cy - jitter_h / 2, 0, img_height - 1)
+        new_x2 = np.clip(jitter_cx + jitter_w / 2, 0, img_width - 1)
+        new_y2 = np.clip(jitter_cy + jitter_h / 2, 0, img_height - 1)
+        # Convert back to COCO format
+        new_x = new_x1
+        new_y = new_y1
+        new_w = new_x2 - new_x1
+        new_h = new_y2 - new_y1
+        bboxes_jittered.append([new_x, new_y, new_w, new_h])
+
+    return torch.tensor(bboxes_jittered, dtype=torch.float32)
+
+def normalize_coco_bboxes(bboxes, img_width, img_height):
+    """
+    Normalize COCO bounding boxes ([x, y, w, h]) to [x/img_w, y/img_h, w/img_w, h/img_h].
+    Args:
+        bboxes: Tensor or list of [N, 4] boxes (x, y, w, h)
+        img_width: Width of the image
+        img_height: Height of the image
+    Returns:
+        Normalized bboxes (same shape/type as input)
+    """
+    if isinstance(bboxes, torch.Tensor):
+        bboxes = bboxes.clone().detach().cpu().numpy()
+    bboxes_norm = []
+    for box in bboxes:
+        x, y, w, h = box
+        bboxes_norm.append([
+            x / img_width,
+            y / img_height,
+            w / img_width,
+            h / img_height
+        ])
+    return torch.tensor(bboxes_norm, dtype=torch.float32)
+
+def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category_mapping=None, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False):
     """
     Process a batch of multimodal data through vision encoder and tokenizer
     
@@ -109,10 +109,14 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
         - image_processor: vision processor for handling images
         - vision_encoder: vision model for extracting image features
         - category_mapping: optional mapping from category IDs to names
+        - gpu_batch_size: batch size for GPU processing
+        - bbox_jitter_ratio: ratio for jittering bounding boxes
+        - training: boolean indicating whether this is a training batch
         
     Returns:
         - processed batch with vision_features, input_ids, attention_mask and preserved fields
     """
+
     # detect image field name dynamically
     image_field = None
     for field in ["image", "img", "images", "picture", "photo", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]:
@@ -129,29 +133,30 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
     # only handle format conversion - let image processor handle resizing
     try:
         processed_images = []
+        image_sizes = []
         for img in images:
             try:
-                # convert to RGB if needed (prevent format errors)
                 if hasattr(img, 'mode') and img.mode != 'RGB':
                     if img.mode == 'RGBA':
-                        # remove alpha channel
                         img = Image.new('RGB', img.size, (255, 255, 255))
                         img.paste(img, mask=img.split()[-1])
                     else:
                         img = img.convert('RGB')
-                
                 processed_images.append(img)
+                image_sizes.append(img.size)  # (width, height)
             except Exception as e:
                 warnings.warn(f"Format conversion failed: {e}. Using fallback.")
-                # fallback conversion
                 try:
                     if hasattr(img, 'convert'):
-                        processed_images.append(img.convert('RGB'))
+                        img_rgb = img.convert('RGB')
+                        processed_images.append(img_rgb)
+                        image_sizes.append(img_rgb.size)
                     else:
                         processed_images.append(img)
+                        image_sizes.append((256, 256))
                 except:
-                    # create blank image if all else fails
                     processed_images.append(Image.new('RGB', (256, 256), (0, 0, 0)))
+                    image_sizes.append((256, 256))
     except Exception as e:
         warnings.warn(f"Image processing failed: {e}. Using original images.")
         processed_images = images
@@ -203,62 +208,33 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
     result = {
         "vision_features": vision_features,
         "input_ids": tokenized_text["input_ids"].cpu(),
-        "attention_mask": tokenized_text["attention_mask"].cpu()
+        "attention_mask": tokenized_text["attention_mask"].cpu(),
+        "target_boxes": [],
+        "target_labels": []
     }
+
+    # apply augmentations to objects
+    if "objects" in batch:
+        img_w, img_h = image_sizes[0]
+        for sample in batch["objects"]:
+            bboxes = sample["bbox"]
+            if training:
+                bboxes = jitter_bboxes(bboxes, img_w, img_h, jitter_ratio=bbox_jitter_ratio)
+            bboxes = normalize_coco_bboxes(bboxes, img_w, img_h)
+            sample_boxes = []
+            sample_labels = []
+            for bbox, category in zip(bboxes, sample["category"]):
+                sample_boxes.append(bbox)
+                sample_labels.append(category)
+            result["target_boxes"].append(sample_boxes)
+            result["target_labels"].append(sample_labels)
     
-    # process any additional fields in batch (generic approach)
-    for key, value in batch.items():
-        if key not in [image_field, "text"]:  # skip already processed fields
-            if key == "objects" and value is not None:
-                # extract and vectorize bounding boxes and labels
-                batch_bboxes = []
-                batch_labels = []
-                
-                for sample_objects in value:
-                    sample_bboxes = []
-                    sample_labels = []
-                    
-                    if sample_objects:  # check if objects exist for this sample
-                        for obj in sample_objects:
-                            if obj and isinstance(obj, dict):
-                                # extract bbox coordinates
-                                if 'bbox' in obj:
-                                    bbox = obj['bbox']
-                                    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-                                        sample_bboxes.append(bbox)
-                                        
-                                        # extract category label
-                                        if 'category' in obj:
-                                            category = obj['category']
-                                            if isinstance(category, list):
-                                                sample_labels.append(category[0])  # take first category if multiple
-                                            else:
-                                                sample_labels.append(category)
-                                        else:
-                                            sample_labels.append(0)  # default category
-                    
-                    # convert to tensors, handle empty cases
-                    if sample_bboxes:
-                        batch_bboxes.append(torch.tensor(sample_bboxes, dtype=vision_features.dtype))
-                        batch_labels.append(torch.tensor(sample_labels, dtype=tokenized_text["input_ids"].dtype))
-                    else:
-                        # empty sample - add dummy bbox and label
-                        batch_bboxes.append(torch.tensor([[0.0, 0.0, 1.0, 1.0]], dtype=vision_features.dtype))
-                        batch_labels.append(torch.tensor([0], dtype=tokenized_text["input_ids"].dtype))
-                
-                # store vectorized bboxes and labels
-                result["target_boxes"] = batch_bboxes  # list of tensors [num_objects_per_sample, 4]
-                result["target_labels"] = batch_labels  # list of tensors [num_objects_per_sample]
-                
-                # also keep original objects for debugging/reference
-                result["objects_original"] = value
-            else:
-                # pass through other fields unchanged
-                result[key] = value
-    
+    # Store image sizes for denormalization during evaluation
+    result["image_size"] = image_sizes
+
     return result
 
-def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, instruction, category_mapping=None):
+def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, instruction, category_mapping=None, is_training=False):
     """
     Process entire dataset through image resizing and feature extraction
     
@@ -269,6 +245,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
         - vision_encoder: vision model for extracting image features
         - instruction: instruction text to add to each example
         - category_mapping: optional mapping from category IDs to names
+        - is_training: boolean indicating whether this is a training set
         
     Returns:
         - processed dataset with vision_features and tokenized text
@@ -290,8 +267,16 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
         cpu_batch_size = 64
         print(f"CPU mode - using batch size: {cpu_batch_size}")
     
-    _preprocessing_function = partial(preprocess_batch, tokenizer=tokenizer, image_processor=image_processor, vision_encoder=vision_encoder, category_mapping=category_mapping, gpu_batch_size=gpu_batch_size)
-    
+    _preprocessing_function = partial(
+        preprocess_batch,
+        tokenizer=tokenizer,
+        image_processor=image_processor,
+        vision_encoder=vision_encoder,
+        category_mapping=category_mapping,
+        gpu_batch_size=gpu_batch_size,
+        training=is_training
+    )
+
     dataset = dataset.map(
         _preprocessing_function, 
         batched=True, 
@@ -326,6 +311,8 @@ def load_and_prepare_dataset(dataset_name, tokenizer, image_processor, vision_en
         trust_remote_code=True,
         storage_options={"client_kwargs": {"timeout": aiohttp.ClientTimeout(total=10000)}}
     )
+
+
 
     # handle different dataset structures automatically
     if isinstance(dataset, datasets.DatasetDict):
@@ -366,10 +353,11 @@ def load_and_prepare_dataset(dataset_name, tokenizer, image_processor, vision_en
         test = split["test"]
         print(f"Created splits: {len(train)} train, {len(test)} test")
 
+
     print("Preprocessing train dataset...")
-    train = preprocess_dataset(train, tokenizer, image_processor, vision_encoder, instruction, category_mapping)
+    train = preprocess_dataset(train, tokenizer, image_processor, vision_encoder, instruction, category_mapping, is_training=True)
     print("Preprocessing test dataset...")
-    test = preprocess_dataset(test, tokenizer, image_processor, vision_encoder, instruction, category_mapping)
+    test = preprocess_dataset(test, tokenizer, image_processor, vision_encoder, instruction, category_mapping, is_training=False)
 
     return train, test
 
@@ -494,6 +482,36 @@ def collate(batch):
         if key not in ['vision_features', 'input_ids', 'attention_mask']:
             additional_fields[key] = [item[key] for item in batch]
     
+    # Pad and stack target_labels if present
+    if "target_labels" in additional_fields:
+        label_tensors = []
+        for lbl in additional_fields["target_labels"]:
+            if isinstance(lbl, list):
+                lbl = torch.tensor(lbl)
+            if not isinstance(lbl, torch.Tensor):
+                lbl = torch.tensor(lbl)
+            label_tensors.append(lbl)
+        # Pad to the same length with ignore index -100
+        target_labels_padded = pad_sequence(label_tensors, batch_first=True, padding_value=-100)
+        # Clamp to valid range [0, 79] or set to -100 if out of range
+        num_classes = 80  # COCO
+        mask = (target_labels_padded != -100)
+        target_labels_padded[mask & (target_labels_padded < 0)] = -100
+        target_labels_padded[mask & (target_labels_padded >= num_classes)] = -100
+        additional_fields["target_labels"] = target_labels_padded
+    # Pad and stack target_boxes if present
+    if "target_boxes" in additional_fields:
+        box_tensors = []
+        for bx in additional_fields["target_boxes"]:
+            if isinstance(bx, list):
+                bx = torch.tensor(bx)
+            if not isinstance(bx, torch.Tensor):
+                bx = torch.tensor(bx)
+            box_tensors.append(bx)
+        # Pad to the same length with 0.0
+        target_boxes_padded = pad_sequence(box_tensors, batch_first=True, padding_value=0.0)
+        additional_fields["target_boxes"] = target_boxes_padded
+    
     # convert to tensors and handle dimensions properly
     vision_tensors = []
     for vf in vision_features:
@@ -607,3 +625,21 @@ def compute_parameter_norm(model):
         param_norm = p.data.norm(2)
         total_norm += param_norm.item() ** 2
     return total_norm ** 0.5
+
+def load_labels_from_yaml(yaml_path):
+    """Load label dictionary from a YAML file and return class_name -> index mapping."""
+    if not os.path.exists(yaml_path):
+        logging.error(f"Label YAML file not found: {yaml_path}")
+        raise FileNotFoundError(f"Label YAML file not found: {yaml_path}")
+    try:
+        with open(yaml_path, 'r') as f:
+            labels = yaml.safe_load(f)
+        if not isinstance(labels, dict) or 'names' not in labels:
+            raise ValueError("YAML file must contain a 'names' dictionary of labels.")
+        names = labels['names']
+        # Invert mapping: class_name -> index
+        class_map = {v: int(k) for k, v in names.items()}
+        return class_map
+    except Exception as e:
+        logging.error(f"Error loading labels from YAML: {e}")
+        raise

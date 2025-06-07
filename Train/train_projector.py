@@ -108,7 +108,7 @@ def train(model, train, test, epochs, output_dir):
     
     optimizer = optim.AdamW(
         model.projector.parameters(),
-        lr=1e-3,      
+        lr=2e-3,      
         weight_decay=0.0  
     )
     
@@ -335,7 +335,7 @@ def main():
     model = load_model(args.model, args.vision_tower, None)
     train_dataset, test_dataset = load_and_prepare_dataset(args.dataset, model.get_tokenizer(), model.image_processor, model.vision_encoder, args.instruction, None)
     
-    # freeze model, vision tower, train only the projector (LLaVA Stage 1 approach)
+    # freeze model, vision tower, train only the projector 
     model.freeze_model()
     model.freeze_vision_tower() 
     model.unfreeze_projector()

@@ -16,7 +16,7 @@ class BBOB(nn.Module):
     BBOB multimodal model combining vision encoder, projector, and language model
     """
     
-    def __init__(self, base_model, vision_encoder, bnb_config):
+    def __init__(self, base_model, vision_encoder, bnb_config, num_classes=80):
         """
         Initialize BBOB model with specified components
         
@@ -24,6 +24,7 @@ class BBOB(nn.Module):
             - base_model: path or identifier for base language model
             - vision_encoder: path or identifier for vision encoder
             - bnb_config: quantization configuration for model loading
+            - num_classes: number of classes for detection head (default 80 for COCO)
         """
         super(BBOB, self).__init__()
         # informational print, initialize gpu
@@ -69,6 +70,27 @@ class BBOB(nn.Module):
         print(f"Detected vision hidden size: {vision_hidden_size}")
 
         self.projector = Projector(vision_hidden_size, self.base_model.config.hidden_size)
+        # Detection/classification heads (initialized with default num_classes=100, can be updated later)
+        self.num_classes = num_classes
+        self.detection_head = nn.Sequential(
+            nn.Linear(self.base_model.config.hidden_size, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, self.num_classes)
+        )
+        self.bbox_head = nn.Sequential(
+            nn.Linear(self.base_model.config.hidden_size, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 4),
+            nn.Sigmoid()
+        )
+        # Move heads to same device as projector
+        device = next(self.projector.parameters()).device
+        self.detection_head = self.detection_head.to(device)
+        self.bbox_head = self.bbox_head.to(device)
         
         # move components to GPU and match base model dtype
         if torch.cuda.is_available():
@@ -140,6 +162,18 @@ class BBOB(nn.Module):
         for weights in self.vision_encoder.parameters():
             weights.requires_grad = True
         # image processor typically has no trainable parameters
+
+    def unfreeze_heads(self):
+        for weights in self.bbox_head.parameters():
+            weights.requires_grad = True
+        for weights in self.detection_head.parameters():
+            weights.requires_grad= True
+
+    def freeze_heads(self):
+        for weights in self.bbox_head.parameters():
+            weights.requires_grad = False
+        for weights in self.detection_head.parameters():
+            weights.requires_grad= False
 
     def train(self):
         """
@@ -293,19 +327,8 @@ class BBOB(nn.Module):
                  temperature=0.7, do_sample=True, **kwargs):
         """
         Generate text responses with optional image input
-        
-        Parameters:
-            - vision_in: images or visual input
-            - text_in: text prompt/query
-            - max_new_tokens: maximum new tokens to generate
-            - temperature: sampling temperature
-            - do_sample: whether to use sampling
-            - return_text: return decoded text vs raw tokens
-            
-        Returns:
-            - generated text or token ids
+        Now, if both vision and text are provided, prepend detection outputs as structured text to the prompt.
         """
-        
         was_base_training = self.base_model.training
         was_vision_training = self.vision_encoder.training
 
@@ -314,15 +337,45 @@ class BBOB(nn.Module):
 
         # process visual inputs through vision tower and projector
         visual_tokens = self._prepare_visual_inputs(vision_in)
-        
+        detection_prompt = ""
+        if visual_tokens is not None:
+            # Run detection/classification and bbox heads
+            class_logits = self.detection_head(visual_tokens)
+            box_preds = self.bbox_head(visual_tokens)
+            # For each visual token, get top class and bbox
+            top_classes = class_logits.argmax(dim=-1)  # [B, num_visual_tokens]
+            # Assume batch size 1 for generation (can extend if needed)
+            if top_classes.dim() == 2:
+                top_classes = top_classes[0]
+                box_preds = box_preds[0]
+            # Map class indices to names if possible
+            class_names = None
+            if hasattr(self, 'class_map') and self.class_map is not None:
+                inv_class_map = {v: k for k, v in self.class_map.items()}
+                class_names = [inv_class_map.get(idx.item(), str(idx.item())) for idx in top_classes]
+            else:
+                class_names = [str(idx.item()) for idx in top_classes]
+            # Format as 'class: [x1, y1, x2, y2]; ...'
+            detection_strs = []
+            for cls, box in zip(class_names, box_preds):
+                x1, y1, x2, y2 = box.tolist()
+                detection_strs.append(f"{cls}: [{x1:.3f}, {y1:.3f}, {x2:.3f}, {y2:.3f}]")
+            detection_prompt = "; ".join(detection_strs)
+            if detection_prompt:
+                detection_prompt = detection_prompt + "\n"
         # process text inputs through tokenizer and embedding layer
+        if text_in is not None:
+            if isinstance(text_in, str):
+                text_in = detection_prompt + text_in
+            elif isinstance(text_in, list) and isinstance(text_in[0], str):
+                text_in[0] = detection_prompt + text_in[0]
+        else:
+            text_in = detection_prompt
         text_embeddings, attention_mask = self._prepare_text_inputs(text_in)
-        
         # combine visual and text modalities
         combined_embeddings, combined_attention_mask = self._merge_multimodal_inputs(
             visual_tokens, text_embeddings, attention_mask
         )
-        
         # setup generation parameters with defaults
         generation_kwargs = {
             'max_new_tokens': max_new_tokens,
@@ -332,7 +385,6 @@ class BBOB(nn.Module):
             'eos_token_id': self.base_tokenizer.eos_token_id,
             **kwargs
         }
-        
         # generate tokens without computing gradients
         with torch.no_grad():
             outputs = self.base_model.generate(
@@ -340,19 +392,16 @@ class BBOB(nn.Module):
                 attention_mask=combined_attention_mask,
                 **generation_kwargs
             )
-        
         # convert token ids back to readable text
         generated_text = self.base_tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
         # restore model state
         if was_base_training:
             self.base_model.train()
         if was_vision_training:
             self.vision_encoder.train()
-
         return generated_text
 
-    def forward(self, vision_features=None, input_ids=None, attention_mask=None, labels=None, **kwargs):
+    def forward(self, vision_features=None, input_ids=None, attention_mask=None, labels=None, detection=False, target_labels=None, **kwargs):
         """
         Main forward pass for multimodal model using preprocessed inputs
         
@@ -361,6 +410,8 @@ class BBOB(nn.Module):
             - input_ids: preprocessed text token ids [batch, seq_len]
             - attention_mask: preprocessed attention mask [batch, seq_len]
             - labels: ground truth labels for loss computation
+            - detection: whether to return detection outputs
+            - target_labels: ground truth labels for dynamic class assignment
             
         Returns:
             - model outputs including logits and loss
@@ -379,7 +430,7 @@ class BBOB(nn.Module):
             text_embeddings = self.base_model.get_input_embeddings()(input_ids)
         else:
             text_embeddings = None
-            
+        
         # move attention mask to correct device
         if attention_mask is not None:
             attention_mask = attention_mask.to(next(self.base_model.parameters()).device)
@@ -397,6 +448,24 @@ class BBOB(nn.Module):
             **kwargs
         )
         
+        # Detection/classification output
+        if detection and visual_tokens is not None:
+            # Do NOT dynamically set num_classes based on target_labels shape
+            # The detection head should always use the fixed num_classes set at model initialization
+            class_logits = self.detection_head(visual_tokens)  # [B, num_visual_tokens, num_classes]
+            box_preds = self.bbox_head(visual_tokens)          # [B, num_visual_tokens, 4]
+            # Debug print for first batch of each epoch
+            if not hasattr(self, '_debug_printed') or not self._debug_printed:
+                print(f"[DEBUG] class_logits mean: {class_logits.mean().item():.4f}, std: {class_logits.std().item():.4f}")
+                print(f"[DEBUG] box_preds mean: {box_preds.mean().item():.4f}, std: {box_preds.std().item():.4f}")
+                print(f"[DEBUG] First 5 box_preds: {box_preds.view(-1, 4)[:5]}")
+                print(f"[DEBUG] box_preds min: {box_preds.min().item():.4f}, max: {box_preds.max().item():.4f}")
+                self._debug_printed = True
+            return {
+                "class_logits": class_logits,
+                "box_preds": box_preds,
+                "outputs": outputs  # keep language modeling outputs for compatibility
+            }
         return outputs
     
     def save_pretrained(self, save_directory, save_base_model=False, save_vision_encoder=False):
@@ -454,7 +523,7 @@ class BBOB(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_path, base_model=None, vision_encoder=None, 
-                       load_base_model=False, load_vision_encoder=False):
+                       load_base_model=False, load_vision_encoder=False, num_classes=80):
         """
         Load model from saved directory
         
@@ -464,6 +533,7 @@ class BBOB(nn.Module):
             - vision_encoder: vision encoder name/path (if not loading from saved)
             - load_base_model: whether to load base model from saved files
             - load_vision_encoder: whether to load vision encoder from saved files
+            - num_classes: number of classes for detection head (default 80 for COCO)
             
         Returns:
             - loaded BBOB model instance
@@ -502,7 +572,8 @@ class BBOB(nn.Module):
         model = cls(
             base_model=base_model_to_use,
             vision_encoder=vision_encoder_to_use,
-            bnb_config=None  # TODO: add bnb_config parameter if needed
+            bnb_config=None,  # TODO: add bnb_config parameter if needed
+            num_classes=num_classes
         )
         
         # load projector weights
@@ -536,4 +607,18 @@ class BBOB(nn.Module):
         projector_state = torch.load(weights_path, map_location='cpu')
         self.projector.load_state_dict(projector_state)
         print(f"Loaded projector weights from {weights_path}")
+        
+    def set_num_classes(self, num_classes):
+        """Update the number of classes for the detection head."""
+        self.num_classes = num_classes
+        self.detection_head = nn.Sequential(
+            nn.Linear(self.base_model.config.hidden_size, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, self.num_classes)
+        )
+        # Move detection head to same device as projector
+        device = next(self.projector.parameters()).device
+        self.detection_head = self.detection_head.to(device)
         
