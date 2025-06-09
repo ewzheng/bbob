@@ -21,10 +21,11 @@ import sys
 import os
 
 from train_common import load_and_prepare_dataset, load_model, collate, compute_embedding_similarity, compute_gradient_norm, compute_parameter_norm
+from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 
 # configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 
@@ -78,7 +79,7 @@ def projector_loss(model, vision_features, input_ids, attention_mask):
 
 
 
-def train(model, train, test, epochs, output_dir):
+def train(model, train, test, epochs, output_dir, learning_rate):
     """
     Train the projector component with comprehensive logging and monitoring
     
@@ -108,10 +109,21 @@ def train(model, train, test, epochs, output_dir):
     
     optimizer = optim.AdamW(
         model.projector.parameters(),
-        lr=2e-3,      
-        weight_decay=0.0  
+        lr=learning_rate,
+        weight_decay=0.0
     )
-    
+
+    # Scheduler setup (cosine with hard restarts and warmup)
+    steps_per_epoch = len(train) // 32 if hasattr(train, '__len__') else 1000  # fallback if train is not a Dataset
+    num_training_steps = epochs * steps_per_epoch
+    warmup_steps = max(100, int(0.05 * num_training_steps))
+    scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=num_training_steps,
+        num_cycles=1
+    )
+
     # initialize mixed precision scaler
     scaler = GradScaler("cuda") if torch.cuda.is_available() else None
     logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
@@ -215,10 +227,10 @@ def train(model, train, test, epochs, output_dir):
             if batch_idx % 128 == 0:
                 batch_time = time.time() - batch_start_time
                 samples_per_sec = len(vision_features) / max(batch_time, 1e-6)
-                
+                current_lr = scheduler.get_last_lr()[0]
                 logger.info(f"Epoch {epoch+1}/{epochs} Batch {batch_idx}/{len(train_loader)}: "
                            f"Loss={loss.item():.4f}, Sim={similarity:.3f}, "
-                           f"GradNorm={grad_norm:.2e}, Speed={samples_per_sec:.1f} samples/s")
+                           f"GradNorm={grad_norm:.2e}, Speed={samples_per_sec:.1f} samples/s, LR={current_lr:.2e}")
             
             # checkpoint every 512 batches using training loss
             if batch_idx > 0 and batch_idx % 512 == 0:
@@ -232,6 +244,9 @@ def train(model, train, test, epochs, output_dir):
                     os.makedirs(best_model_dir, exist_ok=True)
                     model.save_pretrained(best_model_dir)
                     logger.info(f"NEW BEST MODEL at batch {batch_idx}: Train Loss={current_train_loss:.4f}")
+            
+            # Step the scheduler after each optimizer step
+            scheduler.step()
         
 
         # validation phase
@@ -315,21 +330,30 @@ def main():
     parser = argparse.ArgumentParser(description="Train BBOB projector")
     parser.add_argument("-m", "--model", required=True, help="Model location/path")
     parser.add_argument("-d", "--dataset", required=True, help="Dataset location/path")
-    parser.add_argument("-e", "--epochs", type=int, default=100, help="Maximum number of training epochs (default: 100)")
+    parser.add_argument("-e", "--epochs", type=int, default=1, help="Maximum number of training epochs (default: 1)")
     parser.add_argument("-v", "--vision_tower", required=True, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
+    parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
     args = parser.parse_args()
     
-    print(f"Loading model from: {args.model}")
-    print(f"Loading dataset from: {args.dataset}")
-    print(f"Training for max {args.epochs} epochs")
-    print(f"Vision tower: {args.vision_tower}")
-    print(f"Instruction: {args.instruction}")
-
     # create output directory 
     current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_dir = f"Output/{current_datetime}"
     os.makedirs(output_dir, exist_ok=True)
+
+    # add file handler for logging to file
+    logfile = os.path.join(output_dir, "training.log")
+    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(logfile) for h in logger.handlers):
+        file_handler = logging.FileHandler(logfile)
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(file_handler)
+
+    logger.info(f"Loading model from: {args.model}")
+    logger.info(f"Loading dataset from: {args.dataset}")
+    logger.info(f"Training for max {args.epochs} epochs")
+    logger.info(f"Vision tower: {args.vision_tower}")
+    logger.info(f"Instruction: {args.instruction}")
 
     # load model
     model = load_model(args.model, args.vision_tower, None)
@@ -340,13 +364,13 @@ def main():
     model.freeze_vision_tower() 
     model.unfreeze_projector()
 
-    train(model, train_dataset, test_dataset, args.epochs, output_dir)
+    train(model, train_dataset, test_dataset, args.epochs, output_dir, args.lr)
 
     # save final model in main output directory
-    print(f"Saving final model to: {output_dir}")
+    logger.info(f"Saving final model to: {output_dir}")
     model.save_pretrained(output_dir)
 
-    print("Projector training is complete, model successfully saved.")
+    logger.info("Projector training is complete, model successfully saved.")
     return
 
 if __name__ == "__main__":

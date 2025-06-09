@@ -99,6 +99,37 @@ def normalize_coco_bboxes(bboxes, img_width, img_height):
         ])
     return torch.tensor(bboxes_norm, dtype=torch.float32)
 
+def letterbox_image(image, target_size=(256, 256)):
+    """Resize image with unchanged aspect ratio using padding."""
+    iw, ih = image.size
+    w, h = target_size
+    scale = min(w / iw, h / ih)
+    nw = int(iw * scale)
+    nh = int(ih * scale)
+    image = image.resize((nw, nh), Image.BICUBIC)
+    new_image = Image.new('RGB', target_size, (128, 128, 128))
+    pad_w = (w - nw) // 2
+    pad_h = (h - nh) // 2
+    new_image.paste(image, (pad_w, pad_h))
+    return new_image, scale, pad_w, pad_h
+
+def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h):
+    """Adjust [x, y, w, h] boxes for letterbox resize and normalize to padded image size."""
+    adjusted = []
+    for x, y, w, h in boxes:
+        x = x * scale + pad_w
+        y = y * scale + pad_h
+        w = w * scale
+        h = h * scale
+        # Normalize to new image size
+        adjusted.append([
+            x / target_w,
+            y / target_h,
+            w / target_w,
+            h / target_h
+        ])
+    return torch.tensor(adjusted, dtype=torch.float32)
+
 def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category_mapping=None, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False):
     """
     Process a batch of multimodal data through vision encoder and tokenizer
@@ -134,6 +165,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
     try:
         processed_images = []
         image_sizes = []
+        letterbox_params = []
         for img in images:
             try:
                 if hasattr(img, 'mode') and img.mode != 'RGB':
@@ -142,24 +174,34 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
                         img.paste(img, mask=img.split()[-1])
                     else:
                         img = img.convert('RGB')
+                orig_size = img.size
+                img, scale, pad_w, pad_h = letterbox_image(img, target_size=(256, 256))
                 processed_images.append(img)
-                image_sizes.append(img.size)  # (width, height)
+                image_sizes.append(orig_size)  # store original size for box adjustment
+                letterbox_params.append((scale, pad_w, pad_h, orig_size[0], orig_size[1], 256, 256))
             except Exception as e:
                 warnings.warn(f"Format conversion failed: {e}. Using fallback.")
                 try:
                     if hasattr(img, 'convert'):
                         img_rgb = img.convert('RGB')
+                        orig_size = img_rgb.size
+                        img_rgb, scale, pad_w, pad_h = letterbox_image(img_rgb, target_size=(256, 256))
                         processed_images.append(img_rgb)
-                        image_sizes.append(img_rgb.size)
+                        image_sizes.append(orig_size)
+                        letterbox_params.append((scale, pad_w, pad_h, orig_size[0], orig_size[1], 256, 256))
                     else:
                         processed_images.append(img)
                         image_sizes.append((256, 256))
+                        letterbox_params.append((1.0, 0, 0, 256, 256, 256, 256))
                 except:
                     processed_images.append(Image.new('RGB', (256, 256), (0, 0, 0)))
                     image_sizes.append((256, 256))
+                    letterbox_params.append((1.0, 0, 0, 256, 256, 256, 256))
     except Exception as e:
         warnings.warn(f"Image processing failed: {e}. Using original images.")
         processed_images = images
+        image_sizes = [(256, 256)] * len(images)
+        letterbox_params = [(1.0, 0, 0, 256, 256, 256, 256)] * len(images)
     
     # process images through vision encoder in GPU sub-batches
     device = next(vision_encoder.parameters()).device
@@ -209,18 +251,18 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
         "vision_features": vision_features,
         "input_ids": tokenized_text["input_ids"].cpu(),
         "attention_mask": tokenized_text["attention_mask"].cpu(),
-        "target_boxes": [],
-        "target_labels": []
     }
 
     # apply augmentations to objects
     if "objects" in batch:
-        img_w, img_h = image_sizes[0]
-        for sample in batch["objects"]:
+        result["target_boxes"] = []
+        result["target_labels"] = []
+        for i, sample in enumerate(batch["objects"]):
             bboxes = sample["bbox"]
+            scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h = letterbox_params[i]
             if training:
-                bboxes = jitter_bboxes(bboxes, img_w, img_h, jitter_ratio=bbox_jitter_ratio)
-            bboxes = normalize_coco_bboxes(bboxes, img_w, img_h)
+                bboxes = jitter_bboxes(bboxes, orig_w, orig_h, jitter_ratio=bbox_jitter_ratio)
+            bboxes = adjust_boxes_for_letterbox(bboxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h)
             sample_boxes = []
             sample_labels = []
             for bbox, category in zip(bboxes, sample["category"]):
@@ -228,9 +270,26 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
                 sample_labels.append(category)
             result["target_boxes"].append(sample_boxes)
             result["target_labels"].append(sample_labels)
-    
+
+    # Add target_text from COCO sentences if present
+    if "sentences" in batch:
+        # batch["sentences"] is a list of lists of dicts (one per sample)
+        target_texts = []
+        for sent_list in batch["sentences"]:
+            if isinstance(sent_list, list):
+                all_texts = [s["raw"] for s in sent_list if "raw" in s]
+                target_text = " ".join(all_texts)
+            else:
+                # fallback: single dict
+                target_text = sent_list.get("raw", "")
+            # Tokenize
+            tokenized = tokenizer(target_text, return_tensors="pt", max_length=128, truncation=True, padding="max_length")
+            target_texts.append(tokenized["input_ids"].squeeze(0))
+        result["target_text"] = torch.stack(target_texts)
+
     # Store image sizes for denormalization during evaluation
-    result["image_size"] = image_sizes
+    result["image_sizes"] = image_sizes  # original sizes
+    result["padded_image_sizes"] = [(256, 256)] * len(processed_images)  # always 256x256 for letterbox
 
     return result
 
@@ -284,7 +343,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size}, GPU batch={gpu_batch_size})",
-        load_from_cache_file=True
+        load_from_cache_file=False
     )
 
     return dataset

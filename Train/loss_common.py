@@ -9,36 +9,45 @@ from scipy.optimize import linear_sum_assignment
 
 class CompositeLoss(nn.Module):
     """
-    Composite loss combining language modeling, classification, and bounding box losses for multi-object detection.
-    Supports joint supervision of output format (text) and detection/classification accuracy.
+    Composite loss for multimodal object detection and language modeling.
+    Combines language modeling loss, classification loss, and bounding box regression loss.
+    Supports Hungarian matching for object assignment and applies penalties for unmatched predictions/ground truths.
     """
-    def __init__(self, classification_weight=0.0, coordinate_weight=0.7, iou_weight=0.75, l1_weight=0.25, lm_weight=0.2, detection_weight=0.8):
+    def __init__(self, classification_weight=0.4, coordinate_weight=0.6, iou_weight=0.75, l1_weight=0.25, lm_weight=0.2, detection_weight=0.8):
+        """
+        Initialize the composite loss module.
+        Args:
+            classification_weight (float): Weight for classification loss.
+            coordinate_weight (float): Weight for bounding box regression loss.
+            iou_weight (float): Weight for IoU loss (relative to l1_weight).
+            l1_weight (float): Weight for L1 loss (relative to iou_weight).
+            lm_weight (float): Weight for language modeling loss.
+            detection_weight (float): Weight for detection/classification loss.
+        """
         super().__init__()
-        self.classification_weight = classification_weight  # Classification loss weight (default: 0.0)
-        self.coordinate_weight = coordinate_weight          # Bounding box loss weight (default: 0.7)
-        # normalize iou and l1 weights to sum to 1.0
+        self.classification_weight = classification_weight
+        self.coordinate_weight = coordinate_weight
+        # Normalize IoU and L1 weights to sum to 1.0
         total_coord_weight = iou_weight + l1_weight
-        self.iou_weight = iou_weight / total_coord_weight  # IoU loss weight (default: 0.75)
-        self.l1_weight = l1_weight / total_coord_weight    # L1 loss weight (default: 0.25)
-        self.lm_weight = lm_weight  # Language modeling loss weight (default: 0.2)
+        self.iou_weight = iou_weight / total_coord_weight
+        self.l1_weight = l1_weight / total_coord_weight
+        self.lm_weight = lm_weight
         self.detection_weight = detection_weight
 
     def parse_multi_object_from_text(self, text, class_map=None, reference_tensor=None):
         """
         Parse multiple objects (class and bbox) from a prediction string.
-        
-        Parameters:
-            - text: string containing zero or more 'Class: [x1, y1, x2, y2]' patterns
-            - class_map: dict mapping class names to integer labels (optional)
-            - reference_tensor: tensor to match dtype and device from (optional)
-            
+        Args:
+            text (str): String containing zero or more 'Class: [x1, y1, x2, y2]' patterns.
+            class_map (dict, optional): Mapping from class names to integer labels.
+            reference_tensor (Tensor, optional): Tensor to match dtype and device.
         Returns:
-            - classes: list of class indices (or names if class_map is None)
-            - boxes: tensor of shape [num_objects, 4] (or empty tensor)
+            classes (list): List of class indices (or names if class_map is None).
+            boxes (Tensor): Tensor of shape [num_objects, 4] (or empty tensor).
         """
         if not text:
             return [], torch.empty((0, 4), dtype=torch.float32)
-        # Pattern: Class: [x1, y1, x2, y2] (allow for multiple, separated by ; or newlines)
+        # Regex pattern for 'Class: [x1, y1, x2, y2]'
         pattern = r'([\w\- ]+):\s*[\[(](-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[\])]'  # noqa
         matches = re.findall(pattern, str(text))
         classes = []
@@ -46,14 +55,13 @@ class CompositeLoss(nn.Module):
         for match in matches:
             class_name = match[0].strip()
             coords = [float(match[i]) for i in range(1, 5)]
-            # basic sanity check
+            # Only keep boxes with positive area
             if coords[2] > coords[0] and coords[3] > coords[1]:
                 if class_map is not None:
                     classes.append(class_map.get(class_name, -1))
                 else:
                     classes.append(class_name)
                 boxes.append(coords)
-        # dtype
         dtype = reference_tensor.dtype if reference_tensor is not None else torch.float32
         if boxes:
             return classes, torch.tensor(boxes, dtype=dtype)
@@ -63,7 +71,11 @@ class CompositeLoss(nn.Module):
     def match_predictions_to_targets(self, pred_boxes, target_boxes):
         """
         Greedy IoU matching between predicted and target boxes.
-        Returns list of (pred_idx, target_idx) pairs.
+        Args:
+            pred_boxes (Tensor): Predicted boxes [N, 4].
+            target_boxes (Tensor): Ground truth boxes [M, 4].
+        Returns:
+            matches (list): List of (pred_idx, target_idx) pairs.
         """
         if len(pred_boxes) == 0 or len(target_boxes) == 0:
             return []
@@ -71,7 +83,7 @@ class CompositeLoss(nn.Module):
         matches = []
         used_pred = set()
         used_target = set()
-        # Greedy matching
+        # Greedy matching: repeatedly pick the highest IoU pair
         while True:
             max_iou = torch.max(ious)
             if max_iou <= 0:
@@ -89,7 +101,13 @@ class CompositeLoss(nn.Module):
         return matches
 
     def coco_to_corners(self, boxes):
-        """Convert [x, y, w, h] to [x1, y1, x2, y2] format."""
+        """
+        Convert bounding boxes from COCO format [x, y, w, h] to [x1, y1, x2, y2] format.
+        Args:
+            boxes (Tensor): [N, 4] boxes in COCO format.
+        Returns:
+            Tensor: [N, 4] boxes in corner format.
+        """
         if boxes.numel() == 0:
             return boxes
         x1 = boxes[..., 0]
@@ -100,28 +118,29 @@ class CompositeLoss(nn.Module):
 
     def forward(self, lm_logits, lm_labels, class_logits, box_preds, target_labels, target_boxes=None, target_text=None, class_map=None, return_components=False):
         """
-        Compute weighted combination of language modeling, classification, and bounding box losses.
-        Parameters:
-            - lm_logits: language model logits [B, seq_len, vocab_size]
-            - lm_labels: ground truth token ids [B, seq_len]
-            - class_logits: detection/classification logits [B, num_visual_tokens, num_classes]
-            - box_preds: predicted bounding boxes [B, num_visual_tokens, 4]
-            - target_labels: ground truth class indices [B, num_objects]
-            - target_boxes: ground truth boxes [B, num_objects, 4]
-            - target_text: (optional) ground truth text for parsing
-            - class_map: (optional) class name to index mapping
-            - return_components: whether to return granular loss components
+        Compute the total loss as a weighted sum of language modeling, classification, and bounding box losses.
+        Uses Hungarian matching for assignment and applies penalties for unmatched predictions/ground truths.
+        Args:
+            lm_logits (Tensor): Language model logits [B, seq_len, vocab_size].
+            lm_labels (Tensor): Ground truth token ids [B, seq_len].
+            class_logits (Tensor): Detection/classification logits [B, num_visual_tokens, num_classes].
+            box_preds (Tensor): Predicted bounding boxes [B, num_visual_tokens, 4].
+            target_labels (Tensor): Ground truth class indices [B, num_objects].
+            target_boxes (Tensor, optional): Ground truth boxes [B, num_objects, 4].
+            target_text (str, optional): Ground truth text for parsing (not used in this loss).
+            class_map (dict, optional): Class name to index mapping.
+            return_components (bool): Whether to return granular loss components for logging.
         Returns:
-            - total_loss: weighted sum of all losses
+            total_loss (Tensor): Weighted sum of all losses.
+            (If return_components=True, also returns metrics for logging.)
         """
         device = lm_logits.device
-        # Language modeling loss
+        # Language modeling loss (cross-entropy, ignoring -100 labels)
         lm_loss = nn.functional.cross_entropy(
             lm_logits.view(-1, lm_logits.size(-1)),
             lm_labels.view(-1),
             ignore_index=-100
         )
-        # Detection/classification loss (as before)
         batch_size = class_logits.shape[0]
         total_loss = 0.0
         total_correct_classes = 0
@@ -134,7 +153,7 @@ class CompositeLoss(nn.Module):
             pred_logits = class_logits[i]
             tgt_boxes = target_boxes[i] if target_boxes is not None else torch.empty((0, 4), dtype=box_preds.dtype, device=box_preds.device)
             tgt_classes = target_labels[i] if isinstance(target_labels[i], torch.Tensor) else torch.tensor(target_labels[i], device=pred_logits.device)
-            # --- Robust filtering: ignore pads (label == -100) and boxes with w==0 or h==0 ---
+            # Filter out padded labels and degenerate boxes
             if tgt_boxes.numel() > 0 and tgt_classes.numel() > 0:
                 valid_mask = (tgt_classes != -100) & (tgt_boxes[:, 2] > 0) & (tgt_boxes[:, 3] > 0)
                 tgt_boxes = tgt_boxes[valid_mask]
@@ -146,15 +165,15 @@ class CompositeLoss(nn.Module):
                 keep = (tgt_classes != -100)
                 tgt_classes = tgt_classes[keep]
             num_classes = pred_logits.shape[-1]
-            # --- Debug assertions for labels and boxes ---
+            # Sanity checks for labels and boxes
             if tgt_classes.numel() > 0:
                 assert not torch.isnan(tgt_classes).any(), f"NaN in target labels: {tgt_classes}"
                 assert not torch.isinf(tgt_classes).any(), f"Inf in target labels: {tgt_classes}"
                 assert ((tgt_classes == -100) | ((tgt_classes >= 0) & (tgt_classes < num_classes))).all(), f"Invalid target label: {tgt_classes}, num_classes: {num_classes}"
-            # Convert to [x1, y1, x2, y2] for IoU/loss
+            # Convert boxes to [x1, y1, x2, y2] for IoU/loss
             pred_boxes_corners = self.coco_to_corners(pred_boxes)
             tgt_boxes_corners = self.coco_to_corners(tgt_boxes)
-            # --- Debug assertions for boxes ---
+            # Sanity checks for boxes
             for box_tensor, name in [(pred_boxes_corners, 'pred_boxes'), (tgt_boxes_corners, 'tgt_boxes')]:
                 if box_tensor.numel() > 0:
                     assert not torch.isnan(box_tensor).any(), f"NaN in {name}: {box_tensor}"
@@ -162,7 +181,7 @@ class CompositeLoss(nn.Module):
             total_gt_objects += len(tgt_classes)
             if len(tgt_boxes) > 0 and len(pred_boxes) > 0 and len(tgt_classes) > 0:
                 ious = torchvision.ops.box_iou(pred_boxes_corners, tgt_boxes_corners)
-                # Hungarian matching
+                # Hungarian matching for optimal assignment
                 cost_matrix = -ious.detach().cpu().numpy()  # maximize IoU = minimize -IoU
                 pred_indices, target_indices = linear_sum_assignment(cost_matrix)
                 matches = []
@@ -174,11 +193,13 @@ class CompositeLoss(nn.Module):
                         used_pred.add(p)
                         used_target.add(t)
                 for pred_idx, tgt_idx in matches:
+                    # Classification loss for matched pairs
                     classification_loss = nn.functional.cross_entropy(
                         pred_logits[pred_idx].unsqueeze(0),
                         tgt_classes[tgt_idx].unsqueeze(0),
                         reduction='mean'
                     )
+                    # Bounding box regression losses (IoU and L1)
                     iou_loss = torchvision.ops.generalized_box_iou_loss(
                         pred_boxes_corners[pred_idx].unsqueeze(0),
                         tgt_boxes_corners[tgt_idx].unsqueeze(0),
@@ -191,7 +212,7 @@ class CompositeLoss(nn.Module):
                     )
                     bbox_loss = self.coordinate_weight * (self.iou_weight * iou_loss + self.l1_weight * l1_loss)
                     total_loss += self.classification_weight * classification_loss + bbox_loss
-                    # Metrics
+                    # Metrics for logging
                     pred_class = pred_logits[pred_idx].argmax().item()
                     true_class = tgt_classes[tgt_idx].item() if isinstance(tgt_classes, torch.Tensor) else tgt_classes[tgt_idx]
                     if pred_class == true_class:
@@ -202,39 +223,43 @@ class CompositeLoss(nn.Module):
                     total_iou_sum += iou
                     total_iou_matches += 1
                     total_l1_sum += l1_loss.item()
-                # Penalize unmatched predictions (false positives)
+                # Penalties for unmatched predictions (false positives)
                 unmatched_preds = set(range(len(pred_boxes))) - used_pred
                 for pred_idx in unmatched_preds:
-                    unmatched_penalty = 0.2 * self.coordinate_weight * self.l1_weight
-                    unmatched_cls_penalty = 0.2 * self.classification_weight
+                    unmatched_penalty = 0.15 * self.coordinate_weight * self.l1_weight  # Penalty for unmatched box
+                    unmatched_cls_penalty = 0.075 * self.classification_weight  # Penalty for unmatched class
                     total_loss += unmatched_penalty
                     total_loss += unmatched_cls_penalty
-                # Penalize unmatched ground truths (false negatives)
+                # Penalties for unmatched ground truths (false negatives)
                 unmatched_targets = set(range(len(tgt_boxes))) - used_target
                 for tgt_idx in unmatched_targets:
-                    unmatched_penalty = 0.2 * self.coordinate_weight * self.l1_weight
-                    unmatched_cls_penalty = 0.2 * self.classification_weight
+                    unmatched_penalty = 0.15 * self.coordinate_weight * self.l1_weight
+                    unmatched_cls_penalty = 0.075 * self.classification_weight
                     total_loss += unmatched_penalty
                     total_loss += unmatched_cls_penalty
             elif len(pred_boxes) > 0 and len(tgt_boxes) > 0 and len(tgt_classes) == 0:
                 # No valid targets, skip loss computation for this sample
                 continue
             elif len(pred_boxes) > 0 and len(tgt_boxes) == 0:
+                # All predictions are unmatched (false positives)
                 for _ in range(len(pred_boxes)):
-                    unmatched_penalty = 0.2 * self.coordinate_weight * self.l1_weight
-                    unmatched_cls_penalty = 0.2 * self.classification_weight
+                    unmatched_penalty = 0.15 * self.coordinate_weight * self.l1_weight
+                    unmatched_cls_penalty = 0.075 * self.classification_weight
                     total_loss += unmatched_penalty
                     total_loss += unmatched_cls_penalty
             elif len(pred_boxes) == 0 and len(tgt_boxes) > 0:
+                # All ground truths are unmatched (false negatives)
                 for tgt_idx in range(len(tgt_boxes)):
-                    unmatched_penalty = 0.2 * self.coordinate_weight * self.l1_weight
-                    unmatched_cls_penalty = 0.2 * self.classification_weight
+                    unmatched_penalty = 0.15 * self.coordinate_weight * self.l1_weight
+                    unmatched_cls_penalty = 0.075 * self.classification_weight
                     total_loss += unmatched_penalty
                     total_loss += unmatched_cls_penalty
+        # Normalize detection loss by number of matches (or batch size if no matches)
         if total_iou_matches > 0:
             detection_loss = total_loss / total_iou_matches
         else:
             detection_loss = total_loss / batch_size if batch_size > 0 else torch.tensor(1.0, device=device, requires_grad=True)
+        # Weighted sum of language modeling and detection/classification loss
         total_loss = self.lm_weight * lm_loss + self.detection_weight * detection_loss
         if return_components:
             return (total_loss, total_correct_classes, total_gt_objects, total_iou_sum, total_iou_matches, total_l1_sum)
@@ -246,14 +271,12 @@ class CompositeLoss(nn.Module):
         """
         Compute mean IoU between predicted and target boxes for validation.
         Parses all objects from both texts and matches them by greedy IoU.
-        
-        Parameters:
-            - pred_text: predicted text string (multi-object)
-            - target_text: ground truth text string (multi-object)
-            - class_map: dict mapping class names to integer labels (optional)
-            
+        Args:
+            pred_text (str): Predicted text string (multi-object).
+            target_text (str): Ground truth text string (multi-object).
+            class_map (dict, optional): Class name to index mapping.
         Returns:
-            - mean_iou: mean IoU over matched pairs (float)
+            mean_iou (float): Mean IoU over matched pairs.
         """
         def parse(text):
             pattern = r'([\w\- ]+):\s*[\[(](-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?),?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)[\])]'  # noqa

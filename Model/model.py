@@ -504,6 +504,14 @@ class BBOB(nn.Module):
         projector_path = os.path.join(save_directory, 'projector.pth')
         torch.save(self.projector.state_dict(), projector_path)
         print(f"Saved projector to {projector_path}")
+
+        # save detection and bbox heads
+        detection_head_path = os.path.join(save_directory, 'detection_head.pth')
+        torch.save(self.detection_head.state_dict(), detection_head_path)
+        print(f"Saved detection head to {detection_head_path}")
+        bbox_head_path = os.path.join(save_directory, 'bbox_head.pth')
+        torch.save(self.bbox_head.state_dict(), bbox_head_path)
+        print(f"Saved bbox head to {bbox_head_path}")
         
         # optionally save base model (usually unnecessary as it's a standard model)
         if save_base_model:
@@ -518,7 +526,18 @@ class BBOB(nn.Module):
             self.vision_encoder.save_pretrained(vision_path)
             self.image_processor.save_pretrained(vision_path)
             print(f"Saved vision encoder to {vision_path}")
-            
+        
+        # Save LoRA adapters if present
+        try:
+            from peft import PeftModel
+            if isinstance(self.base_model, PeftModel):
+                lora_adapter_path = os.path.join(save_directory, 'lora_adapter')
+                os.makedirs(lora_adapter_path, exist_ok=True)
+                self.base_model.save_pretrained(lora_adapter_path)
+                print(f"Saved LoRA adapter(s) to {lora_adapter_path}")
+        except ImportError:
+            pass
+        
         print(f"Model saved to {save_directory}")
 
     @classmethod
@@ -584,6 +603,24 @@ class BBOB(nn.Module):
             print(f"Loaded projector from {projector_path}")
         else:
             print(f"Warning: No projector weights found at {projector_path}")
+
+        # load detection head weights if present
+        detection_head_path = os.path.join(model_path, 'detection_head.pth')
+        if os.path.exists(detection_head_path):
+            detection_head_state = torch.load(detection_head_path, map_location='cpu')
+            model.detection_head.load_state_dict(detection_head_state)
+            print(f"Loaded detection head from {detection_head_path}")
+        else:
+            print(f"Warning: No detection head weights found at {detection_head_path}")
+
+        # load bbox head weights if present
+        bbox_head_path = os.path.join(model_path, 'bbox_head.pth')
+        if os.path.exists(bbox_head_path):
+            bbox_head_state = torch.load(bbox_head_path, map_location='cpu')
+            model.bbox_head.load_state_dict(bbox_head_state)
+            print(f"Loaded bbox head from {bbox_head_path}")
+        else:
+            print(f"Warning: No bbox head weights found at {bbox_head_path}")
         
         return model
 
@@ -621,4 +658,69 @@ class BBOB(nn.Module):
         # Move detection head to same device as projector
         device = next(self.projector.parameters()).device
         self.detection_head = self.detection_head.to(device)
+        
+    def load_lora_adapter(self, adapter_path, adapter_name="default"):
+        """
+        Load a LoRA adapter into the base model using PEFT.
+        If the base model is already a PeftModel (i.e., already has a LoRA adapter),
+        this will add the new adapter with the given name. Otherwise, it wraps the base model.
+
+        Parameters:
+            - adapter_path: path to the directory containing the LoRA adapter (e.g., 'Tuning/2025-06-07_02-36-15/lora_adapter')
+            - adapter_name: name to assign to this adapter (default: "default")
+
+        Usage:
+            model = BBOB.from_pretrained(...)
+            model.load_lora_adapter('path/to/lora_adapter', adapter_name="my_adapter")
+        """
+        try:
+            from peft import PeftModel, PeftConfig
+        except ImportError:
+            raise ImportError("peft is required to load LoRA adapters. Please install with 'pip install peft'.")
+        if isinstance(self.base_model, PeftModel):
+            # Already a PeftModel, add new adapter (multi-adapter support)
+            config = PeftConfig.from_pretrained(adapter_path)
+            self.base_model.add_adapter(adapter_name, config)
+            self.base_model.load_adapter(adapter_path, adapter_name)
+            print(f"Added LoRA adapter '{adapter_name}' from {adapter_path}")
+        else:
+            # Not a PeftModel, wrap with first adapter
+            self.base_model = PeftModel.from_pretrained(self.base_model, adapter_path, adapter_name=adapter_name)
+            print(f"Loaded LoRA adapter '{adapter_name}' from {adapter_path}")
+        
+    def get_model_size(self):
+        """
+        Print the size (in MB) of all major model components.
+        """
+        import sys
+        def size_of_module(module):
+            total = 0
+            for p in module.parameters():
+                total += p.numel() * p.element_size()
+            return total / (1024 ** 2)  # MB
+
+        print("Model size breakdown (MB):")
+        print(f"  base_model:      {size_of_module(self.base_model):.2f} MB")
+        print(f"  vision_encoder:  {size_of_module(self.vision_encoder):.2f} MB")
+        print(f"  projector:       {size_of_module(self.projector):.2f} MB")
+        print(f"  detection_head:  {size_of_module(self.detection_head):.2f} MB")
+        print(f"  bbox_head:       {size_of_module(self.bbox_head):.2f} MB")
+        # LoRA adapters (if present)
+        try:
+            from peft import PeftModel
+            if isinstance(self.base_model, PeftModel):
+                print("  LoRA adapters:")
+                for name, adapter in self.base_model.peft_config.items():
+                    adapter_size = 0
+                    for n, p in self.base_model.named_parameters():
+                        if n.startswith(f"peft.{name}"):
+                            adapter_size += p.numel() * p.element_size()
+                    print(f"    {name}: {adapter_size / (1024 ** 2):.2f} MB")
+        except ImportError:
+            pass
+        print("-----------------------------")
+        total = (size_of_module(self.base_model) + size_of_module(self.vision_encoder) +
+                 size_of_module(self.projector) + size_of_module(self.detection_head) +
+                 size_of_module(self.bbox_head))
+        print(f"  Total (excluding LoRA): {total:.2f} MB")
         

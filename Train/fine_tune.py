@@ -213,9 +213,10 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                 period_cls_acc = period_cls_correct / max(period_cls_total, 1)
                 period_mean_iou = period_iou_sum / max(period_iou_count, 1)
                 period_mean_iou = min(max(period_mean_iou, 0.0), 1.0)
+                percent_matched = (period_iou_count / period_cls_total) if period_cls_total > 0 else 0.0
                 logger.info(f"[TRAIN] Epoch {epoch+1}/{epochs} | Step {global_step} | Batch {batch_idx}/{len(train_loader)} | "
                             f"Loss: {loss_tuple[0].item() * gradient_accumulation_steps:.4f} | ClsAcc: {period_cls_acc:.4f} | MeanIoU: {period_mean_iou:.4f} | "
-                            f"IoU Matches: {period_iou_count} | GT Objects: {period_cls_total} | "
+                            f"IoU Matches: {period_iou_count} | GT Objects: {period_cls_total} | %Matched: {percent_matched:.2%} | "
                             f"GradNorm: {grad_norm:.2e} | Speed: {samples_per_sec:.1f} samples/s | LR: {scheduler.get_last_lr()[0]:.2e}")
                 # Reset period counters
                 period_cls_correct = 0
@@ -256,13 +257,15 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                                 val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
                                 val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
                                 val_mean_iou = min(max(val_mean_iou, 0.0), 1.0)
+                                val_percent_matched = (period_iou_matches / period_cls_total) if period_cls_total > 0 else 0.0
                                 logger.info(f"[VAL]   Epoch {epoch+1}/{epochs} | Step {global_step} | ValBatch {val_batch_idx}/{len(test_loader)} | "
-                                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {val_loss_tuple[2]} | L1: {val_loss_tuple[5]:.4f} | Speed: {val_sps:.1f} samples/s")
+                                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {val_loss_tuple[2]} | L1: {val_loss_tuple[5]:.4f} | %Matched: {val_percent_matched:.2%} | Speed: {val_sps:.1f} samples/s")
                     avg_val_loss = total_val_loss / max(val_batches, 1)
                     avg_val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
                     avg_val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
                     avg_val_mean_iou = min(max(avg_val_mean_iou, 0.0), 1.0)
                     avg_val_l1 = total_val_l1 / max(val_batches, 1)
+                    avg_val_percent_matched = (total_val_iou_count / total_val_cls_total) if total_val_cls_total > 0 else 0.0
                     if avg_val_loss < best_val_loss:
                         best_val_loss = avg_val_loss
                         best_model_dir = f"{checkpoint_dir}/best_model-step_{global_step}"
@@ -270,7 +273,7 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                         model.save_pretrained(best_model_dir)
                         if hasattr(model.base_model, 'save_pretrained'):
                             model.base_model.save_pretrained(os.path.join(best_model_dir, 'lora_adapter'))
-                        logger.info(f"[CHECKPOINT] NEW BEST MODEL at step {global_step} | Val Loss: {avg_val_loss:.4f} | ClsAcc: {avg_val_cls_acc:.4f} | MeanIoU: {avg_val_mean_iou:.4f} | L1: {avg_val_l1:.4f}")
+                        logger.info(f"[CHECKPOINT] NEW BEST MODEL at step {global_step} | Val Loss: {avg_val_loss:.4f} | ClsAcc: {avg_val_cls_acc:.4f} | MeanIoU: {avg_val_mean_iou:.4f} | L1: {avg_val_l1:.4f} | %Matched: {avg_val_percent_matched:.2%}")
                     current_dir = f"{checkpoint_dir}/latest-step_{global_step}"
                     os.makedirs(current_dir, exist_ok=True)
                     model.save_pretrained(current_dir)
@@ -284,8 +287,9 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
         avg_train_l1 = total_l1 / max(len(train_loader), 1)
         param_norm = compute_parameter_norm(model)
         epoch_time = time.time() - epoch_start_time
+        avg_percent_matched = (total_iou_count / total_cls_total) if total_cls_total > 0 else 0.0
         logger.info(f"=== EPOCH {epoch+1}/{epochs} SUMMARY ===")
-        logger.info(f"Losses: Train={avg_train_loss:.4f}, ClsAcc={avg_train_cls_acc:.4f}, MeanIoU={avg_train_mean_iou:.4f}, L1={avg_train_l1:.4f}")
+        logger.info(f"Losses: Train={avg_train_loss:.4f}, ClsAcc={avg_train_cls_acc:.4f}, MeanIoU={avg_train_mean_iou:.4f}, L1={avg_train_l1:.4f}, %Matched={avg_percent_matched:.2%}")
         logger.info(f"Model: ParamNorm={param_norm:.3f}, LR={scheduler.get_last_lr()[0]:.2e}")
         logger.info(f"Performance: EpochTime={epoch_time:.1f}s")
         # End of validation phase
@@ -322,8 +326,9 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                 val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
                 val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
                 val_mean_iou = min(max(val_mean_iou, 0.0), 1.0)
+                val_percent_matched = (period_iou_matches / period_cls_total) if period_cls_total > 0 else 0.0
                 logger.info(f"[VAL-FINAL] ValBatch {val_batch_idx}/{len(test_loader)} | "
-                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | L1: {val_loss_tuple[5]:.4f} | Speed: {val_sps:.1f} samples/s")
+                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | L1: {val_loss_tuple[5]:.4f} | %Matched: {val_percent_matched:.2%} | Speed: {val_sps:.1f} samples/s")
     avg_val_loss = total_val_loss / max(val_batches, 1)
     avg_val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
     avg_val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
@@ -334,6 +339,8 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
     logger.info(f"Total time: {total_time:.1f}s ({total_time/60:.1f}min)")
     logger.info(f"Best validation loss: {best_val_loss:.4f}")
     logger.info(f"Final val loss: {avg_val_loss:.4f}, ClsAcc={avg_val_cls_acc:.4f}, MeanIoU={avg_val_mean_iou:.4f}, L1={avg_val_l1:.4f}")
+    avg_val_percent_matched = (total_val_iou_count / total_val_cls_total) if total_val_cls_total > 0 else 0.0
+    logger.info(f"[VAL]   Epoch {epoch+1}/{epochs} SUMMARY | Loss: {avg_val_loss:.4f} | ClsAcc: {avg_val_cls_acc:.4f} | MeanIoU: {avg_val_mean_iou:.4f} | L1: {avg_val_l1:.4f} | %Matched: {avg_val_percent_matched:.2%}")
     # End of epoch
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -341,10 +348,10 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
     return
     
 def denormalize_bboxes(bboxes, img_w, img_h):
-    """Convert normalized bboxes [N, 4] to pixel coordinates."""
+    """Convert normalized bboxes [N, 4] to COCO pixel coordinates [x, y, w, h]."""
     if isinstance(bboxes, torch.Tensor):
         bboxes = bboxes.cpu().numpy()
-    return [[x1*img_w, y1*img_h, x2*img_w, y2*img_h] for x1, y1, x2, y2 in bboxes]
+    return [[x*img_w, y*img_h, w*img_w, h*img_h] for x, y, w, h in bboxes]
 
 def evaluate_on_test_set(model, test_dataset, batch_size=32, class_map=None):
     """Evaluate on test set: mean IoU, classification, IoU, and L1 loss."""
@@ -378,11 +385,14 @@ def evaluate_on_test_set(model, test_dataset, batch_size=32, class_map=None):
             box_preds = outputs["box_preds"]
             target_labels = batch["target_labels"]
             target_boxes = batch["target_boxes"]
+            batch_iou_matches = 0
+            batch_gt_objects = 0
             for i in range(class_logits.shape[0]):
                 pred_boxes = box_preds[i]
                 pred_logits = class_logits[i]
                 tgt_boxes = target_boxes[i]
                 tgt_classes = target_labels[i]
+                batch_gt_objects += len(tgt_classes)
                 total_gt_objects += len(tgt_classes)
                 if len(tgt_boxes) > 0 and len(pred_boxes) > 0:
                     ious = torchvision.ops.box_iou(pred_boxes, tgt_boxes)
@@ -410,14 +420,18 @@ def evaluate_on_test_set(model, test_dataset, batch_size=32, class_map=None):
                             total_correct_classes += 1
                         pred_box = pred_boxes[pred_idx].unsqueeze(0)
                         tgt_box = tgt_boxes[tgt_idx].unsqueeze(0)
-                        iou = torchvision.ops.box_iou(pred_box, tgt_box)[0, 0].item()
-                        total_iou += iou
                         total_iou_matches += 1
-    mean_iou = total_iou / max(total_iou_matches, 1)
-    mean_iou = min(max(mean_iou, 0.0), 1.0)
-    class_acc = total_correct_classes / max(total_gt_objects, 1)
-    logger.info(f"[TEST] MeanIoU: {mean_iou:.4f} | ClassAcc: {class_acc:.4f} | IoU Matches: {total_iou_matches} | GT Objects: {total_gt_objects}")
-    return mean_iou
+                        batch_iou_matches += 1
+            # Optionally log per-batch % matched
+            percent_matched = (batch_iou_matches / batch_gt_objects) if batch_gt_objects > 0 else 0.0
+            logger.info(f"[EVAL] Batch {batch_idx+1}/{len(test_loader)} | IoU Matches: {batch_iou_matches} | GT Objects: {batch_gt_objects} | %Matched: {percent_matched:.2%}")
+    eval_time = time.time() - eval_start_time
+    avg_percent_matched = (total_iou_matches / total_gt_objects) if total_gt_objects > 0 else 0.0
+    logger.info(f"=== FINAL EVALUATION SUMMARY ===")
+    logger.info(f"Total IoU Matches: {total_iou_matches}")
+    logger.info(f"Total GT Objects: {total_gt_objects}")
+    logger.info(f"Average %Matched: {avg_percent_matched:.2%}")
+    logger.info(f"Evaluation time: {eval_time:.1f}s")
 
 def main():
     parser = argparse.ArgumentParser(description="Fine-tune BBOB with LoRA")
@@ -428,7 +442,7 @@ def main():
     parser.add_argument("--lora_rank", type=int, default=64, help="LoRA rank (default: 64)")
     parser.add_argument("--lora_alpha", type=int, default=128, help="LoRA alpha (default: 128)")
     parser.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
-    parser.add_argument("--learning_rate", type=float, default=2e-5, help="Learning rate (default: 2e-5)")
+    parser.add_argument("--learning_rate", type=float, default=6e-4, help="Learning rate (default: 6e-4)")
     parser.add_argument("--bias", type=str, default="lora_only", help="LoRA bias type: 'none', 'all', or 'lora_only' (default: 'lora_only')")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size (default: 32)")
     parser.add_argument("--warmup_steps", type=int, default=64, help="Warmup steps (default: 64)")
@@ -436,24 +450,9 @@ def main():
     parser.add_argument("-e", "--epochs", type=int, default=1, help="Number of training epochs (default: 1)")
     parser.add_argument("--max_steps", type=int, default=2048, help="Maximum number of training steps (default: 2048)")
     parser.add_argument("--label_file", type=str, default=None, help="Optional path to YAML label file")
+    parser.add_argument("--lora_adapter", type=str, default=None, help="Optional path to a LoRA adapter directory to load into the model at startup")
 
     args = parser.parse_args()
-
-    print(f"Loading model from: {args.model}")
-    print(f"Loading dataset from: {args.dataset}")
-    print(f"Vision tower: {args.vision_tower}")
-    print(f"Instruction: {args.instruction}")
-    print(f"LoRA config: rank={args.lora_rank}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
-    print(f"Training config: lr={args.learning_rate}, batch_size={args.batch_size}, grad_accum={args.gradient_accumulation_steps}")
-    print(f"Bias: {args.bias}")
-    print(f"\n Beginning fine tuning on {args.dataset}")
-
-    label_dict = None
-    if args.label_file is not None:
-        from train_common import load_labels_from_yaml
-        label_dict = load_labels_from_yaml(args.label_file)
-        print(f"Loaded labels from {args.label_file}: {label_dict}")
-        logger.info(f"Loaded labels from {args.label_file}: {label_dict}")
 
     current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     output_dir = f"Tuning/{current_datetime}"
@@ -467,7 +466,25 @@ def main():
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(file_handler)
 
+    logger.info(f"Loading model from: {args.model}")
+    logger.info(f"Loading dataset from: {args.dataset}")
+    logger.info(f"Vision tower: {args.vision_tower}")
+    logger.info(f"Instruction: {args.instruction}")
+    logger.info(f"LoRA config: rank={args.lora_rank}, alpha={args.lora_alpha}, dropout={args.lora_dropout}")
+    logger.info(f"Training config: lr={args.learning_rate}, batch_size={args.batch_size}, grad_accum={args.gradient_accumulation_steps}")
+    logger.info(f"Bias: {args.bias}")
+    logger.info(f"\n Beginning fine tuning on {args.dataset}")
+
+    label_dict = None
+    if args.label_file is not None:
+        from train_common import load_labels_from_yaml
+        label_dict = load_labels_from_yaml(args.label_file)
+        logger.info(f"Loaded labels from {args.label_file}: {label_dict}")
+
     model = BBOB.from_pretrained(args.model, num_classes=80)
+    if args.lora_adapter is not None:
+        logger.info(f"Loading LoRA adapter from {args.lora_adapter}")
+        model.load_lora_adapter(args.lora_adapter)
     train_dataset, test_dataset = load_and_prepare_dataset(
         args.dataset,
         model.get_tokenizer(),
@@ -481,7 +498,7 @@ def main():
     validation_dataset = split['train']
     final_test_dataset = split['test']
 
-    print(f"Train set: {len(train_dataset)} samples, Validation set: {len(validation_dataset)} samples, Test set: {len(final_test_dataset)} samples")
+    logger.info(f"Train set: {len(train_dataset)} samples, Validation set: {len(validation_dataset)} samples, Test set: {len(final_test_dataset)} samples")
 
 
     model.unfreeze_model()
@@ -507,11 +524,11 @@ def main():
         class_map=label_dict
     )
 
-    print(f"Saving final model to: {output_dir}")
+    logger.info(f"Saving final model to: {output_dir}")
     model.save_pretrained(output_dir)
     if hasattr(model.base_model, 'save_pretrained'):
         model.base_model.save_pretrained(os.path.join(output_dir, 'lora_adapter'))
-    print("Fine tuning is complete, model successfully saved.")
+    logger.info("Fine tuning is complete, model successfully saved.")
 
     evaluate_on_test_set(model, final_test_dataset, batch_size=args.batch_size, class_map=label_dict)
 
