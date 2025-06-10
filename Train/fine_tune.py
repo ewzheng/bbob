@@ -138,7 +138,9 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
         if global_step >= max_steps:
             break
         epoch_start_time = time.time()
+
         model.train()
+
         total_train_loss = 0
         total_cls_correct = 0
         total_cls_total = 0
@@ -260,6 +262,32 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
                                 val_percent_matched = (period_iou_matches / period_cls_total) if period_cls_total > 0 else 0.0
                                 logger.info(f"[VAL]   Epoch {epoch+1}/{epochs} | Step {global_step} | ValBatch {val_batch_idx}/{len(test_loader)} | "
                                             f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {val_loss_tuple[2]} | L1: {val_loss_tuple[5]:.4f} | %Matched: {val_percent_matched:.2%} | Speed: {val_sps:.1f} samples/s")
+                                # Log a sample of the model's output
+                                try:
+                                    sample_idx = 0
+                                    input_ids = val_batch["input_ids"][sample_idx]
+                                    input_text = tokenizer.decode(input_ids, skip_special_tokens=True)
+                                    gt_boxes = val_batch.get("target_boxes", [None])[sample_idx]
+                                    gt_labels = val_batch.get("target_labels", [None])[sample_idx]
+                                    # Get the model's predictions for this batch
+                                    outputs = model(
+                                        vision_features=val_batch.get("vision_features", None),
+                                        input_ids=val_batch["input_ids"],
+                                        attention_mask=val_batch["attention_mask"],
+                                        detection=True,
+                                        target_labels=val_batch.get("target_labels", None)
+                                    )
+                                    class_logits = outputs["class_logits"][sample_idx]
+                                    box_preds = outputs["box_preds"][sample_idx]
+                                    pred_classes = class_logits.argmax(dim=-1).cpu().tolist()
+                                    pred_boxes = box_preds.cpu().tolist()
+                                    logger.info(f"[VAL SAMPLE] Batch {val_batch_idx} | Input: {input_text}")
+                                    logger.info(f"[VAL SAMPLE] GT Labels: {gt_labels}")
+                                    logger.info(f"[VAL SAMPLE] GT Boxes: {gt_boxes}")
+                                    logger.info(f"[VAL SAMPLE] Pred Classes: {pred_classes[:5]} ...")
+                                    logger.info(f"[VAL SAMPLE] Pred Boxes: {pred_boxes[:5]} ...")
+                                except Exception as e:
+                                    logger.warning(f"[VAL SAMPLE] Could not log sample output: {e}")
                     avg_val_loss = total_val_loss / max(val_batches, 1)
                     avg_val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
                     avg_val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
@@ -304,14 +332,37 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
     total_val_l1 = 0
     val_batches = 0
     with torch.no_grad():
-        for val_batch_idx, val_batch in enumerate(test_loader):
-            val_batch_time = time.time()
-            val_batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in val_batch.items()}
-            if scaler is not None:
-                with autocast("cuda"):
-                    val_loss_tuple = lora_loss(model, val_batch, CompositeLoss(), tokenizer, return_components=True, class_map=class_map)
-            else:
-                val_loss_tuple = lora_loss(model, val_batch, CompositeLoss(), tokenizer, return_components=True, class_map=class_map)
+        for batch_idx, batch in enumerate(test_loader):
+            batch_time = time.time()
+            batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+            # Use lora_loss logic for evaluation
+            input_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            vision_features = batch.get("vision_features", None)
+            target_labels = batch.get("target_labels", None)
+            target_boxes = batch.get("target_boxes", None)
+            target_text = batch.get("target_text", None)
+            outputs = model(
+                vision_features=vision_features,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                detection=True,
+                target_labels=target_labels
+            )
+            lm_logits = outputs["outputs"].logits
+            num_visual_tokens = outputs["class_logits"].shape[1]
+            batch_size_, num_text_tokens = input_ids.shape
+            device_ = input_ids.device
+            visual_labels = torch.full((batch_size_, num_visual_tokens), -100, dtype=input_ids.dtype, device=device_)
+            text_labels = input_ids.clone()
+            text_labels[attention_mask == 0] = -100
+            lm_labels = torch.cat([visual_labels, text_labels], dim=1)
+            class_logits = outputs["class_logits"]
+            box_preds = outputs["box_preds"]
+            # Compute composite loss and metrics
+            val_loss_tuple = composite_loss_fn(
+                lm_logits, lm_labels, class_logits, box_preds, target_labels, target_boxes, target_text, class_map=class_map, return_components=True
+            )
             total_val_loss += val_loss_tuple[0]
             total_val_cls_correct += val_loss_tuple[1]
             total_val_cls_total += val_loss_tuple[2]
@@ -320,33 +371,25 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
             total_val_l1 += val_loss_tuple[5]
             val_batches += 1
             period_iou_matches = val_loss_tuple[4]  # Non-cumulative, per-batch
-            if val_batch_idx % 32 == 0:
-                val_bt = time.time() - val_batch_time
-                val_sps = len(val_batch["input_ids"]) / max(val_bt, 1e-6)
+            if batch_idx % 32 == 0:
+                val_bt = time.time() - batch_time
+                val_sps = len(batch["input_ids"]) / max(val_bt, 1e-6)
                 val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
                 val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
                 val_mean_iou = min(max(val_mean_iou, 0.0), 1.0)
-                val_percent_matched = (period_iou_matches / period_cls_total) if period_cls_total > 0 else 0.0
-                logger.info(f"[VAL-FINAL] ValBatch {val_batch_idx}/{len(test_loader)} | "
-                            f"Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | L1: {val_loss_tuple[5]:.4f} | %Matched: {val_percent_matched:.2%} | Speed: {val_sps:.1f} samples/s")
+                val_percent_matched = (period_iou_matches / val_loss_tuple[2]) if val_loss_tuple[2] > 0 else 0.0
+                logger.info(f"[EVAL] Batch {batch_idx+1}/{len(test_loader)} | Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {val_loss_tuple[2]} | L1: {val_loss_tuple[5]:.4f} | %Matched: {val_percent_matched:.2%} | Speed: {val_sps:.1f} samples/s")
+    eval_time = time.time() - batch_time
     avg_val_loss = total_val_loss / max(val_batches, 1)
     avg_val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
     avg_val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
     avg_val_mean_iou = min(max(avg_val_mean_iou, 0.0), 1.0)
     avg_val_l1 = total_val_l1 / max(val_batches, 1)
-    total_time = time.time() - start_time
-    logger.info(f"=== TRAINING COMPLETE ===")
-    logger.info(f"Total time: {total_time:.1f}s ({total_time/60:.1f}min)")
-    logger.info(f"Best validation loss: {best_val_loss:.4f}")
-    logger.info(f"Final val loss: {avg_val_loss:.4f}, ClsAcc={avg_val_cls_acc:.4f}, MeanIoU={avg_val_mean_iou:.4f}, L1={avg_val_l1:.4f}")
     avg_val_percent_matched = (total_val_iou_count / total_val_cls_total) if total_val_cls_total > 0 else 0.0
-    logger.info(f"[VAL]   Epoch {epoch+1}/{epochs} SUMMARY | Loss: {avg_val_loss:.4f} | ClsAcc: {avg_val_cls_acc:.4f} | MeanIoU: {avg_val_mean_iou:.4f} | L1: {avg_val_l1:.4f} | %Matched: {avg_val_percent_matched:.2%}")
-    # End of epoch
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    logger.info(f"=== FINAL EVALUATION SUMMARY ===")
+    logger.info(f"Loss: {avg_val_loss:.4f} | ClsAcc: {avg_val_cls_acc:.4f} | MeanIoU: {avg_val_mean_iou:.4f} | L1: {avg_val_l1:.4f} | %Matched: {avg_val_percent_matched:.2%}")
+    logger.info(f"Evaluation time: {eval_time:.1f}s")
 
-    return
-    
 def denormalize_bboxes(bboxes, img_w, img_h):
     """Convert normalized bboxes [N, 4] to COCO pixel coordinates [x, y, w, h]."""
     if isinstance(bboxes, torch.Tensor):
@@ -354,7 +397,7 @@ def denormalize_bboxes(bboxes, img_w, img_h):
     return [[x*img_w, y*img_h, w*img_w, h*img_h] for x, y, w, h in bboxes]
 
 def evaluate_on_test_set(model, test_dataset, batch_size=32, class_map=None):
-    """Evaluate on test set: mean IoU, classification, IoU, and L1 loss."""
+    """Evaluate on test set using CompositeLoss, matching training/validation evaluation."""
     from torch.utils.data import DataLoader
     from loss_common import CompositeLoss
     import torch
@@ -362,75 +405,74 @@ def evaluate_on_test_set(model, test_dataset, batch_size=32, class_map=None):
     model.eval()
     device = next(model.parameters()).device
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=2, prefetch_factor=1, persistent_workers=True)
-    total_iou = 0.0
-    total_gt_objects = 0
-    total_correct_classes = 0
-    total_iou_matches = 0
     logger.info("Beginning evaluation on final test set...")
     eval_start_time = time.time()
     composite_loss_fn = CompositeLoss()
     tokenizer = model.get_tokenizer() if hasattr(model, 'get_tokenizer') else None
+    total_val_loss = 0
+    total_val_cls_correct = 0
+    total_val_cls_total = 0
+    total_val_iou_sum = 0.0
+    total_val_iou_count = 0
+    total_val_l1 = 0
+    val_batches = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
             batch_time = time.time()
             batch = {k: v.to(device) if torch.is_tensor(v) else v for k, v in batch.items()}
+            # Use lora_loss logic for evaluation
+            input_ids = batch["input_ids"]
+            attention_mask = batch["attention_mask"]
+            vision_features = batch.get("vision_features", None)
+            target_labels = batch.get("target_labels", None)
+            target_boxes = batch.get("target_boxes", None)
+            target_text = batch.get("target_text", None)
             outputs = model(
-                vision_features=batch.get("vision_features", None),
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
+                vision_features=vision_features,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
                 detection=True,
-                target_labels=batch["target_labels"]
+                target_labels=target_labels
             )
+            lm_logits = outputs["outputs"].logits
+            num_visual_tokens = outputs["class_logits"].shape[1]
+            batch_size_, num_text_tokens = input_ids.shape
+            device_ = input_ids.device
+            visual_labels = torch.full((batch_size_, num_visual_tokens), -100, dtype=input_ids.dtype, device=device_)
+            text_labels = input_ids.clone()
+            text_labels[attention_mask == 0] = -100
+            lm_labels = torch.cat([visual_labels, text_labels], dim=1)
             class_logits = outputs["class_logits"]
             box_preds = outputs["box_preds"]
-            target_labels = batch["target_labels"]
-            target_boxes = batch["target_boxes"]
-            batch_iou_matches = 0
-            batch_gt_objects = 0
-            for i in range(class_logits.shape[0]):
-                pred_boxes = box_preds[i]
-                pred_logits = class_logits[i]
-                tgt_boxes = target_boxes[i]
-                tgt_classes = target_labels[i]
-                batch_gt_objects += len(tgt_classes)
-                total_gt_objects += len(tgt_classes)
-                if len(tgt_boxes) > 0 and len(pred_boxes) > 0:
-                    ious = torchvision.ops.box_iou(pred_boxes, tgt_boxes)
-                    matches = []
-                    used_pred = set()
-                    used_target = set()
-                    while True:
-                        max_iou = torch.max(ious)
-                        if max_iou < 0.5:
-                            break
-                        idx = torch.argmax(ious)
-                        pred_idx, target_idx = divmod(idx.item(), ious.shape[1])
-                        if pred_idx in used_pred or target_idx in used_target:
-                            ious[pred_idx, target_idx] = -1
-                            continue
-                        matches.append((pred_idx, target_idx))
-                        used_pred.add(pred_idx)
-                        used_target.add(target_idx)
-                        ious[pred_idx, :] = -1
-                        ious[:, target_idx] = -1
-                    for pred_idx, tgt_idx in matches:
-                        pred_class = pred_logits[pred_idx].argmax().item()
-                        true_class = tgt_classes[tgt_idx].item() if isinstance(tgt_classes, torch.Tensor) else tgt_classes[tgt_idx]
-                        if pred_class == true_class:
-                            total_correct_classes += 1
-                        pred_box = pred_boxes[pred_idx].unsqueeze(0)
-                        tgt_box = tgt_boxes[tgt_idx].unsqueeze(0)
-                        total_iou_matches += 1
-                        batch_iou_matches += 1
-            # Optionally log per-batch % matched
-            percent_matched = (batch_iou_matches / batch_gt_objects) if batch_gt_objects > 0 else 0.0
-            logger.info(f"[EVAL] Batch {batch_idx+1}/{len(test_loader)} | IoU Matches: {batch_iou_matches} | GT Objects: {batch_gt_objects} | %Matched: {percent_matched:.2%}")
+            # Compute composite loss and metrics
+            val_loss_tuple = composite_loss_fn(
+                lm_logits, lm_labels, class_logits, box_preds, target_labels, target_boxes, target_text, class_map=class_map, return_components=True
+            )
+            total_val_loss += val_loss_tuple[0]
+            total_val_cls_correct += val_loss_tuple[1]
+            total_val_cls_total += val_loss_tuple[2]
+            total_val_iou_sum += val_loss_tuple[3]
+            total_val_iou_count += val_loss_tuple[4]
+            total_val_l1 += val_loss_tuple[5]
+            val_batches += 1
+            period_iou_matches = val_loss_tuple[4]  # Non-cumulative, per-batch
+            if batch_idx % 32 == 0:
+                val_bt = time.time() - batch_time
+                val_sps = len(batch["input_ids"]) / max(val_bt, 1e-6)
+                val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
+                val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
+                val_mean_iou = min(max(val_mean_iou, 0.0), 1.0)
+                val_percent_matched = (period_iou_matches / val_loss_tuple[2]) if val_loss_tuple[2] > 0 else 0.0
+                logger.info(f"[EVAL] Batch {batch_idx+1}/{len(test_loader)} | Loss: {val_loss_tuple[0]:.4f} | ClsAcc: {val_cls_acc:.4f} | MeanIoU: {val_mean_iou:.4f} | IoU Matches: {period_iou_matches} | GT Objects: {val_loss_tuple[2]} | L1: {val_loss_tuple[5]:.4f} | %Matched: {val_percent_matched:.2%} | Speed: {val_sps:.1f} samples/s")
     eval_time = time.time() - eval_start_time
-    avg_percent_matched = (total_iou_matches / total_gt_objects) if total_gt_objects > 0 else 0.0
+    avg_val_loss = total_val_loss / max(val_batches, 1)
+    avg_val_cls_acc = total_val_cls_correct / max(total_val_cls_total, 1)
+    avg_val_mean_iou = total_val_iou_sum / max(total_val_iou_count, 1)
+    avg_val_mean_iou = min(max(avg_val_mean_iou, 0.0), 1.0)
+    avg_val_l1 = total_val_l1 / max(val_batches, 1)
+    avg_val_percent_matched = (total_val_iou_count / total_val_cls_total) if total_val_cls_total > 0 else 0.0
     logger.info(f"=== FINAL EVALUATION SUMMARY ===")
-    logger.info(f"Total IoU Matches: {total_iou_matches}")
-    logger.info(f"Total GT Objects: {total_gt_objects}")
-    logger.info(f"Average %Matched: {avg_percent_matched:.2%}")
+    logger.info(f"Loss: {avg_val_loss:.4f} | ClsAcc: {avg_val_cls_acc:.4f} | MeanIoU: {avg_val_mean_iou:.4f} | L1: {avg_val_l1:.4f} | %Matched: {avg_val_percent_matched:.2%}")
     logger.info(f"Evaluation time: {eval_time:.1f}s")
 
 def main():
@@ -499,8 +541,8 @@ def main():
     final_test_dataset = split['test']
 
     logger.info(f"Train set: {len(train_dataset)} samples, Validation set: {len(validation_dataset)} samples, Test set: {len(final_test_dataset)} samples")
-
-
+    logger.info(f"{model.get_model_size()}")
+    
     model.unfreeze_model()
     model.freeze_vision_tower() 
     model.unfreeze_projector()

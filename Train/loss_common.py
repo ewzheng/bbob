@@ -226,15 +226,15 @@ class CompositeLoss(nn.Module):
                 # Penalties for unmatched predictions (false positives)
                 unmatched_preds = set(range(len(pred_boxes))) - used_pred
                 for pred_idx in unmatched_preds:
-                    unmatched_penalty = 0.15 * self.coordinate_weight * self.l1_weight  # Penalty for unmatched box
+                    unmatched_penalty = 0.1 * self.coordinate_weight * self.l1_weight  # Penalty for unmatched box
                     unmatched_cls_penalty = 0.075 * self.classification_weight  # Penalty for unmatched class
                     total_loss += unmatched_penalty
                     total_loss += unmatched_cls_penalty
                 # Penalties for unmatched ground truths (false negatives)
                 unmatched_targets = set(range(len(tgt_boxes))) - used_target
                 for tgt_idx in unmatched_targets:
-                    unmatched_penalty = 0.15 * self.coordinate_weight * self.l1_weight
-                    unmatched_cls_penalty = 0.075 * self.classification_weight
+                    unmatched_penalty = 0.2 * self.coordinate_weight * self.l1_weight
+                    unmatched_cls_penalty = 0.1 * self.classification_weight
                     total_loss += unmatched_penalty
                     total_loss += unmatched_cls_penalty
             elif len(pred_boxes) > 0 and len(tgt_boxes) > 0 and len(tgt_classes) == 0:

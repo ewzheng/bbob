@@ -16,7 +16,7 @@ class BBOB(nn.Module):
     BBOB multimodal model combining vision encoder, projector, and language model
     """
     
-    def __init__(self, base_model, vision_encoder, bnb_config, num_classes=80):
+    def __init__(self, base_model, vision_encoder, bnb_config, num_classes=80, num_queries=5    0):
         """
         Initialize BBOB model with specified components
         
@@ -25,6 +25,7 @@ class BBOB(nn.Module):
             - vision_encoder: path or identifier for vision encoder
             - bnb_config: quantization configuration for model loading
             - num_classes: number of classes for detection head (default 80 for COCO)
+            - num_queries: number of object queries for DETR-style detection (default 100)
         """
         super(BBOB, self).__init__()
         # informational print, initialize gpu
@@ -49,7 +50,7 @@ class BBOB(nn.Module):
         self.vision_encoder = transformers.AutoModel.from_pretrained(vision_encoder)
 
         # get vision encoder hidden size (different attributes for different vision models)
-        # always use dummy forward pass for MobileViTV2 to get actual output dimensions
+        # always use dummy forward pass to get actual output dimensions
         print(f"Detecting vision encoder hidden size for {vision_encoder}...")
         dummy_input = torch.randn(1, 3, 256, 256).to(next(self.vision_encoder.parameters()).device)
         with torch.no_grad():
@@ -70,27 +71,30 @@ class BBOB(nn.Module):
         print(f"Detected vision hidden size: {vision_hidden_size}")
 
         self.projector = Projector(vision_hidden_size, self.base_model.config.hidden_size)
-        # Detection/classification heads (initialized with default num_classes=100, can be updated later)
+
         self.num_classes = num_classes
+        self.num_queries = num_queries  # DETR-style: number of object queries
+        self.query_embed = nn.Embedding(self.num_queries, self.base_model.config.hidden_size)
         self.detection_head = nn.Sequential(
-            nn.Linear(self.base_model.config.hidden_size, 256),
-            nn.LayerNorm(256),
+            nn.Linear(self.base_model.config.hidden_size, 512),
+            nn.LayerNorm(512),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(256, self.num_classes)
+            nn.Linear(512, self.num_classes + 1)  # +1 for no-object class
         )
         self.bbox_head = nn.Sequential(
-            nn.Linear(self.base_model.config.hidden_size, 256),
-            nn.LayerNorm(256),
+            nn.Linear(self.base_model.config.hidden_size, 512),
+            nn.LayerNorm(512),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(256, 4),
+            nn.Linear(512, 4),
             nn.Sigmoid()
         )
-        # Move heads to same device as projector
+        # Move heads and queries to same device as projector
         device = next(self.projector.parameters()).device
         self.detection_head = self.detection_head.to(device)
         self.bbox_head = self.bbox_head.to(device)
+        self.query_embed = self.query_embed.to(device)
         
         # move components to GPU and match base model dtype
         if torch.cuda.is_available():
@@ -449,11 +453,12 @@ class BBOB(nn.Module):
         )
         
         # Detection/classification output
-        if detection and visual_tokens is not None:
-            # Do NOT dynamically set num_classes based on target_labels shape
-            # The detection head should always use the fixed num_classes set at model initialization
-            class_logits = self.detection_head(visual_tokens)  # [B, num_visual_tokens, num_classes]
-            box_preds = self.bbox_head(visual_tokens)          # [B, num_visual_tokens, 4]
+        if detection:
+            # Use DETR-style queries for detection heads
+            batch_size = input_ids.shape[0] if input_ids is not None else (visual_tokens.shape[0] if visual_tokens is not None else 1)
+            queries = self.query_embed.weight.unsqueeze(0).repeat(batch_size, 1, 1)  # [B, num_queries, hidden_dim]
+            class_logits = self.detection_head(queries)  # [B, num_queries, num_classes+1]
+            box_preds = self.bbox_head(queries)          # [B, num_queries, 4]
             # Debug print for first batch of each epoch
             if not hasattr(self, '_debug_printed') or not self._debug_printed:
                 print(f"[DEBUG] class_logits mean: {class_logits.mean().item():.4f}, std: {class_logits.std().item():.4f}")
@@ -464,7 +469,7 @@ class BBOB(nn.Module):
             return {
                 "class_logits": class_logits,
                 "box_preds": box_preds,
-                "outputs": outputs  # keep language modeling outputs for compatibility
+                "outputs": outputs
             }
         return outputs
     
