@@ -21,7 +21,7 @@ from torch.amp import autocast, GradScaler
 from transformers import get_linear_schedule_with_warmup, get_cosine_with_hard_restarts_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import bitsandbytes as bnb
-from transformers.pytorch_utils import Conv1D
+import multiprocessing as mp
 
 from train_common import collate, load_and_prepare_dataset, compute_gradient_norm, compute_parameter_norm
 from loss_common import CompositeLoss
@@ -578,4 +578,7 @@ def main():
     return
 
 if __name__ == "__main__":
+
+    if sys.platform.startswith('linux'):
+        mp.set_start_method('spawn', force=True)
     main()
