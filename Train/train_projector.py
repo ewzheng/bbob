@@ -184,7 +184,7 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
                     projected_vision = model.projector(vision_features)
                     similarity = compute_embedding_similarity(projected_vision, text_embeddings)
                 similarity_count += 1
-                ``
+            
                 # mixed precision backward pass
                 scaler.scale(loss).backward()
             else:
