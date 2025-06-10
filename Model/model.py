@@ -57,8 +57,10 @@ class BBOB(nn.Module):
 
         # initialize components
         self.base_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, max_memory=max_memory, quantization_config=bnb_config, device_map="auto", torch_dtype="auto")
+        base_model_dtype = next(self.base_model.parameters()).dtype
+
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
-        self.image_processor = transformers.AutoImageProcessor.from_pretrained(vision_encoder, use_fast=True)
+        self.image_processor = transformers.AutoImageProcessor.from_pretrained(vision_encoder, use_fast=True, torch_dtype=base_model_dtype)
         self.vision_encoder = transformers.AutoModel.from_pretrained(vision_encoder)
 
         # get vision encoder hidden size (different attributes for different vision models)
@@ -85,7 +87,7 @@ class BBOB(nn.Module):
         self.projector = Projector(vision_hidden_size, self.base_model.config.hidden_size)
 
         self.num_classes = num_classes
-        self.num_queries = num_queries  # DETR-style: number of object queries
+        self.num_queries = num_queries 
         self.query_embed = nn.Embedding(self.num_queries, self.base_model.config.hidden_size)
         self.detection_head = nn.Sequential(
             nn.Linear(self.base_model.config.hidden_size, 512),
@@ -110,7 +112,6 @@ class BBOB(nn.Module):
         
         # move components to GPU and match base model dtype
         if torch.cuda.is_available():
-            base_model_dtype = next(self.base_model.parameters()).dtype
             self.vision_encoder = self.vision_encoder.to('cuda', dtype=base_model_dtype)
             print(f"Vision encoder loaded on: {next(self.vision_encoder.parameters()).device}, dtype: {next(self.vision_encoder.parameters()).dtype}")
             self.projector = self.projector.to('cuda', dtype=base_model_dtype)
