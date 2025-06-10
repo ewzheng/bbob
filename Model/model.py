@@ -104,11 +104,6 @@ class BBOB(nn.Module):
             nn.Linear(512, 4),
             nn.Sigmoid()
         )
-        # Move heads and queries to same device as projector
-        device = next(self.projector.parameters()).device
-        self.detection_head = self.detection_head.to(device)
-        self.bbox_head = self.bbox_head.to(device)
-        self.query_embed = self.query_embed.to(device)
         
         # move components to GPU and match base model dtype
         if torch.cuda.is_available():
@@ -116,6 +111,12 @@ class BBOB(nn.Module):
             print(f"Vision encoder loaded on: {next(self.vision_encoder.parameters()).device}, dtype: {next(self.vision_encoder.parameters()).dtype}")
             self.projector = self.projector.to('cuda', dtype=base_model_dtype)
             print(f"Projector loaded on: {next(self.projector.parameters()).device}, dtype: {next(self.projector.parameters()).dtype}")
+
+            # Move heads and queries to same device as projector
+            device = next(self.projector.parameters()).device
+            self.detection_head = self.detection_head.to(device)
+            self.bbox_head = self.bbox_head.to(device)
+            self.query_embed = self.query_embed.to(device)
         
 
 

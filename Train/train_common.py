@@ -33,7 +33,7 @@ import Model.model as model
 import logging
 import yaml
 
-def jitter_bboxes(bboxes, img_width, img_height, jitter_ratio=0.05):
+def jitter_bboxes(bboxes, img_width, img_height, dtype, jitter_ratio=0.05):
     """
     Randomly jitter bounding boxes by a fraction of their size (COCO format).
     Args:
@@ -74,9 +74,9 @@ def jitter_bboxes(bboxes, img_width, img_height, jitter_ratio=0.05):
         new_h = new_y2 - new_y1
         bboxes_jittered.append([new_x, new_y, new_w, new_h])
 
-    return torch.tensor(bboxes_jittered, dtype=torch.float32)
+    return torch.tensor(bboxes_jittered, dtype=dtype)
 
-def normalize_coco_bboxes(bboxes, img_width, img_height):
+def normalize_coco_bboxes(bboxes, img_width, img_height, dtype):
     """
     Normalize COCO bounding boxes ([x, y, w, h]) to [x/img_w, y/img_h, w/img_w, h/img_h].
     Args:
@@ -97,7 +97,7 @@ def normalize_coco_bboxes(bboxes, img_width, img_height):
             w / img_width,
             h / img_height
         ])
-    return torch.tensor(bboxes_norm, dtype=torch.float32)
+    return torch.tensor(bboxes_norm, dtype=dtype)
 
 def letterbox_image(image, target_size=(256, 256)):
     """Resize image with unchanged aspect ratio using padding."""
@@ -113,7 +113,7 @@ def letterbox_image(image, target_size=(256, 256)):
     new_image.paste(image, (pad_w, pad_h))
     return new_image, scale, pad_w, pad_h
 
-def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h):
+def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h, dtype):
     """Adjust [x, y, w, h] boxes for letterbox resize and normalize to padded image size."""
     adjusted = []
     for x, y, w, h in boxes:
@@ -128,7 +128,7 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
             w / target_w,
             h / target_h
         ])
-    return torch.tensor(adjusted, dtype=torch.float32)
+    return torch.tensor(adjusted, dtype=dtype)
 
 def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category_mapping=None, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False):
     """
@@ -148,6 +148,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
         - processed batch with vision_features, input_ids, attention_mask and preserved fields
     """
 
+    dtype = next(vision_encoder.parameters()).dtype
     # detect image field name dynamically
     image_field = None
     for field in ["image", "img", "images", "picture", "photo", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]:
@@ -216,7 +217,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
             
             try:
                 processor_output = image_processor(sub_batch_images, return_tensors="pt")
-                pixel_values = processor_output["pixel_values"].to(device, dtype=vision_encoder.dtype)
+                pixel_values = processor_output["pixel_values"].to(device, dtype=dtype)
                 
                 vision_outputs = vision_encoder(pixel_values)
                 vision_features = vision_outputs.last_hidden_state.cpu()
@@ -261,8 +262,8 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
             bboxes = sample["bbox"]
             scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h = letterbox_params[i]
             if training:
-                bboxes = jitter_bboxes(bboxes, orig_w, orig_h, jitter_ratio=bbox_jitter_ratio)
-            bboxes = adjust_boxes_for_letterbox(bboxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h)
+                bboxes = jitter_bboxes(bboxes, orig_w, orig_h, dtype=dtype, jitter_ratio=bbox_jitter_ratio)
+            bboxes = adjust_boxes_for_letterbox(bboxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h, dtype=dtype)
             sample_boxes = []
             sample_labels = []
             for bbox, category in zip(bboxes, sample["category"]):
