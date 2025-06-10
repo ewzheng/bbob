@@ -359,8 +359,6 @@ def main():
     return
 
 if __name__ == "__main__":
-
-    if sys.platform.startswith('linux'):
-        mp.set_start_method('spawn', force=True)
+    mp.set_start_method('spawn', force=True)
 
     main()
