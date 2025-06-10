@@ -33,6 +33,8 @@ import Model.model as model
 import logging
 import yaml
 
+mp.set_start_method('spawn')
+
 def jitter_bboxes(bboxes, img_width, img_height, jitter_ratio=0.05):
     """
     Randomly jitter bounding boxes by a fraction of their size (COCO format).
