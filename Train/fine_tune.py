@@ -481,6 +481,7 @@ def main():
     parser.add_argument("-d", "--dataset", required=True, help="Dataset name from HuggingFace Hub")  
     parser.add_argument("-v", "--vision_tower", required=False, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
+    parser.add_argument("--bnb_config", type=str, default="8bit", help="Bits and bytes configuration (default: 8bit)")
     parser.add_argument("--lora_rank", type=int, default=64, help="LoRA rank (default: 64)")
     parser.add_argument("--lora_alpha", type=int, default=128, help="LoRA alpha (default: 128)")
     parser.add_argument("--lora_dropout", type=float, default=0.1, help="LoRA dropout (default: 0.1)")
@@ -523,7 +524,7 @@ def main():
         label_dict = load_labels_from_yaml(args.label_file)
         logger.info(f"Loaded labels from {args.label_file}: {label_dict}")
 
-    model = BBOB.from_pretrained(args.model, num_classes=80)
+    model = BBOB.from_pretrained(args.model, num_classes=80, bnb_config=args.bnb_config)
     if args.lora_adapter is not None:
         logger.info(f"Loading LoRA adapter from {args.lora_adapter}")
         model.load_lora_adapter(args.lora_adapter)

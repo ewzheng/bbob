@@ -23,10 +23,9 @@ import os
 from train_common import load_and_prepare_dataset, load_model, collate, compute_embedding_similarity, compute_gradient_norm, compute_parameter_norm
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 
-# configure logging
+# configure logging (if not already configured)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
 
 
 def projector_loss(model, vision_features, input_ids, attention_mask):
@@ -79,7 +78,7 @@ def projector_loss(model, vision_features, input_ids, attention_mask):
 
 
 
-def train(model, train, test, epochs, output_dir, learning_rate):
+def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gradient_accumulation_steps=1):
     """
     Train the projector component with comprehensive logging and monitoring
     
@@ -89,7 +88,9 @@ def train(model, train, test, epochs, output_dir, learning_rate):
         - test: validation dataset with preprocessed features  
         - epochs: number of training epochs
         - output_dir: directory for saving checkpoints and logs
-        
+        - learning_rate: learning rate for optimizer
+        - batch_size: batch size for training
+        - gradient_accumulation_steps: number of steps to accumulate gradients before optimizer step
     Returns:
         - None (saves best model checkpoint during training)
     """
@@ -129,9 +130,9 @@ def train(model, train, test, epochs, output_dir, learning_rate):
     logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
     
     # create data loaders with custom collate function to handle variable-sized tensors
-    train_loader = DataLoader(train, batch_size=32, shuffle=True, collate_fn=collate, pin_memory=True, 
+    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=collate, pin_memory=True, 
                              num_workers=2, persistent_workers=True, prefetch_factor=1) 
-    test_loader = DataLoader(test, batch_size=32, shuffle=False, collate_fn=collate, pin_memory=True,
+    test_loader = DataLoader(test, batch_size=batch_size, shuffle=False, collate_fn=collate, pin_memory=True,
                             num_workers=2, persistent_workers=True, prefetch_factor=1)
     
     # training tracking variables
@@ -160,6 +161,8 @@ def train(model, train, test, epochs, output_dir, learning_rate):
         total_train_loss = 0
         total_similarity = 0
         similarity_count = 0
+        accumulation_counter = 0
+        optimizer.zero_grad()
         
         for batch_idx, batch in enumerate(train_loader):
             batch_start_time = time.time()
@@ -170,73 +173,63 @@ def train(model, train, test, epochs, output_dir, learning_rate):
             attention_mask = batch["attention_mask"].to(device)
             
             # compute loss using language modeling approach with mixed precision
-            optimizer.zero_grad()
-            
             if scaler is not None:
                 # mixed precision forward pass
                 with autocast("cuda"):
                     loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                loss = loss / gradient_accumulation_steps
                 
-                # compute similarity for monitoring (optional) - only every 128 batches for speed
-                if batch_idx % 128 == 0:
-                    with torch.no_grad():
-                        with autocast("cuda"):
-                            text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                            projected_vision = model.projector(vision_features)
-                            similarity = compute_embedding_similarity(projected_vision, text_embeddings)
-                    similarity_count += 1
-                else:
-                    similarity = 0.0  # placeholder
-                
+                with torch.no_grad():
+                    text_embeddings = model.base_model.get_input_embeddings()(input_ids)
+                    projected_vision = model.projector(vision_features)
+                    similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                similarity_count += 1
+                ``
                 # mixed precision backward pass
                 scaler.scale(loss).backward()
-                
-                # compute gradient norm before clipping (unscale first for accurate norm)
-                scaler.unscale_(optimizer)
-                grad_norm = compute_gradient_norm(model)
-                
-                # mixed precision optimizer step
-                scaler.step(optimizer)
-                scaler.update()
             else:
                 # standard precision training (fallback)
                 loss = projector_loss(model, vision_features, input_ids, attention_mask)
-                
-                # compute similarity for monitoring (optional) - only every 128 batches for speed
-                if batch_idx % 128 == 0:
-                    with torch.no_grad():
-                        text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                        projected_vision = model.projector(vision_features)
-                        similarity = compute_embedding_similarity(projected_vision, text_embeddings)
-                    similarity_count += 1
-                else:
-                    similarity = 0.0  # placeholder
-                
+                loss = loss / gradient_accumulation_steps
+
+                with torch.no_grad():
+                    text_embeddings = model.base_model.get_input_embeddings()(input_ids)
+                    projected_vision = model.projector(vision_features)
+                    similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                similarity_count += 1
+
                 loss.backward()
-                
-                # compute gradient norm before clipping
-                grad_norm = compute_gradient_norm(model)
-                
-                optimizer.step()
             
-            # accumulate statistics
-            total_train_loss += loss.item()
+            # accumulate statistics (use unscaled loss for reporting)
+            total_train_loss += loss.item() * gradient_accumulation_steps
             total_similarity += similarity
+            accumulation_counter += 1
+            logger.info(f"Accumulation counter: {accumulation_counter}")
             
-            # log batch-level statistics every 128 batches
-            if batch_idx % 128 == 0:
+            do_step = (accumulation_counter == gradient_accumulation_steps) or (batch_idx + 1 == len(train_loader))
+            if do_step:
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
+                    grad_norm = compute_gradient_norm(model)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    grad_norm = compute_gradient_norm(model)
+                    optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
+                accumulation_counter = 0
                 batch_time = time.time() - batch_start_time
                 samples_per_sec = len(vision_features) / max(batch_time, 1e-6)
                 current_lr = scheduler.get_last_lr()[0]
                 logger.info(f"Epoch {epoch+1}/{epochs} Batch {batch_idx}/{len(train_loader)}: "
-                           f"Loss={loss.item():.4f}, Sim={similarity:.3f}, "
+                           f"Loss={loss.item() * gradient_accumulation_steps:.4f}, Sim={similarity:.3f}, "
                            f"GradNorm={grad_norm:.2e}, Speed={samples_per_sec:.1f} samples/s, LR={current_lr:.2e}")
             
             # checkpoint every 512 batches using training loss
-            if batch_idx > 0 and batch_idx % 512 == 0:
+            if batch_idx > 0 and batch_idx % 512 == 0 and do_step:
                 # use current training loss for checkpointing (maintains train/val separation)
-                current_train_loss = loss.item()
-                
+                current_train_loss = loss.item() * gradient_accumulation_steps
                 # save checkpoint if this is the best training loss so far
                 if current_train_loss < best_train_loss:
                     best_train_loss = current_train_loss
@@ -244,28 +237,20 @@ def train(model, train, test, epochs, output_dir, learning_rate):
                     os.makedirs(best_model_dir, exist_ok=True)
                     model.save_pretrained(best_model_dir)
                     logger.info(f"NEW BEST MODEL at batch {batch_idx}: Train Loss={current_train_loss:.4f}")
-            
-            # Step the scheduler after each optimizer step
-            scheduler.step()
         
-
         # validation phase
         model.projector.eval()
-
         total_val_loss = 0
         total_val_similarity = 0
-        
         with torch.no_grad():
             for batch in test_loader:
                 vision_features = batch["vision_features"].to(device)
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
-                
                 # compute validation loss using language modeling with mixed precision
                 if scaler is not None:
                     with autocast("cuda"):
                         loss = projector_loss(model, vision_features, input_ids, attention_mask)
-                        
                         # compute similarity for monitoring
                         text_embeddings = model.base_model.get_input_embeddings()(input_ids)
                         projected_vision = model.projector(vision_features)
@@ -273,42 +258,37 @@ def train(model, train, test, epochs, output_dir, learning_rate):
                 else:
                     # standard precision validation (fallback)
                     loss = projector_loss(model, vision_features, input_ids, attention_mask)
-                    
                     # compute similarity for monitoring
                     text_embeddings = model.base_model.get_input_embeddings()(input_ids)
                     projected_vision = model.projector(vision_features)
                     similarity = compute_embedding_similarity(projected_vision, text_embeddings)
-                
                 total_val_loss += loss.item()
                 total_val_similarity += similarity
-        
+            # clear GPU memory
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         # calculate epoch statistics
         avg_train_loss = total_train_loss / max(len(train_loader), 1)
         avg_val_loss = total_val_loss / max(len(test_loader), 1)
         avg_train_similarity = total_similarity / max(similarity_count, 1)  # only divide by batches where similarity was computed
         avg_val_similarity = total_val_similarity / max(len(test_loader), 1)
-        
         # compute model statistics
         param_norm = compute_parameter_norm(model)
         epoch_time = time.time() - epoch_start_time
-        
         # compute convergence indicators
         train_val_gap = avg_train_loss - avg_val_loss
         improvement = best_train_loss - avg_train_loss if best_train_loss != float('inf') else 0
-        
         # log comprehensive epoch statistics
         logger.info(f"=== EPOCH {epoch+1}/{epochs} SUMMARY ===")
         logger.info(f"Losses: Train={avg_train_loss:.4f}, Val={avg_val_loss:.4f}, Gap={train_val_gap:.4f}")
         logger.info(f"Similarities: Train={avg_train_similarity:.3f}, Val={avg_val_similarity:.3f}")
         logger.info(f"Model: ParamNorm={param_norm:.3f}, LR={optimizer.param_groups[0]['lr']:.2e}")
         logger.info(f"Performance: EpochTime={epoch_time:.1f}s, Improvement={improvement:.4f}")
-        
         # save epoch checkpoint (always save latest, validation is for monitoring only)
         current_dir = f"{checkpoint_dir}/latest-{epoch+1}"
         os.makedirs(current_dir, exist_ok=True)
         model.save_pretrained(current_dir)
         logger.info(f"Epoch {epoch+1} checkpoint saved. Current Val Loss: {avg_val_loss:.4f}, Best Train Loss: {best_train_loss:.4f}")
-    
     # final training summary
     total_time = time.time() - start_time
     logger.info(f"=== TRAINING COMPLETE ===")
@@ -334,6 +314,9 @@ def main():
     parser.add_argument("-v", "--vision_tower", required=True, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
+    parser.add_argument("--bnb_config", type=str, default="8bit", help="Bits and bytes configuration (default: 8bit)")
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
     args = parser.parse_args()
     
     # create output directory 
@@ -356,7 +339,8 @@ def main():
     logger.info(f"Instruction: {args.instruction}")
 
     # load model
-    model = load_model(args.model, args.vision_tower, None)
+    model = load_model(args.model, args.vision_tower, args.bnb_config)
+    logger.info(f"Model size: {model.get_model_size()}")
     train_dataset, test_dataset = load_and_prepare_dataset(args.dataset, model.get_tokenizer(), model.image_processor, model.vision_encoder, args.instruction, None)
     
     # freeze model, vision tower, train only the projector 
@@ -364,7 +348,7 @@ def main():
     model.freeze_vision_tower() 
     model.unfreeze_projector()
 
-    train(model, train_dataset, test_dataset, args.epochs, output_dir, args.lr)
+    train(model, train_dataset, test_dataset, args.epochs, output_dir, args.lr, args.batch_size, args.gradient_accumulation_steps)
 
     # save final model in main output directory
     logger.info(f"Saving final model to: {output_dir}")

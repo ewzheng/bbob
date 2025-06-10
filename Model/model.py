@@ -7,6 +7,7 @@ Description: This script contains the BBOB model class.
 import torch
 import torch.nn as nn
 import transformers
+from transformers import BitsAndBytesConfig
 import bitsandbytes as bnb
 import os
 from .projector import Projector
@@ -16,7 +17,7 @@ class BBOB(nn.Module):
     BBOB multimodal model combining vision encoder, projector, and language model
     """
     
-    def __init__(self, base_model, vision_encoder, bnb_config, num_classes=80, num_queries=5    0):
+    def __init__(self, model_path, vision_encoder, bnb_config, num_classes=80, num_queries=50):
         """
         Initialize BBOB model with specified components
         
@@ -29,7 +30,7 @@ class BBOB(nn.Module):
         """
         super(BBOB, self).__init__()
         # informational print, initialize gpu
-        print("Loading BBOB with " + base_model + " and " + vision_encoder + "...\n") 
+        print("Loading BBOB with " + model_path + " and " + vision_encoder + "...\n") 
         n_gpus = torch.cuda.device_count()
         max_memory_bytes = torch.cuda.get_device_properties(0).total_memory
         max_memory_gb = max_memory_bytes / (1024**3)
@@ -43,9 +44,20 @@ class BBOB(nn.Module):
         print(f"Number of GPUs: {n_gpus}")
         print(f"Using max_memory: {max_memory}")
 
+        if bnb_config == "8bit":
+            bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+        elif bnb_config == "4bit":
+            bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
+        elif bnb_config == "bf16":
+            bnb_config = BitsAndBytesConfig(load_in_bf16=True)
+        elif bnb_config == "fp16":
+            bnb_config = BitsAndBytesConfig(load_in_fp16=True)
+        else:
+            bnb_config = None
+
         # initialize components
-        self.base_model = transformers.AutoModelForCausalLM.from_pretrained(base_model, max_memory=max_memory, quantization_config=bnb_config, device_map="auto")
-        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(base_model)
+        self.base_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, max_memory=max_memory, quantization_config=bnb_config, device_map="auto", torch_dtype="auto")
+        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
         self.image_processor = transformers.AutoImageProcessor.from_pretrained(vision_encoder, use_fast=True)
         self.vision_encoder = transformers.AutoModel.from_pretrained(vision_encoder)
 
@@ -695,7 +707,7 @@ class BBOB(nn.Module):
         
     def get_model_size(self):
         """
-        Print the size (in MB) of all major model components.
+        Return the size (in MB) of all major model components as a string.
         """
         import sys
         def size_of_module(module):
@@ -704,28 +716,31 @@ class BBOB(nn.Module):
                 total += p.numel() * p.element_size()
             return total / (1024 ** 2)  # MB
 
-        print("Model size breakdown (MB):")
-        print(f"  base_model:      {size_of_module(self.base_model):.2f} MB")
-        print(f"  vision_encoder:  {size_of_module(self.vision_encoder):.2f} MB")
-        print(f"  projector:       {size_of_module(self.projector):.2f} MB")
-        print(f"  detection_head:  {size_of_module(self.detection_head):.2f} MB")
-        print(f"  bbox_head:       {size_of_module(self.bbox_head):.2f} MB")
+        lines = []
+        lines.append("Model size breakdown (MB):")
+        lines.append(f"  data type:       {next(self.base_model.parameters()).dtype}")
+        lines.append(f"  base_model:      {size_of_module(self.base_model):.2f} MB")
+        lines.append(f"  vision_encoder:  {size_of_module(self.vision_encoder):.2f} MB")
+        lines.append(f"  projector:       {size_of_module(self.projector):.2f} MB")
+        lines.append(f"  detection_head:  {size_of_module(self.detection_head):.2f} MB")
+        lines.append(f"  bbox_head:       {size_of_module(self.bbox_head):.2f} MB")
         # LoRA adapters (if present)
         try:
             from peft import PeftModel
             if isinstance(self.base_model, PeftModel):
-                print("  LoRA adapters:")
+                lines.append("  LoRA adapters:")
                 for name, adapter in self.base_model.peft_config.items():
                     adapter_size = 0
                     for n, p in self.base_model.named_parameters():
                         if n.startswith(f"peft.{name}"):
                             adapter_size += p.numel() * p.element_size()
-                    print(f"    {name}: {adapter_size / (1024 ** 2):.2f} MB")
+                    lines.append(f"    {name}: {adapter_size / (1024 ** 2):.2f} MB")
         except ImportError:
             pass
-        print("-----------------------------")
+        lines.append("-----------------------------")
         total = (size_of_module(self.base_model) + size_of_module(self.vision_encoder) +
                  size_of_module(self.projector) + size_of_module(self.detection_head) +
                  size_of_module(self.bbox_head))
-        print(f"  Total (excluding LoRA): {total:.2f} MB")
+        lines.append(f"  Total (excluding LoRA): {total:.2f} MB")
+        return "\n".join(lines)
         
