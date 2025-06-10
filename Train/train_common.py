@@ -314,10 +314,12 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
     max_workers = min(multiprocessing.cpu_count() - 1, 4)
-    print(f"Using CPU multiprocessing with {max_workers} workers...")
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
+        if sys.platform.startswith('linux'):
+            max_workers = 1
+            
         gpu_batch_size = calculate_optimal_batch_size(vision_encoder, tokenizer, safety_margin=0.15)
         cpu_batch_size = 64  # conservative CPU batch for RAM safety
         print(f"Using GPU batch size: {gpu_batch_size}, CPU batch size: {cpu_batch_size}")
