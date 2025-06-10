@@ -59,9 +59,9 @@ class BBOB(nn.Module):
         self.base_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, max_memory=max_memory, quantization_config=bnb_config, device_map="auto", torch_dtype="auto")
         base_model_dtype = next(self.base_model.parameters()).dtype
 
-        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
+        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
         self.image_processor = transformers.AutoImageProcessor.from_pretrained(vision_encoder, use_fast=True, torch_dtype=base_model_dtype)
-        self.vision_encoder = transformers.AutoModel.from_pretrained(vision_encoder)
+        self.vision_encoder = transformers.AutoModel.from_pretrained(vision_encoder, torch_dtype=base_model_dtype)
 
         # get vision encoder hidden size (different attributes for different vision models)
         # always use dummy forward pass to get actual output dimensions
