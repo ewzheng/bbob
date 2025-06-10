@@ -127,7 +127,7 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
     )
 
     # initialize mixed precision scaler
-    scaler = GradScaler("cuda") if torch.cuda.is_available() else None
+    scaler = GradScaler("cuda") if torch.cuda.is_available() and not next(model.base_model.parameters()).dtype == torch.bfloat16 else None
     logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
     
     # create data loaders with custom collate function to handle variable-sized tensors

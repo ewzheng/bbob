@@ -101,7 +101,7 @@ def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dr
     model.base_model = get_peft_model(model.base_model, lora_config)
     model.base_model.print_trainable_parameters()
 
-    scaler = GradScaler("cuda") if torch.cuda.is_available() else None
+    scaler = GradScaler("cuda") if torch.cuda.is_available() and not next(model.base_model.parameters()).dtype == torch.bfloat16 else None
     logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate, num_workers=2, prefetch_factor=1, persistent_workers=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate, num_workers=2, prefetch_factor=1, persistent_workers=True)
