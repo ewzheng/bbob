@@ -315,7 +315,7 @@ def main():
     parser.add_argument("-v", "--vision_tower", required=True, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
-    parser.add_argument("--bnb_config", type=str, default="8bit", help="Bits and bytes configuration (default: 8bit)")
+    parser.add_argument("--bnb_config", type=str, default=None, help="Bits and bytes configuration (default: None)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
     args = parser.parse_args()
