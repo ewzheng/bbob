@@ -21,7 +21,7 @@ from torch.amp import autocast, GradScaler
 from transformers import get_linear_schedule_with_warmup, get_cosine_with_hard_restarts_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 import bitsandbytes as bnb
-import multiprocessing as mp
+import multiprocess as mp
 
 from train_common import collate, load_and_prepare_dataset, compute_gradient_norm, compute_parameter_norm
 from loss_common import CompositeLoss

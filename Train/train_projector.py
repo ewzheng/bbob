@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 # utils
 import sys
 import os
-import multiprocessing as mp
+import multiprocess as mp
 
 from train_common import load_and_prepare_dataset, load_model, collate, compute_embedding_similarity, compute_gradient_norm, compute_parameter_norm
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup

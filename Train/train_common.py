@@ -15,7 +15,7 @@ from torch.nn.utils.rnn import pad_sequence
 from functools import partial
 import os
 import time
-import multiprocessing as mp
+import multiprocess as mp
 import math
 
 # Image processing imports for dynamic resizer
@@ -314,8 +314,6 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
     max_workers = min(mp.cpu_count() - 1, 4)
-
-    print(mp.get_start_method())
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
