@@ -315,7 +315,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     
     max_workers = min(mp.cpu_count() - 1, 4)
 
-    mp.set_start_method('spawn')
+    print(mp.get_start_method())
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
