@@ -121,7 +121,7 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
         y = y * scale + pad_h
         w = w * scale
         h = h * scale
-        # Normalize to new image size
+        # normalize to new image size
         adjusted.append([
             x / target_w,
             y / target_h,
