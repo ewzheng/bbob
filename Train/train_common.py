@@ -33,8 +33,6 @@ import Model.model as model
 import logging
 import yaml
 
-mp.set_start_method('spawn')
-
 def jitter_bboxes(bboxes, img_width, img_height, jitter_ratio=0.05):
     """
     Randomly jitter bounding boxes by a fraction of their size (COCO format).
@@ -316,6 +314,8 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
     max_workers = min(mp.cpu_count() - 1, 4)
+
+    mp.set_start_method('spawn')
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
