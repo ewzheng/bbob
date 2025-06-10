@@ -216,7 +216,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
             
             try:
                 processor_output = image_processor(sub_batch_images, return_tensors="pt")
-                pixel_values = processor_output["pixel_values"].to(device)
+                pixel_values = processor_output["pixel_values"].to(device, dtype=vision_encoder.dtype)
                 
                 vision_outputs = vision_encoder(pixel_values)
                 vision_features = vision_outputs.last_hidden_state.cpu()
