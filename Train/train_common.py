@@ -340,7 +340,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
         batched=True, 
         batch_size=cpu_batch_size,  # smaller CPU batch for RAM safety
         remove_columns=dataset.column_names,
-        num_proc=max_workers,
+        num_workers=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size}, GPU batch={gpu_batch_size})",
         load_from_cache_file=True
     )
