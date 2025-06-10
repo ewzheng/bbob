@@ -232,7 +232,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
                 warnings.warn(f"Vision encoder processing failed for sub-batch {start_idx}-{end_idx}: {e}")
                 # create dummy features for failed sub-batch
                 sub_batch_size = len(sub_batch_images)
-                dummy_features = torch.zeros(sub_batch_size, 256, 768)
+                dummy_features = torch.zeros(sub_batch_size, 256, 768, dtype=dtype)
                 all_vision_features.append(dummy_features)
     
     # concatenate all sub-batch results
@@ -240,7 +240,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
         vision_features = torch.cat(all_vision_features, dim=0)
     else:
         # fallback if everything failed
-        vision_features = torch.zeros(total_images, 256, 768)  
+        vision_features = torch.zeros(total_images, 256, 768, dtype=dtype)  
         
     # ensure tokenizer has a padding token
     if tokenizer.pad_token is None:
@@ -473,7 +473,7 @@ def calculate_optimal_batch_size(vision_encoder, tokenizer, safety_margin=0.15, 
         # get vision encoder output dimensions
         device = next(vision_encoder.parameters()).device
         with torch.no_grad():
-            dummy_image = torch.randn(1, 3, 256, 256).to(device)
+            dummy_image = torch.randn(1, 3, 256, 256, dtype=next(vision_encoder.parameters()).dtype).to(device)
             vision_output = vision_encoder(dummy_image)
             vision_features = vision_output.last_hidden_state
             

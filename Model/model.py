@@ -66,7 +66,7 @@ class BBOB(nn.Module):
         # get vision encoder hidden size (different attributes for different vision models)
         # always use dummy forward pass to get actual output dimensions
         print(f"Detecting vision encoder hidden size for {vision_encoder}...")
-        dummy_input = torch.randn(1, 3, 256, 256).to(next(self.vision_encoder.parameters()).device)
+        dummy_input = torch.randn(1, 3, 256, 256, dtype=base_model_dtype).to(next(self.vision_encoder.parameters()).device)
         with torch.no_grad():
             dummy_output = self.vision_encoder(dummy_input)
             vision_features = dummy_output.last_hidden_state
