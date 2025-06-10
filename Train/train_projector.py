@@ -359,6 +359,10 @@ def main():
     return
 
 if __name__ == "__main__":
-    mp.set_start_method('spawn')
+    if sys.platform.startswith('linux'):
+        try:
+            torch.multiprocessing.set_start_method('spawn', force=True)
+        except RuntimeError:
+            pass
 
     main()

@@ -9,13 +9,13 @@ import torch.nn as nn
 import datasets
 import aiohttp
 import transformers
-from torch.nn.utils.rnn import pad_sequence
+from torch.nn.utils.rnn import pad_sequence 
 
 # utils
 from functools import partial
 import os
 import time
-import multiprocessing
+import multiprocessing as mp
 import math
 
 # Image processing imports for dynamic resizer
@@ -309,11 +309,11 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     Returns:
         - processed dataset with vision_features and tokenized text
     """
-    
+
     # add instruction to each sample to create "text" field
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
-    max_workers = min(multiprocessing.cpu_count() - 1, 4)
+    max_workers = min(mp.cpu_count() - 1, 4)
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
