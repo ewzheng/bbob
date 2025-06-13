@@ -25,7 +25,12 @@ class VisionTower(nn.Module):
         elif hasattr(cfg, "neck_hidden_sizes") and len(cfg.neck_hidden_sizes) > 0:
             self.hidden_size = cfg.neck_hidden_sizes[-1]
         else:
-            raise AttributeError("Cannot determine feature dimension: config lacks hidden_size/hidden_sizes/neck_hidden_sizes")
+            # last resort: run a dummy forward pass to infer channel dim
+            with torch.no_grad():
+                img_size = getattr(cfg, "image_size", 256)
+                dummy = torch.zeros(1, 3, img_size, img_size, device=device, dtype=self.model.dtype)
+                c = self.model(dummy, output_hidden_states=False).last_hidden_state.shape[1]
+                self.hidden_size = c
 
         self._dtype = dtype
         self._device = torch.device(device)
