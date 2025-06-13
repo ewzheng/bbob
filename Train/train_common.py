@@ -129,7 +129,7 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
         ])
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, vision_tower, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256)):
+def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256), dtype=torch.float32):
     """
     Convert a raw *batch* of samples into model-ready tensors.
 
@@ -157,8 +157,6 @@ def preprocess_batch(batch, vision_tower, tokenizer, gpu_batch_size=64, bbox_jit
             • *optional* target_boxes / target_labels / target_text …
     """
 
-    dtype = torch.float32
-
     processed_images = []      # PIL.Image (letter-boxed)
     image_sizes = []           # original (w, h) per image
     padded_image_sizes = []    # after letter-box (should all be target_size)
@@ -176,7 +174,7 @@ def preprocess_batch(batch, vision_tower, tokenizer, gpu_batch_size=64, bbox_jit
 
         # apply letter-box resize
         lb_img, scale, pad_w, pad_h = letterbox_image(rgb, target_size=target_size)
-    
+
         processed_images.append(lb_img)
         image_sizes.append(rgb.size)          # (orig_w, orig_h)
         padded_image_sizes.append(target_size)
@@ -256,7 +254,7 @@ def preprocess_batch(batch, vision_tower, tokenizer, gpu_batch_size=64, bbox_jit
     return result
 
 
-def preprocess_dataset(dataset, tokenizer, instruction, is_training=False):
+def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype=torch.float32):
     """
     Process entire dataset through image resizing and feature extraction
     
@@ -290,6 +288,7 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False):
         tokenizer=tokenizer,
         gpu_batch_size=gpu_batch_size,
         training=is_training,
+        dtype=dtype,
     )
 
     dataset = dataset.map(
@@ -304,7 +303,7 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False):
 
     return dataset
 
-def load_and_prepare_dataset(dataset_name, tokenizer, instruction):
+def load_and_prepare_dataset(dataset_name, tokenizer, instruction, dtype=torch.float32):
     """
     Load dataset from HuggingFace hub and create train/test splits
     
@@ -365,9 +364,9 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction):
 
 
     print("Preprocessing train dataset...")
-    train = preprocess_dataset(train, tokenizer, instruction, is_training=True)
+    train = preprocess_dataset(train, tokenizer, instruction, is_training=True, dtype=dtype)
     print("Preprocessing test dataset...")
-    test = preprocess_dataset(test, tokenizer, instruction, is_training=False)
+    test = preprocess_dataset(test, tokenizer, instruction, is_training=False, dtype=dtype)
 
     return train, test
 

@@ -187,6 +187,7 @@ def main():
         args.dataset,
         tokenizer=model.get_tokenizer(),
         instruction=args.instruction,
+        dtype=model.dtype
     )
 
     train(
