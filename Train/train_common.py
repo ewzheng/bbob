@@ -163,7 +163,11 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
     padded_image_sizes = []    # after letter-box (should all be target_size)
     lb_params = []             # (scale, pad_w, pad_h) per image
 
-    for img in batch["images"]:
+    images_field = "images" if "images" in batch else "image" if "image" in batch else None
+    if images_field is None:
+        raise KeyError("Batch dict must contain an 'images' or 'image' key with PIL images")
+
+    for img in batch[images_field]:
         if not isinstance(img, Image.Image):
             raise ValueError("Images must be PIL.Image objects")
 
