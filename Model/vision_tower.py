@@ -15,32 +15,31 @@ class VisionTower(nn.Module):
 
         self.model = MobileViTV2Model.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256", torch_dtype=dtype)
         self.image_processor = MobileViTImageProcessor()
+        self._dtype = dtype
+        self._device = torch.device(device)
+        
+        self.model.to(self._device)
+        self.model.eval()
 
         # derive final feature dimension across MobileViT variants
         cfg = self.model.config
         if hasattr(cfg, "hidden_size") and cfg.hidden_size is not None:
-            self.hidden_size = cfg.hidden_size
+            self._hidden_size = cfg.hidden_size
         elif hasattr(cfg, "hidden_sizes") and len(cfg.hidden_sizes) > 0:
-            self.hidden_size = cfg.hidden_sizes[-1]
+            self._hidden_size = cfg.hidden_sizes[-1]
         elif hasattr(cfg, "neck_hidden_sizes") and len(cfg.neck_hidden_sizes) > 0:
-            self.hidden_size = cfg.neck_hidden_sizes[-1]
+            self._hidden_size = cfg.neck_hidden_sizes[-1]
         else:
             # last resort: run a dummy forward pass to infer channel dim
             with torch.no_grad():
                 img_size = getattr(cfg, "image_size", 256)
-                dummy = torch.zeros(1, 3, img_size, img_size, device=self._device, dtype=self.model.dtype)
+                dummy = torch.zeros(1, 3, img_size, img_size, device=self._device, dtype=self._dtype)
                 c = self.model(dummy, output_hidden_states=False).last_hidden_state.shape[1]
-                self.hidden_size = c
-
-        self._dtype = dtype
-        self._device = torch.device(device)
+                self._hidden_size = c
 
         # vision backbone is frozen
         for param in self.model.parameters():
             param.requires_grad = False
-
-        self.model.to(self._device)
-        self.model.eval()
 
     def process_image(self, images):
         '''
@@ -87,3 +86,6 @@ class VisionTower(nn.Module):
     def config(self):
         return self.model.config
         
+    @property
+    def hidden_size(self):
+        return self._hidden_size
