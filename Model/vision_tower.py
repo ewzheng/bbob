@@ -16,10 +16,16 @@ class VisionTower(nn.Module):
         self.model = MobileViTV2Model.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256", torch_dtype=dtype)
         self.image_processor = MobileViTImageProcessor()
 
-        # expose backbone embedding dimension as a *plain attribute* so it can
-        # be accessed without relying on properties (avoids AttributeError in
-        # some dynamic-loading scenarios).
-        self.hidden_size = self.model.config.hidden_size
+        # derive final feature dimension across MobileViT variants
+        cfg = self.model.config
+        if hasattr(cfg, "hidden_size") and cfg.hidden_size is not None:
+            self.hidden_size = cfg.hidden_size
+        elif hasattr(cfg, "hidden_sizes") and len(cfg.hidden_sizes) > 0:
+            self.hidden_size = cfg.hidden_sizes[-1]
+        elif hasattr(cfg, "neck_hidden_sizes") and len(cfg.neck_hidden_sizes) > 0:
+            self.hidden_size = cfg.neck_hidden_sizes[-1]
+        else:
+            raise AttributeError("Cannot determine feature dimension: config lacks hidden_size/hidden_sizes/neck_hidden_sizes")
 
         self._dtype = dtype
         self._device = torch.device(device)
