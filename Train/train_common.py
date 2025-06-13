@@ -380,7 +380,7 @@ def load_model(src, bnb_config):
 
     return model.BBOB(src, bnb_config=bnb_config)
 
-def calculate_optimal_batch_size(safety_margin=0.15, min_batch_size=8, max_batch_size=1024):
+def calculate_optimal_batch_size(safety_margin=0.15, min_batch_size=8, max_batch_size=8192):
     """
     Automatically calculate optimal batch size based on available VRAM
     
