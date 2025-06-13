@@ -271,12 +271,12 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype
     # add instruction to each sample to create "text" field
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
-    max_workers = min(mp.cpu_count() - 1, 4)
+    max_workers = min(mp.cpu_count() - 1, 8)
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
         gpu_batch_size = calculate_optimal_batch_size(safety_margin=0.15)
-        cpu_batch_size = 64  # conservative CPU batch for RAM safety
+        cpu_batch_size = 64 
         print(f"Using GPU batch size: {gpu_batch_size}, CPU batch size: {cpu_batch_size}")
     else:
         gpu_batch_size = 64
@@ -380,7 +380,7 @@ def load_model(src, bnb_config):
 
     return model.BBOB(src, bnb_config=bnb_config)
 
-def calculate_optimal_batch_size(safety_margin=0.15, min_batch_size=8, max_batch_size=8192):
+def calculate_optimal_batch_size(safety_margin=0.15, min_batch_size=8, max_batch_size=16384):
     """
     Automatically calculate optimal batch size based on available VRAM
     
