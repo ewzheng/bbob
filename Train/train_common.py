@@ -129,7 +129,7 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
         ])
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256)):
+def preprocess_batch(batch, vision_tower, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256)):
     """
     Convert a raw *batch* of samples into model-ready tensors.
 
@@ -142,6 +142,7 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
 
     Parameters:
         - batch: dict with keys like ``image`` / ``text`` / ``objects`` …
+        - vision_tower: VisionTower object for processing images
         - tokenizer: HuggingFace tokenizer (will auto-add pad token if missing)
         - gpu_batch_size: unused here – kept for backwards compatibility.
         - bbox_jitter_ratio: float, jitter amplitude for bboxes when *training*.
@@ -175,7 +176,7 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
 
         # apply letter-box resize
         lb_img, scale, pad_w, pad_h = letterbox_image(rgb, target_size=target_size)
-
+    
         processed_images.append(lb_img)
         image_sizes.append(rgb.size)          # (orig_w, orig_h)
         padded_image_sizes.append(target_size)
@@ -322,8 +323,6 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction):
         trust_remote_code=True,
         storage_options={"client_kwargs": {"timeout": aiohttp.ClientTimeout(total=10000)}}
     )
-
-
 
     # handle different dataset structures automatically
     if isinstance(dataset, datasets.DatasetDict):

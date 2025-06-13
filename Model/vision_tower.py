@@ -14,7 +14,7 @@ class VisionTower(nn.Module):
         super().__init__()
 
         self.model = MobileViTV2Model.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256", torch_dtype=dtype)
-        self.image_processor = MobileViTImageProcessor()
+        self.image_processor = MobileViTImageProcessor.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256")
         self._dtype = dtype
         self._device = torch.device(device)
         

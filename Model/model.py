@@ -14,6 +14,8 @@ from .projector import Projector
 from peft import PeftModel, PeftConfig
 from safetensors.torch import save_file 
 from .vision_tower import VisionTower
+import json
+import safetensors.torch as st
 
 class BBOB(nn.Module):
     """
@@ -71,6 +73,8 @@ class BBOB(nn.Module):
 
         # ensure projector on same device/dtype as base model weights
         self.projector.to(base_model_device, dtype=base_model_dtype)
+        print(f"Model device: {self._device}, dtype: {self._dtype}")
+        print(f"Vision Tower device: {self.vision_tower.device}, dtype: {self.vision_tower.dtype}")
         print(f"Projector device: {next(self.projector.parameters()).device}, dtype: {next(self.projector.parameters()).dtype}")
 
 
@@ -259,7 +263,6 @@ class BBOB(nn.Module):
             • `vision_tower/`         – (optional) directory with vision-tower
               weights.
         """
-        import json, os
         os.makedirs(output_dir, exist_ok=True)
 
         # 1. Save language model
@@ -314,7 +317,6 @@ class BBOB(nn.Module):
             - BBOB – fully initialised model, ready for inference or further
               fine-tuning.
         """
-        import json, os
         # read config
         cfg_file = os.path.join(model_path, "config.json")
         if not os.path.isfile(cfg_file):
@@ -328,7 +330,6 @@ class BBOB(nn.Module):
         # load projector
         proj_path = cfg.get("projector")
         if proj_path and os.path.isfile(proj_path):
-            import safetensors.torch as st
             state = st.load_file(proj_path, device=obj.projector.device)
             obj.projector.load_state_dict(state)
         else:

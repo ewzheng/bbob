@@ -19,7 +19,8 @@ import sys
 import os
 import multiprocess as mp
 
-from train_common import load_and_prepare_dataset, load_model
+from train_common import load_and_prepare_dataset
+from Model.build import build_BBOB
 
 # Hugging Face / TRL trainer imports
 from trl import SFTTrainer, SFTConfig
@@ -28,13 +29,6 @@ from trl import SFTTrainer, SFTConfig
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
-# -----------------------------------------------------------------------------
-# Dynamic collator that builds "input_ids" = [instruction | target] and
-# corresponding "labels" that mask the instruction tokens (−100) so the loss is
-# computed **only** on the *target_text* segment.  No subclassing of Trainer is
-# required – the stock loss from AutoModelForCausalLM handles everything.
-# -----------------------------------------------------------------------------
 
 def make_collate_fn(pad_token_id: int):
     """Return a collate function capturing the pad id from the tokenizer."""
@@ -187,13 +181,7 @@ def main():
     logger.info(f"Loading dataset from: {args.dataset}")
     logger.info(f"Training for max {args.epochs} epochs")
 
-    model = load_model(args.model, args.bnb_config)
-
-    model.freeze_model()                           
-    for p in model.vision_tower.parameters():      
-        p.requires_grad = False
-    model.vision_tower.eval()
-    model.unfreeze_projector()                     
+    model = build_BBOB(args.model, args.bnb_config)
 
     train_dataset, val_dataset = load_and_prepare_dataset(
         args.dataset,
