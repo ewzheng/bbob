@@ -461,6 +461,10 @@ def collate(batch):
         elif key == "target_labels":
             tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
             result[key] = pad_sequence(tensors, batch_first=True, padding_value=-100)
+        elif key == "target_text":
+            # already token ids – pad exactly like input_ids (value = pad_token_id==0)
+            tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
+            result[key] = pad_sequence(tensors, batch_first=True, padding_value=0)
         else:
             result[key] = elems  # leave as list
 

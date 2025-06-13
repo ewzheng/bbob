@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformer import MobileViTV2Model, MobileViTV2Config, MobileViTImageProcessor
+from transformers import MobileViTV2Model, MobileViTImageProcessor
 
 class VisionTower(nn.Module):
     def __init__(self, dtype, device):

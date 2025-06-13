@@ -7,9 +7,6 @@ Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs
 '''
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.cuda.amp import autocast, GradScaler
 import argparse
 import time
 import logging
@@ -22,270 +19,134 @@ import sys
 import os
 import multiprocess as mp
 
-from train_common import load_and_prepare_dataset, load_model, collate, compute_embedding_similarity, compute_gradient_norm, compute_parameter_norm
-from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
+from train_common import load_and_prepare_dataset, load_model
+
+# Hugging Face / TRL trainer imports
+from trl import SFTTrainer, SFTConfig
 
 # configure logging (if not already configured)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-def projector_loss(model, images, input_ids, attention_mask):
+# -----------------------------------------------------------------------------
+# Dynamic collator that builds "input_ids" = [instruction | target] and
+# corresponding "labels" that mask the instruction tokens (−100) so the loss is
+# computed **only** on the *target_text* segment.  No subclassing of Trainer is
+# required – the stock loss from AutoModelForCausalLM handles everything.
+# -----------------------------------------------------------------------------
+
+def make_collate_fn(pad_token_id: int):
+    """Return a collate function capturing the pad id from the tokenizer."""
+
+    def _collate(batch):
+        from torch.nn.utils.rnn import pad_sequence
+        import torch
+
+        # keep PIL images untouched; TRL Trainer will move them to device later
+        images = [item["images"] for item in batch]
+
+        merged_input_ids = []
+        merged_labels = []
+
+        for item in batch:
+            instr_ids = item["input_ids"]
+            tgt_ids   = item["target_text"]
+
+            # drop padding tokens that were added during preprocessing
+            instr_ids = instr_ids[instr_ids != pad_token_id]
+            tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
+
+            # concatenate instruction + target ⇒ model input
+            ids = torch.cat([instr_ids, tgt_ids], dim=0)
+
+            # labels: ignore instruction tokens; learn on target tokens only
+            lbl = ids.clone()
+            lbl[: instr_ids.size(0)] = -100
+
+            merged_input_ids.append(ids)
+            merged_labels.append(lbl)
+
+        # pad to max length in batch
+        input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
+        labels_padded    = pad_sequence(merged_labels,    batch_first=True, padding_value=-100)
+
+        attention_mask = (input_ids_padded != pad_token_id).long()
+
+        return {
+            "images": images,
+            "input_ids": input_ids_padded,
+            "attention_mask": attention_mask,
+            "labels": labels_padded,
+        }
+
+    return _collate
+
+
+def train(
+    model,
+    train_dataset,
+    val_dataset,
+    output_dir,
+    *,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    grad_acc_steps: int = 1,
+):
     """
-    Compute language modeling loss using model's forward pass
-    
+    Fine-tune *only* the **projector** through TRL's ``SFTTrainer``.
+
     Parameters:
-        - model: BBOB instance (vision tower + projector + base LLM)
-        - images: list[PIL.Image]  – letter-boxed images for the batch
-        - input_ids: torch.LongTensor (B, T) – token ids
-        - attention_mask: torch.LongTensor (B, T) – padding mask (1 = keep)
-        
+        - model: BBOB instance (vision tower + base LLM already loaded).
+        - train_dataset: processed dataset created by ``load_and_prepare_dataset``.
+        - val_dataset:   validation dataset (same structure).
+        - output_dir: str – directory for checkpoints.
+        - epochs: int – number of epochs.
+        - batch_size: int – per-device batch size.
+        - lr: float – learning rate for AdamW.
+        - grad_acc_steps: int – gradient-accumulation steps (default 1).
+
     Returns:
-        - language modeling loss from model forward pass
+        - None – model is saved to *output_dir* on completion.
     """
-    # Create text-only language-model labels (visual padding handled in `BBOB.forward`)
-    labels = input_ids.clone()
-    labels[attention_mask == 0] = -100
 
-    # Forward pass through the multimodal model – it will internally run the
-    # vision tower ➔ projector pipeline and prepend the necessary masked visual
-    # tokens to *labels*.
-    outputs = model(
-        images=images,
-        input_ids=input_ids,
-        attention_mask=attention_mask,
-        labels=labels,
-    )
-    
-    return outputs.loss
-
-
-
-def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gradient_accumulation_steps=1):
-    """
-    Train the projector component with comprehensive logging and monitoring
-    
-    Parameters:
-        - model: BBOB model with frozen base model and vision encoder
-        - train: training dataset with preprocessed features
-        - test: validation dataset with preprocessed features  
-        - epochs: number of training epochs
-        - output_dir: directory for saving checkpoints and logs
-        - learning_rate: learning rate for optimizer
-        - batch_size: batch size for training
-        - gradient_accumulation_steps: number of steps to accumulate gradients before optimizer step
-    Returns:
-        - None (saves best model checkpoint during training)
-    """
-    # setup device and move model to GPU if available
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-    
-    # verify all model components are on the same device
-    logger.info(f"Model device: {device}")
-    logger.info(f"Projector device: {next(model.projector.parameters()).device}")
-    logger.info(f"Base model device: {next(model.base_model.parameters()).device}")
-    logger.info(f"Vision encoder device: {next(model.vision_encoder.parameters()).device}")
-    
-    # set frozen components to eval mode once (they stay frozen throughout training)
-    model.base_model.eval()
-    model.freeze_model()
-    for p in model.vision_tower.parameters():
-        p.requires_grad = False
+    model.freeze_model()                       
     model.vision_tower.eval()
-    
-    optimizer = optim.AdamW(
-        model.projector.parameters(),
-        lr=learning_rate,
-        weight_decay=0.0
+    model.vision_tower.freeze()           
+    model.unfreeze_projector()                  
+
+    # prepare training config and trainer ------------------------------------------------
+    cfg = SFTConfig(
+        output_dir                  = output_dir,
+        num_train_epochs            = epochs,
+        per_device_train_batch_size = batch_size,
+        per_device_eval_batch_size  = batch_size,
+        gradient_accumulation_steps = grad_acc_steps,
+        learning_rate               = lr,
+        fp16                        = torch.cuda.is_available(),
+        evaluation_strategy         = "epoch",
+        save_strategy               = "epoch",
+        logging_steps               = 50,
+        weight_decay                = 0.0,
+        report_to                   = "none",
     )
 
-    # Scheduler setup (cosine with hard restarts and warmup)
-    steps_per_epoch = len(train) // 32 if hasattr(train, '__len__') else 1000  # fallback if train is not a Dataset
-    num_training_steps = epochs * steps_per_epoch
-    warmup_steps = max(100, int(0.05 * num_training_steps))
-    scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=num_training_steps,
-        num_cycles=1
+    # custom collator that injects labels based on *target_text*
+    collate_fn = make_collate_fn(model.get_tokenizer().pad_token_id)
+
+    trainer = SFTTrainer(
+        model          = model,
+        train_dataset  = train_dataset,
+        eval_dataset   = val_dataset,
+        data_collator  = collate_fn,
+        args           = cfg,
     )
 
-    # initialize mixed precision scaler
-    scaler = GradScaler("cuda") if torch.cuda.is_available() and not next(model.base_model.parameters()).dtype == torch.bfloat16 else None
-    logger.info(f"Mixed precision training: {'Enabled' if scaler is not None else 'Disabled'}")
-    
-    # create data loaders with custom collate function to handle variable-sized tensors
-    train_loader = DataLoader(train, batch_size=batch_size, shuffle=True, collate_fn=collate, pin_memory=True, 
-                             num_workers=2, persistent_workers=True, prefetch_factor=1) 
-    test_loader = DataLoader(test, batch_size=batch_size, shuffle=False, collate_fn=collate, pin_memory=True,
-                            num_workers=2, persistent_workers=True, prefetch_factor=1)
-    
-    # training tracking variables
-    best_train_loss = float('inf')
-    start_time = time.time()
-    
-    # create checkpoint directory
-    checkpoint_dir = f"{output_dir}/checkpoints"
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    trainer.train()
+    model.save_pretrained(output_dir)
 
-    # log initial memory usage (baseline) 
-    initial_memory = torch.cuda.memory_allocated(device) / 1024**3 if torch.cuda.is_available() else 0
-    logger.info(f"Initial GPU memory usage: {initial_memory:.2f}GB")
-    
-    logger.info(f"Starting projector training for {epochs} epochs")
-    logger.info(f"Device: {device}")
-    logger.info(f"Train batches: {len(train_loader)}, Val batches: {len(test_loader)}")
-
-    for epoch in range(epochs):
-        epoch_start_time = time.time()
-        
-        # set projector to training mode 
-        model.projector.train()
-        
-        # training phase
-        total_train_loss = 0
-        total_similarity = 0
-        similarity_count = 0
-        accumulation_counter = 0
-        optimizer.zero_grad()
-        
-        for batch_idx, batch in enumerate(train_loader):
-            batch_start_time = time.time()
-            
-            # Flatten potential nested lists (each sample might store its single
-            # image in a 1-element list)
-            images_raw = batch["images"]
-            images = [im[0] if isinstance(im, list) else im for im in images_raw]
-            input_ids = batch["input_ids"].to(device)
-            attention_mask = batch["attention_mask"].to(device)
-            
-            # compute loss using language modeling approach with mixed precision
-            if scaler is not None:
-                # mixed precision forward pass
-                with autocast("cuda"):
-                    loss = projector_loss(model, images, input_ids, attention_mask)
-                loss = loss / gradient_accumulation_steps
-                
-                with torch.no_grad():
-                    text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                    visual_embeds = model._prepare_visual_inputs(images)
-                    similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
-                similarity_count += 1
-            
-                # mixed precision backward pass
-                scaler.scale(loss).backward()
-            else:
-                # standard precision training (fallback)
-                loss = projector_loss(model, images, input_ids, attention_mask)
-                loss = loss / gradient_accumulation_steps
-
-                with torch.no_grad():
-                    text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                    visual_embeds = model._prepare_visual_inputs(images)
-                    similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
-                similarity_count += 1
-
-                loss.backward()
-            
-            # accumulate statistics (use unscaled loss for reporting)
-            total_train_loss += loss.item() * gradient_accumulation_steps
-            total_similarity += similarity
-            accumulation_counter += 1
-            logger.info(f"Accumulation counter: {accumulation_counter}")
-            
-            do_step = (accumulation_counter == gradient_accumulation_steps) or (batch_idx + 1 == len(train_loader))
-            if do_step:
-                if scaler is not None:
-                    scaler.unscale_(optimizer)
-                    grad_norm = compute_gradient_norm(model)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    grad_norm = compute_gradient_norm(model)
-                    optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
-                accumulation_counter = 0
-                batch_time = time.time() - batch_start_time
-                samples_per_sec = len(images) / max(batch_time, 1e-6)
-                current_lr = scheduler.get_last_lr()[0]
-                logger.info(f"Epoch {epoch+1}/{epochs} Batch {batch_idx}/{len(train_loader)}: "
-                           f"Loss={loss.item() * gradient_accumulation_steps:.4f}, Sim={similarity:.3f}, "
-                           f"GradNorm={grad_norm:.2e}, Speed={samples_per_sec:.1f} samples/s, LR={current_lr:.2e}")
-            
-            # checkpoint every 512 batches using training loss
-            if batch_idx > 0 and batch_idx % 512 == 0 and do_step:
-                # use current training loss for checkpointing (maintains train/val separation)
-                current_train_loss = loss.item() * gradient_accumulation_steps
-                # save checkpoint if this is the best training loss so far
-                if current_train_loss < best_train_loss:
-                    best_train_loss = current_train_loss
-                    best_model_dir = f"{checkpoint_dir}/best_model-batch_{batch_idx}"
-                    os.makedirs(best_model_dir, exist_ok=True)
-                    model.save_pretrained(best_model_dir)
-                    logger.info(f"NEW BEST MODEL at batch {batch_idx}: Train Loss={current_train_loss:.4f}")
-        
-        # validation phase
-        model.projector.eval()
-        total_val_loss = 0
-        total_val_similarity = 0
-        with torch.no_grad():
-            for batch in test_loader:
-                # Flatten potential nested lists (each sample might store its single
-                # image in a 1-element list)
-                images_raw = batch["images"]
-                images = [im[0] if isinstance(im, list) else im for im in images_raw]
-                input_ids = batch["input_ids"].to(device)
-                attention_mask = batch["attention_mask"].to(device)
-                # compute validation loss using language modeling with mixed precision
-                if scaler is not None:
-                    with autocast("cuda"):
-                        loss = projector_loss(model, images, input_ids, attention_mask)
-                        # compute similarity for monitoring
-                        text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                        visual_embeds = model._prepare_visual_inputs(images)
-                        similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
-                else:
-                    # standard precision validation (fallback)
-                    loss = projector_loss(model, images, input_ids, attention_mask)
-                    # compute similarity for monitoring
-                    text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                    visual_embeds = model._prepare_visual_inputs(images)
-                    similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
-                total_val_loss += loss.item()
-                total_val_similarity += similarity
-            # clear GPU memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        # calculate epoch statistics
-        avg_train_loss = total_train_loss / max(len(train_loader), 1)
-        avg_val_loss = total_val_loss / max(len(test_loader), 1)
-        avg_train_similarity = total_similarity / max(similarity_count, 1)  # only divide by batches where similarity was computed
-        avg_val_similarity = total_val_similarity / max(len(test_loader), 1)
-        # compute model statistics
-        param_norm = compute_parameter_norm(model)
-        epoch_time = time.time() - epoch_start_time
-        # compute convergence indicators
-        train_val_gap = avg_train_loss - avg_val_loss
-        improvement = best_train_loss - avg_train_loss if best_train_loss != float('inf') else 0
-        # log comprehensive epoch statistics
-        logger.info(f"=== EPOCH {epoch+1}/{epochs} SUMMARY ===")
-        logger.info(f"Losses: Train={avg_train_loss:.4f}, Val={avg_val_loss:.4f}, Gap={train_val_gap:.4f}")
-        logger.info(f"Similarities: Train={avg_train_similarity:.3f}, Val={avg_val_similarity:.3f}")
-        logger.info(f"Model: ParamNorm={param_norm:.3f}, LR={optimizer.param_groups[0]['lr']:.2e}")
-        logger.info(f"Performance: EpochTime={epoch_time:.1f}s, Improvement={improvement:.4f}")
-        # save epoch checkpoint (always save latest, validation is for monitoring only)
-        current_dir = f"{checkpoint_dir}/latest-{epoch+1}"
-        os.makedirs(current_dir, exist_ok=True)
-        model.save_pretrained(current_dir)
-        logger.info(f"Epoch {epoch+1} checkpoint saved. Current Val Loss: {avg_val_loss:.4f}, Best Train Loss: {best_train_loss:.4f}")
-    # final training summary
-    total_time = time.time() - start_time
-    logger.info(f"=== TRAINING COMPLETE ===")
-    logger.info(f"Total time: {total_time:.1f}s ({total_time/60:.1f}min)")
-    logger.info(f"Best training loss: {best_train_loss:.4f}")
-    logger.info(f"Final train/val gap: {train_val_gap:.4f}")
+    return
 
 def main():
     """
@@ -326,28 +187,30 @@ def main():
     logger.info(f"Loading dataset from: {args.dataset}")
     logger.info(f"Training for max {args.epochs} epochs")
 
-    # load model
     model = load_model(args.model, args.bnb_config)
 
-    # prepare datasets using the streamlined preprocessing pipeline
-    train_dataset, test_dataset = load_and_prepare_dataset(
+    model.freeze_model()                           
+    for p in model.vision_tower.parameters():      
+        p.requires_grad = False
+    model.vision_tower.eval()
+    model.unfreeze_projector()                     
+
+    train_dataset, val_dataset = load_and_prepare_dataset(
         args.dataset,
         tokenizer=model.get_tokenizer(),
         instruction=args.instruction,
     )
-    
-    # freeze model, vision tower, train only the projector 
-    model.freeze_model()
-    for p in model.vision_tower.parameters():
-        p.requires_grad = False
-    model.vision_tower.eval()
-    model.unfreeze_projector()
 
-    train(model, train_dataset, test_dataset, args.epochs, output_dir, args.lr, args.batch_size, args.gradient_accumulation_steps)
-
-    # save final model in main output directory
-    logger.info(f"Saving final model to: {output_dir}")
-    model.save_pretrained(output_dir)
+    train(
+        model,
+        train_dataset,
+        val_dataset,
+        output_dir,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        grad_acc_steps=args.gradient_accumulation_steps,
+    )
 
     logger.info("Projector training is complete, model successfully saved.")
     return
