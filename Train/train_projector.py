@@ -110,7 +110,10 @@ def train(
     model.vision_tower.freeze()           
     model.unfreeze_projector()                  
 
-    # prepare training config and trainer ------------------------------------------------
+    # config
+    cuda = torch.cuda.is_available()
+    bf16_supported = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+
     cfg = SFTConfig(
         output_dir                  = output_dir,
         num_train_epochs            = epochs,
@@ -118,7 +121,8 @@ def train(
         per_device_eval_batch_size  = batch_size,
         gradient_accumulation_steps = grad_acc_steps,
         learning_rate               = lr,
-        fp16                        = torch.cuda.is_available(),
+        bf16                        = bf16_supported,
+        fp16                        = cuda and not bf16_supported,
         evaluation_strategy         = "epoch",
         save_strategy               = "epoch",
         logging_steps               = 50,
