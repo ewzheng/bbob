@@ -31,6 +31,7 @@ import Model.model as model
 
 import logging
 import yaml
+import psutil
 
 def jitter_bboxes(bboxes, img_width, img_height, dtype, jitter_ratio=0.05):
     """
@@ -273,14 +274,12 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype
     
     max_workers = min(mp.cpu_count() - 1, 16)
     
-    # separate CPU and GPU batch sizes for memory management
+    # determine optimal batch sizes ----------------------------------------------------
+    gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=0.15)
+
     if torch.cuda.is_available():
-        gpu_batch_size = calculate_optimal_batch_size(safety_margin=0.15)
-        cpu_batch_size = 64 
         print(f"Using GPU batch size: {gpu_batch_size}, CPU batch size: {cpu_batch_size}")
     else:
-        gpu_batch_size = 64
-        cpu_batch_size = 64
         print(f"CPU mode - using batch size: {cpu_batch_size}")
     
     _preprocessing_function = partial(
@@ -380,54 +379,79 @@ def load_model(src, bnb_config):
 
     return model.BBOB(src, bnb_config=bnb_config)
 
-def calculate_optimal_batch_size(safety_margin=0.15, min_batch_size=8, max_batch_size=32768):
+def calculate_optimal_batch_size(
+    workers = 1,
+    safety_margin= 0.15,
+    min_batch_size = 8,
+    max_batch_size = 32768,
+):
+    """Compute **both** GPU and CPU batch sizes.
+
+    GPU: uses free VRAM; CPU: uses available system RAM & logical cores.
+
+    Returns
+    -------
+    (gpu_bs, cpu_bs) : tuple[int | None, int]
+        • *gpu_bs* – optimal per-device GPU batch size or *None* when CUDA is
+          not available.
+        • *cpu_bs* – optimal CPU-side batch size for multiprocessing image
+          preprocessing.
     """
-    Automatically calculate optimal batch size based on available VRAM
-    
-    Parameters:
-        - safety_margin: fraction of VRAM to leave as headroom (default: 15%)
-        - min_batch_size: minimum allowed batch size
-        - max_batch_size: maximum allowed batch size
-        
-    Returns:
-        - optimal_batch_size: calculated batch size with safety margin
-    """
-    if not torch.cuda.is_available():
-        print("No CUDA available, using default batch size: 64")
-        return 64
-    
-    props = torch.cuda.get_device_properties(0)
-    total_vram = props.total_memory
-    allocated = torch.cuda.memory_allocated(0)
-    available_vram = total_vram - allocated
-    
-    print(f"VRAM Analysis:")
-    print(f"Total VRAM: {total_vram/1024**3:.1f}GB")
-    print(f"Currently allocated: {allocated/1024**3:.1f}GB")
-    print(f"Available: {available_vram/1024**3:.1f}GB")
-    
-    # Very rough estimate: assume ~4 MB per sample (text + vision activations).
-    # This number is empirical and can be tuned per-project.
-    memory_per_sample = 4 * 1024 * 1024
-    
-    optimal_batch_size = int(available_vram / memory_per_sample) 
-    
-    # apply limits
-    optimal_batch_size = max(min_batch_size, min(optimal_batch_size, max_batch_size))
-    
-    # round down to nearest power of 2 for optimal GPU efficiency
-    if optimal_batch_size >= 2:
-        power = int(math.log2(optimal_batch_size))
-        optimal_batch_size = 2 ** power
-    
-    estimated_usage = (optimal_batch_size * memory_per_sample) / 1024**3
-    vram_percentage = (estimated_usage / (total_vram / 1024**3)) * 100
-    
-    print(f"Calculated optimal batch size: {optimal_batch_size}")
-    print(f"Estimated VRAM usage: {estimated_usage:.1f}GB ({vram_percentage:.1f}%)")
-    print(f"Safety margin: {safety_margin*100:.0f}% ({(available_vram * safety_margin)/1024**3:.1f}GB)")
-    
-    return optimal_batch_size
+
+    # gpu batch
+    gpu_batch_size: int | None = None
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        total_vram = props.total_memory
+        allocated = torch.cuda.memory_allocated(0)
+        available_vram = total_vram - allocated
+
+        print("VRAM Analysis:")
+        print(f"  Total VRAM:       {total_vram/1024**3:.1f} GB")
+        print(f"  Currently alloc.: {allocated/1024**3:.1f} GB")
+        print(f"  Available:        {available_vram/1024**3:.1f} GB")
+
+        memory_per_sample_gpu = 4 * 1024 * 1024  # 4 MB heuristic per sample
+        gpu_batch_size = int(available_vram / memory_per_sample_gpu)
+        gpu_batch_size = max(min_batch_size, min(gpu_batch_size, max_batch_size))
+
+        if gpu_batch_size >= 2:
+            gpu_batch_size = 2 ** int(math.log2(gpu_batch_size))
+
+        est_usage = (gpu_batch_size * memory_per_sample_gpu) / 1024**3
+        pct = (est_usage / (total_vram / 1024**3)) * 100
+        print(f"  → GPU batch size:  {gpu_batch_size}  (≈{est_usage:.1f} GB, {pct:.1f}% of VRAM)")
+
+    # cpu batch
+    if psutil is not None:
+        vm = psutil.virtual_memory()
+        total_ram = vm.total
+        available_ram = vm.available
+    else:
+        # fallback: assume 8 GB total with 50 % free
+        total_ram = 8 * 1024**3
+        available_ram = total_ram * (1 - safety_margin)
+
+    print("RAM Analysis:")
+    print(f"  Total RAM:        {total_ram/1024**3:.1f} GB")
+    print(f"  Available RAM:    {available_ram/1024**3:.1f} GB")
+
+    memory_per_sample_cpu = 2 * 1024 * 1024  
+    cpu_bs_mem = int(available_ram * (1 - safety_margin) / memory_per_sample_cpu)
+
+    # also cap by CPU cores (e.g. 8 samples per logical core)
+    cpu_cores = os.cpu_count() or 4
+    cpu_bs_core = cpu_cores * 8
+
+    cpu_batch_size = min(cpu_bs_mem, cpu_bs_core)
+    cpu_batch_size = max(min_batch_size, min(cpu_batch_size, max_batch_size))
+    if cpu_batch_size >= 2:
+        cpu_batch_size = 2 ** int(math.log2(cpu_batch_size))
+
+    est_cpu_usage = (cpu_batch_size * memory_per_sample_cpu) / 1024**3
+    print(f"  → CPU batch size:  {cpu_batch_size}  (≈{est_cpu_usage:.1f} GB RAM)")
+
+    return gpu_batch_size, cpu_batch_size
 
 def collate(batch):
     """

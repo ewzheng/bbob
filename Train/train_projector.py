@@ -9,7 +9,6 @@ Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs
 import torch
 import argparse
 import time
-import logging
 from datetime import datetime
 from torch.utils.data import DataLoader
 
@@ -24,10 +23,7 @@ from Model.build import build_BBOB
 
 # Hugging Face / TRL trainer imports
 from trl import SFTTrainer, SFTConfig
-
-# configure logging (if not already configured)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from Utils.logging import get_logger, LoggingCallback
 
 
 def make_collate_fn(pad_token_id: int):
@@ -87,6 +83,7 @@ def train(
     batch_size: int,
     lr: float,
     grad_acc_steps: int = 1,
+    logger,
 ):
     """
     Fine-tune *only* the **projector** through TRL's ``SFTTrainer``.
@@ -139,7 +136,10 @@ def train(
         eval_dataset   = val_dataset,
         data_collator  = collate_fn,
         args           = cfg,
+        callbacks      = [LoggingCallback(logger)],
     )
+
+    logger.info("Starting training of projector...")
 
     trainer.train()
     model.save_pretrained(output_dir)
@@ -173,13 +173,8 @@ def main():
     output_dir = f"Output/{current_datetime}"
     os.makedirs(output_dir, exist_ok=True)
 
-    # add file handler for logging to file
-    logfile = os.path.join(output_dir, "training.log")
-    if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(logfile) for h in logger.handlers):
-        file_handler = logging.FileHandler(logfile)
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-        logger.addHandler(file_handler)
+    # logging
+    logger = get_logger(output_dir) 
 
     logger.info(f"Loading base language model from: {args.model}")
     logger.info(f"Loading dataset from: {args.dataset}")
@@ -203,6 +198,7 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         grad_acc_steps=args.gradient_accumulation_steps,
+        logger=logger,
     )
 
     logger.info("Projector training is complete, model successfully saved.")
