@@ -16,31 +16,20 @@ class VisionTower(nn.Module):
         self.model = MobileViTV2Model.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256", torch_dtype=dtype)
         self.image_processor = MobileViTImageProcessor()
 
+        # expose backbone embedding dimension as a *plain attribute* so it can
+        # be accessed without relying on properties (avoids AttributeError in
+        # some dynamic-loading scenarios).
+        self.hidden_size = self.model.config.hidden_size
+
         self._dtype = dtype
         self._device = torch.device(device)
 
-        # move to device and set to eval mode since this shit is never getting trained
+        # vision backbone is frozen
         for param in self.model.parameters():
             param.requires_grad = False
 
         self.model.to(self._device)
         self.model.eval()
-
-    @property 
-    def dtype(self):
-        return self._dtype
-    
-    @property
-    def device(self):
-        return self._device
-    
-    @property
-    def config(self):
-        return self.model.config
-    
-    @property
-    def hidden_size(self):
-        return self.model.config.hidden_size
 
     def process_image(self, images):
         '''
@@ -74,4 +63,20 @@ class VisionTower(nn.Module):
         ).last_hidden_state  # (B, C, H, W)
 
         return seq_feats
+        
+    # ------------------------------------------------------------------
+    # Convenience accessors
+    # ------------------------------------------------------------------
+
+    @property
+    def dtype(self):
+        return self._dtype
+    
+    @property
+    def device(self):
+        return self._device
+    
+    @property
+    def config(self):
+        return self.model.config
         
