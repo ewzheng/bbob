@@ -1,14 +1,15 @@
 '''
 File: train_projector.py
 Author: Elias Zheng and Claude
-Description: This script trains the projector component of the BBOB model.
-Usage: python train_projector.py -m <model_path> -d <dataset_path> -e <epochs> -v <vision_tower_path> -i <instruction_text>
+Description: Train only the **projector** of the refactored BBOB model. The
+vision tower is instantiated internally, so no external path is required.
+Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs> -i <instruction_text>
 '''
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 import argparse
 import time
 import logging
@@ -29,50 +30,31 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def projector_loss(model, vision_features, input_ids, attention_mask):
+def projector_loss(model, images, input_ids, attention_mask):
     """
     Compute language modeling loss using model's forward pass
-    This is the correct LLaVA Stage 1 approach
     
     Parameters:
-        - model: BBOB model with projector and language model
-        - vision_features: raw vision features from encoder [batch, seq_len, hidden_dim]  
-        - input_ids: tokenized text input [batch, seq_len]
-        - attention_mask: attention mask for text [batch, seq_len]
+        - model: BBOB instance (vision tower + projector + base LLM)
+        - images: list[PIL.Image]  – letter-boxed images for the batch
+        - input_ids: torch.LongTensor (B, T) – token ids
+        - attention_mask: torch.LongTensor (B, T) – padding mask (1 = keep)
         
     Returns:
         - language modeling loss from model forward pass
     """
-    # Project vision features to get the number of visual tokens
-    projected_vision = model.projector(vision_features)
-    num_visual_tokens = projected_vision.shape[1]  # Number of visual tokens per batch
-    
-    # Create labels accounting for visual tokens
-    # Visual tokens should be ignored in loss (set to -100)
-    batch_size = input_ids.shape[0]
-    device = input_ids.device
-    
-    # Create visual token labels (all -100 to ignore in loss)
-    visual_labels = torch.full(
-        (batch_size, num_visual_tokens), 
-        -100, 
-        dtype=input_ids.dtype, 
-        device=device
-    )
-    
-    # Create text labels (same as input_ids, with -100 for padding)
-    text_labels = input_ids.clone()
-    text_labels[attention_mask == 0] = -100
-    
-    # Concatenate visual and text labels to match the combined sequence
-    labels = torch.cat([visual_labels, text_labels], dim=1)
-    
-    # Forward pass through the model with vision features and text
+    # Create text-only language-model labels (visual padding handled in `BBOB.forward`)
+    labels = input_ids.clone()
+    labels[attention_mask == 0] = -100
+
+    # Forward pass through the multimodal model – it will internally run the
+    # vision tower ➔ projector pipeline and prepend the necessary masked visual
+    # tokens to *labels*.
     outputs = model(
-        vision_features=vision_features,
+        images=images,
         input_ids=input_ids,
         attention_mask=attention_mask,
-        labels=labels
+        labels=labels,
     )
     
     return outputs.loss
@@ -107,7 +89,10 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
     
     # set frozen components to eval mode once (they stay frozen throughout training)
     model.base_model.eval()
-    model.vision_encoder.eval()
+    model.freeze_model()
+    for p in model.vision_tower.parameters():
+        p.requires_grad = False
+    model.vision_tower.eval()
     
     optimizer = optim.AdamW(
         model.projector.parameters(),
@@ -168,8 +153,10 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
         for batch_idx, batch in enumerate(train_loader):
             batch_start_time = time.time()
             
-            # move data to device
-            vision_features = batch["vision_features"].to(device)
+            # Flatten potential nested lists (each sample might store its single
+            # image in a 1-element list)
+            images_raw = batch["images"]
+            images = [im[0] if isinstance(im, list) else im for im in images_raw]
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             
@@ -177,26 +164,26 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
             if scaler is not None:
                 # mixed precision forward pass
                 with autocast("cuda"):
-                    loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                    loss = projector_loss(model, images, input_ids, attention_mask)
                 loss = loss / gradient_accumulation_steps
                 
                 with torch.no_grad():
                     text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                    projected_vision = model.projector(vision_features)
-                    similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                    visual_embeds = model._prepare_visual_inputs(images)
+                    similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
                 similarity_count += 1
             
                 # mixed precision backward pass
                 scaler.scale(loss).backward()
             else:
                 # standard precision training (fallback)
-                loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                loss = projector_loss(model, images, input_ids, attention_mask)
                 loss = loss / gradient_accumulation_steps
 
                 with torch.no_grad():
                     text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                    projected_vision = model.projector(vision_features)
-                    similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                    visual_embeds = model._prepare_visual_inputs(images)
+                    similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
                 similarity_count += 1
 
                 loss.backward()
@@ -221,7 +208,7 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
                 optimizer.zero_grad()
                 accumulation_counter = 0
                 batch_time = time.time() - batch_start_time
-                samples_per_sec = len(vision_features) / max(batch_time, 1e-6)
+                samples_per_sec = len(images) / max(batch_time, 1e-6)
                 current_lr = scheduler.get_last_lr()[0]
                 logger.info(f"Epoch {epoch+1}/{epochs} Batch {batch_idx}/{len(train_loader)}: "
                            f"Loss={loss.item() * gradient_accumulation_steps:.4f}, Sim={similarity:.3f}, "
@@ -245,24 +232,27 @@ def train(model, train, test, epochs, output_dir, learning_rate, batch_size, gra
         total_val_similarity = 0
         with torch.no_grad():
             for batch in test_loader:
-                vision_features = batch["vision_features"].to(device)
+                # Flatten potential nested lists (each sample might store its single
+                # image in a 1-element list)
+                images_raw = batch["images"]
+                images = [im[0] if isinstance(im, list) else im for im in images_raw]
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 # compute validation loss using language modeling with mixed precision
                 if scaler is not None:
                     with autocast("cuda"):
-                        loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                        loss = projector_loss(model, images, input_ids, attention_mask)
                         # compute similarity for monitoring
                         text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                        projected_vision = model.projector(vision_features)
-                        similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                        visual_embeds = model._prepare_visual_inputs(images)
+                        similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
                 else:
                     # standard precision validation (fallback)
-                    loss = projector_loss(model, vision_features, input_ids, attention_mask)
+                    loss = projector_loss(model, images, input_ids, attention_mask)
                     # compute similarity for monitoring
                     text_embeddings = model.base_model.get_input_embeddings()(input_ids)
-                    projected_vision = model.projector(vision_features)
-                    similarity = compute_embedding_similarity(projected_vision, text_embeddings)
+                    visual_embeds = model._prepare_visual_inputs(images)
+                    similarity = compute_embedding_similarity(visual_embeds, text_embeddings)
                 total_val_loss += loss.item()
                 total_val_similarity += similarity
             # clear GPU memory
@@ -312,7 +302,6 @@ def main():
     parser.add_argument("-m", "--model", required=True, help="Model location/path")
     parser.add_argument("-d", "--dataset", required=True, help="Dataset location/path")
     parser.add_argument("-e", "--epochs", type=int, default=1, help="Maximum number of training epochs (default: 1)")
-    parser.add_argument("-v", "--vision_tower", required=True, help="Vision tower model location/path")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction text to add to dataset examples")
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
     parser.add_argument("--bnb_config", type=str, default=None, help="Bits and bytes configuration (default: None)")
@@ -333,20 +322,25 @@ def main():
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(file_handler)
 
-    logger.info(f"Loading model from: {args.model}")
+    logger.info(f"Loading base language model from: {args.model}")
     logger.info(f"Loading dataset from: {args.dataset}")
     logger.info(f"Training for max {args.epochs} epochs")
-    logger.info(f"Vision tower: {args.vision_tower}")
-    logger.info(f"Instruction: {args.instruction}")
 
     # load model
-    model = load_model(args.model, args.vision_tower, args.bnb_config)
-    logger.info(f"Model size: {model.get_model_size()}")
-    train_dataset, test_dataset = load_and_prepare_dataset(args.dataset, model.get_tokenizer(), model.image_processor, model.vision_encoder, args.instruction, None)
+    model = load_model(args.model, args.bnb_config)
+
+    # prepare datasets using the streamlined preprocessing pipeline
+    train_dataset, test_dataset = load_and_prepare_dataset(
+        args.dataset,
+        tokenizer=model.get_tokenizer(),
+        instruction=args.instruction,
+    )
     
     # freeze model, vision tower, train only the projector 
     model.freeze_model()
-    model.freeze_vision_tower() 
+    for p in model.vision_tower.parameters():
+        p.requires_grad = False
+    model.vision_tower.eval()
     model.unfreeze_projector()
 
     train(model, train_dataset, test_dataset, args.epochs, output_dir, args.lr, args.batch_size, args.gradient_accumulation_steps)

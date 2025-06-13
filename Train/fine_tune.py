@@ -68,9 +68,49 @@ def lora_loss(model, batch, composite_loss_fn, tokenizer, return_components=Fals
 
 def find_lora_target_modules(model):
     """
-    For GPT-2 models, return the standard LoRA target modules.
+    Dynamically determine LoRA target modules based on the model architecture.
     """
-    return ["c_attn", "c_proj", "c_fc"]
+    # Try to get the model type from config if available
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    class_name = model.__class__.__name__.lower()
+
+    # Llama and similar
+    if model_type is not None and "llama" in model_type:
+        return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    if "llama" in class_name:
+        return ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+    # GPT-2 and similar
+    if model_type == "gpt2" or "gpt2" in class_name:
+        return ["c_attn", "c_proj", "c_fc"]
+
+    # Falcon
+    if model_type == "falcon" or "falcon" in class_name:
+        return ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
+
+    # MPT
+    if model_type == "mpt" or "mpt" in class_name:
+        return ["Wqkv", "out_proj", "fc1", "fc2"]
+
+    # OPT
+    if model_type == "opt" or "opt" in class_name:
+        return ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]
+
+    # Bloom
+    if model_type == "bloom" or "bloom" in class_name:
+        return ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
+
+    # Default fallback: try to find all linear modules
+    import torch
+    linear_modules = set()
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            linear_modules.add(name.split('.')[-1])
+    if linear_modules:
+        return list(linear_modules)
+
+    # If all else fails, return an empty list
+    return []
 
 def fine_tune(model, train_dataset, test_dataset, lora_rank, lora_alpha, lora_dropout, learning_rate, bias, batch_size, gradient_accumulation_steps, warmup_steps, max_steps, output_dir, epochs=1, class_map=None):
     """Fine-tune BBOB with LoRA adapters and composite loss."""
@@ -533,8 +573,7 @@ def main():
         model.get_tokenizer(),
         model.image_processor,
         model.vision_encoder,
-        args.instruction,
-        label_dict
+        args.instruction
     )
 
     split = test_dataset.train_test_split(test_size=0.1, seed=42)

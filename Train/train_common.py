@@ -19,9 +19,8 @@ import multiprocess as mp
 import math
 
 # Image processing imports for dynamic resizer
-from PIL import Image, ImageOps
+from PIL import Image
 import numpy as np
-from torchvision import transforms
 import warnings
 
 # import model components
@@ -130,118 +129,56 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
         ])
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category_mapping=None, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False):
+def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256)):
     """
-    Process a batch of multimodal data through vision encoder and tokenizer
-    
+    Convert a raw *batch* of samples into model-ready tensors.
+
+    Steps performed per sample
+        1.  Convert image → RGB and **letter-box** it to *target_size* while
+            preserving aspect-ratio (padding = 128 grey).
+        2.  Tokenise the instructional *text* field with padding/truncation.
+        3.  (Optional) Jitter and re-scale COCO-style bounding-boxes, then
+            normalise them to the padded image size.
+
     Parameters:
-        - batch: dictionary containing image, text and other fields
-        - tokenizer: text tokenizer for processing text inputs
-        - image_processor: vision processor for handling images
-        - vision_encoder: vision model for extracting image features
-        - category_mapping: optional mapping from category IDs to names
-        - gpu_batch_size: batch size for GPU processing
-        - bbox_jitter_ratio: ratio for jittering bounding boxes
-        - training: boolean indicating whether this is a training batch
-        
+        - batch: dict with keys like ``image`` / ``text`` / ``objects`` …
+        - tokenizer: HuggingFace tokenizer (will auto-add pad token if missing)
+        - gpu_batch_size: unused here – kept for backwards compatibility.
+        - bbox_jitter_ratio: float, jitter amplitude for bboxes when *training*.
+        - training: bool, enables bbox jitter.
+        - target_size: tuple(int, int), final (W, H) after letter-boxing.
+
     Returns:
-        - processed batch with vision_features, input_ids, attention_mask and preserved fields
+        dict containing:
+            • images              – list[ PIL.Image ] (letter-boxed)
+            • input_ids           – LongTensor[B, T]
+            • attention_mask      – LongTensor[B, T]
+            • *optional* target_boxes / target_labels / target_text …
     """
 
-    dtype = next(vision_encoder.parameters()).dtype
-    # detect image field name dynamically
-    image_field = None
-    for field in ["image", "img", "images", "picture", "photo", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"]:
-        if field in batch:
-            image_field = field
-            break
-    
-    if image_field is None:
-        raise ValueError(f"No image field found in batch. Available fields: {list(batch.keys())}")
-    
-    images = batch[image_field]
+    dtype = torch.float32
+
+    processed_images = []      # PIL.Image (letter-boxed)
+    image_sizes = []           # original (w, h) per image
+    padded_image_sizes = []    # after letter-box (should all be target_size)
+    lb_params = []             # (scale, pad_w, pad_h) per image
+
+    for img in batch["images"]:
+        if not isinstance(img, Image.Image):
+            raise ValueError("Images must be PIL.Image objects")
+
+        rgb = img.convert("RGB")
+
+        # apply letter-box resize
+        lb_img, scale, pad_w, pad_h = letterbox_image(rgb, target_size=target_size)
+
+        processed_images.append(lb_img)
+        image_sizes.append(rgb.size)          # (orig_w, orig_h)
+        padded_image_sizes.append(target_size)
+        lb_params.append((scale, pad_w, pad_h))
+
     text = batch["text"]
     
-    # only handle format conversion - let image processor handle resizing
-    try:
-        processed_images = []
-        image_sizes = []
-        letterbox_params = []
-        for img in images:
-            try:
-                if hasattr(img, 'mode') and img.mode != 'RGB':
-                    if img.mode == 'RGBA':
-                        img = Image.new('RGB', img.size, (255, 255, 255))
-                        img.paste(img, mask=img.split()[-1])
-                    else:
-                        img = img.convert('RGB')
-                orig_size = img.size
-                img, scale, pad_w, pad_h = letterbox_image(img, target_size=(256, 256))
-                processed_images.append(img)
-                image_sizes.append(orig_size)  # store original size for box adjustment
-                letterbox_params.append((scale, pad_w, pad_h, orig_size[0], orig_size[1], 256, 256))
-            except Exception as e:
-                warnings.warn(f"Format conversion failed: {e}. Using fallback.")
-                try:
-                    if hasattr(img, 'convert'):
-                        img_rgb = img.convert('RGB')
-                        orig_size = img_rgb.size
-                        img_rgb, scale, pad_w, pad_h = letterbox_image(img_rgb, target_size=(256, 256))
-                        processed_images.append(img_rgb)
-                        image_sizes.append(orig_size)
-                        letterbox_params.append((scale, pad_w, pad_h, orig_size[0], orig_size[1], 256, 256))
-                    else:
-                        processed_images.append(img)
-                        image_sizes.append((256, 256))
-                        letterbox_params.append((1.0, 0, 0, 256, 256, 256, 256))
-                except:
-                    processed_images.append(Image.new('RGB', (256, 256), (0, 0, 0)))
-                    image_sizes.append((256, 256))
-                    letterbox_params.append((1.0, 0, 0, 256, 256, 256, 256))
-    except Exception as e:
-        warnings.warn(f"Image processing failed: {e}. Using original images.")
-        processed_images = images
-        image_sizes = [(256, 256)] * len(images)
-        letterbox_params = [(1.0, 0, 0, 256, 256, 256, 256)] * len(images)
-    
-    # process images through vision encoder in GPU sub-batches
-    device = next(vision_encoder.parameters()).device
-    all_vision_features = []
-    total_images = len(processed_images)
-    
-    with torch.no_grad():
-        # process in smaller GPU sub-batches to manage VRAM
-        for start_idx in range(0, total_images, gpu_batch_size):
-            end_idx = min(start_idx + gpu_batch_size, total_images)
-            sub_batch_images = processed_images[start_idx:end_idx]
-            
-            try:
-                processor_output = image_processor(sub_batch_images, return_tensors="pt")
-                pixel_values = processor_output["pixel_values"].to(device, dtype=dtype)
-                
-                vision_outputs = vision_encoder(pixel_values)
-                vision_features = vision_outputs.last_hidden_state.cpu()
-                
-                all_vision_features.append(vision_features)
-                
-                # clear GPU memory after each sub-batch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    
-            except Exception as e:
-                warnings.warn(f"Vision encoder processing failed for sub-batch {start_idx}-{end_idx}: {e}")
-                # create dummy features for failed sub-batch
-                sub_batch_size = len(sub_batch_images)
-                dummy_features = torch.zeros(sub_batch_size, 256, 768, dtype=dtype)
-                all_vision_features.append(dummy_features)
-    
-    # concatenate all sub-batch results
-    if all_vision_features:
-        vision_features = torch.cat(all_vision_features, dim=0)
-    else:
-        # fallback if everything failed
-        vision_features = torch.zeros(total_images, 256, 768, dtype=dtype)  
-        
     # ensure tokenizer has a padding token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -249,7 +186,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
     tokenized_text = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True, padding=True)
     
     result = {
-        "vision_features": vision_features,
+        "images": processed_images,
         "input_ids": tokenized_text["input_ids"].cpu(),
         "attention_mask": tokenized_text["attention_mask"].cpu(),
     }
@@ -260,10 +197,31 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
         result["target_labels"] = []
         for i, sample in enumerate(batch["objects"]):
             bboxes = sample["bbox"]
-            scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h = letterbox_params[i]
+
+            # 1) optional jitter in *original* image space
             if training:
-                bboxes = jitter_bboxes(bboxes, orig_w, orig_h, dtype=dtype, jitter_ratio=bbox_jitter_ratio)
-            bboxes = adjust_boxes_for_letterbox(bboxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h, dtype=dtype)
+                bboxes = jitter_bboxes(
+                    bboxes,
+                    img_width=image_sizes[i][0],
+                    img_height=image_sizes[i][1],
+                    dtype=dtype,
+                    jitter_ratio=bbox_jitter_ratio,
+                )
+
+            # 2) adjust to letter-boxed, padded coordinates then normalise
+            scale, pad_w, pad_h = lb_params[i]
+            tgt_w, tgt_h = target_size
+            bboxes = adjust_boxes_for_letterbox(
+                bboxes,
+                scale=scale,
+                pad_w=pad_w,
+                pad_h=pad_h,
+                orig_w=image_sizes[i][0],
+                orig_h=image_sizes[i][1],
+                target_w=tgt_w,
+                target_h=tgt_h,
+                dtype=dtype,
+            )
             sample_boxes = []
             sample_labels = []
             for bbox, category in zip(bboxes, sample["category"]):
@@ -272,9 +230,7 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
             result["target_boxes"].append(sample_boxes)
             result["target_labels"].append(sample_labels)
 
-    # Add target_text from COCO sentences if present
     if "sentences" in batch:
-        # batch["sentences"] is a list of lists of dicts (one per sample)
         target_texts = []
         for sent_list in batch["sentences"]:
             if isinstance(sent_list, list):
@@ -289,26 +245,24 @@ def preprocess_batch(batch, tokenizer, image_processor, vision_encoder, category
         result["target_text"] = torch.stack(target_texts)
 
     # Store image sizes for denormalization during evaluation
-    result["image_sizes"] = image_sizes  # original sizes
-    result["padded_image_sizes"] = [(256, 256)] * len(processed_images)  # always 256x256 for letterbox
+    result["image_sizes"] = image_sizes
+    result["padded_image_sizes"] = padded_image_sizes
 
     return result
 
-def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, instruction, category_mapping=None, is_training=False):
+
+def preprocess_dataset(dataset, tokenizer, instruction, is_training=False):
     """
     Process entire dataset through image resizing and feature extraction
     
     Parameters:
         - dataset: HuggingFace dataset containing images and text
         - tokenizer: text tokenizer for processing text inputs
-        - image_processor: vision processor for handling images  
-        - vision_encoder: vision model for extracting image features
         - instruction: instruction text to add to each example
-        - category_mapping: optional mapping from category IDs to names
         - is_training: boolean indicating whether this is a training set
         
     Returns:
-        - processed dataset with vision_features and tokenized text
+        - processed dataset with images and tokenized text
     """
 
     # add instruction to each sample to create "text" field
@@ -318,7 +272,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     
     # separate CPU and GPU batch sizes for memory management
     if torch.cuda.is_available():
-        gpu_batch_size = calculate_optimal_batch_size(vision_encoder, tokenizer, safety_margin=0.15)
+        gpu_batch_size = calculate_optimal_batch_size(safety_margin=0.15)
         cpu_batch_size = 64  # conservative CPU batch for RAM safety
         print(f"Using GPU batch size: {gpu_batch_size}, CPU batch size: {cpu_batch_size}")
     else:
@@ -329,11 +283,8 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
     _preprocessing_function = partial(
         preprocess_batch,
         tokenizer=tokenizer,
-        image_processor=image_processor,
-        vision_encoder=vision_encoder,
-        category_mapping=category_mapping,
         gpu_batch_size=gpu_batch_size,
-        training=is_training
+        training=is_training,
     )
 
     dataset = dataset.map(
@@ -343,22 +294,19 @@ def preprocess_dataset(dataset, tokenizer, image_processor, vision_encoder, inst
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size}, GPU batch={gpu_batch_size})",
-        load_from_cache_file=True
+        load_from_cache_file=False
     )
 
     return dataset
 
-def load_and_prepare_dataset(dataset_name, tokenizer, image_processor, vision_encoder, instruction, category_mapping=None):
+def load_and_prepare_dataset(dataset_name, tokenizer, instruction):
     """
     Load dataset from HuggingFace hub and create train/test splits
     
     Parameters:
         - dataset_name: HuggingFace dataset identifier
         - tokenizer: text tokenizer for processing text inputs
-        - image_processor: vision processor for handling images
-        - vision_encoder: vision model for extracting image features
         - instruction: instruction text to add to each example
-        - category_mapping: optional mapping from category IDs to names
         
     Returns:
         - train, test datasets with extracted features
@@ -414,38 +362,27 @@ def load_and_prepare_dataset(dataset_name, tokenizer, image_processor, vision_en
 
 
     print("Preprocessing train dataset...")
-    train = preprocess_dataset(train, tokenizer, image_processor, vision_encoder, instruction, category_mapping, is_training=True)
+    train = preprocess_dataset(train, tokenizer, instruction, is_training=True)
     print("Preprocessing test dataset...")
-    test = preprocess_dataset(test, tokenizer, image_processor, vision_encoder, instruction, category_mapping, is_training=False)
+    test = preprocess_dataset(test, tokenizer, instruction, is_training=False)
 
     return train, test
 
-def load_model(src, vision_tower, bnb_config):
+def load_model(src, bnb_config):
     """
-    Load BBOB model with specified base model and vision encoder
-    
-    Parameters:
-        - src: path or identifier for base language model
-        - vision_tower: path or identifier for vision encoder
-        - bnb_config: quantization configuration for model loading
-        
-    Returns:
-        - initialized BBOB model instance
+    Build a new BBOB model given a *base* LLM checkpoint path or name.
+    The vision tower is now created internally (MobileViTV2).
     """
-
-    # clear GPU memory before loading
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    return model.BBOB(src, vision_tower, bnb_config)
+    return model.BBOB(src, bnb_config=bnb_config)
 
-def calculate_optimal_batch_size(vision_encoder, tokenizer, safety_margin=0.15, min_batch_size=32, max_batch_size=8192):
+def calculate_optimal_batch_size(safety_margin=0.15, min_batch_size=8, max_batch_size=1024):
     """
     Automatically calculate optimal batch size based on available VRAM
     
     Parameters:
-        - vision_encoder: vision model for memory estimation
-        - tokenizer: text tokenizer for memory estimation  
         - safety_margin: fraction of VRAM to leave as headroom (default: 15%)
         - min_batch_size: minimum allowed batch size
         - max_batch_size: maximum allowed batch size
@@ -457,51 +394,21 @@ def calculate_optimal_batch_size(vision_encoder, tokenizer, safety_margin=0.15, 
         print("No CUDA available, using default batch size: 64")
         return 64
     
-    # get VRAM information
-    device_props = torch.cuda.get_device_properties(0)
-    total_vram = device_props.total_memory
-    allocated_vram = torch.cuda.memory_allocated(0)
-    available_vram = total_vram - allocated_vram
+    props = torch.cuda.get_device_properties(0)
+    total_vram = props.total_memory
+    allocated = torch.cuda.memory_allocated(0)
+    available_vram = total_vram - allocated
     
     print(f"VRAM Analysis:")
     print(f"Total VRAM: {total_vram/1024**3:.1f}GB")
-    print(f"Currently allocated: {allocated_vram/1024**3:.1f}GB")
+    print(f"Currently allocated: {allocated/1024**3:.1f}GB")
     print(f"Available: {available_vram/1024**3:.1f}GB")
     
-    # estimate memory per sample
-    try:
-        # get vision encoder output dimensions
-        device = next(vision_encoder.parameters()).device
-        with torch.no_grad():
-            dummy_image = torch.randn(1, 3, 256, 256, dtype=next(vision_encoder.parameters()).dtype).to(device)
-            vision_output = vision_encoder(dummy_image)
-            vision_features = vision_output.last_hidden_state
-            
-            if vision_features.dim() == 4:  # [batch, height, width, channels]
-                # flatten spatial dimensions like the projector does
-                vision_features = vision_features.flatten(2).transpose(1, 2)
-                
-            vision_memory_per_sample = vision_features.numel() * 4  # float32 = 4 bytes
-            
-        # estimate text memory (rough approximation)
-        max_text_length = 1024  # from tokenizer max_length
-        text_memory_per_sample = max_text_length * 4  # approximate
-        
-        # total memory per sample (including overhead for processing, intermediate tensors, fragmentation)
-        memory_per_sample = (vision_memory_per_sample + text_memory_per_sample) * 5  # 5x for realistic GPU overhead
-        
-        print(f"Estimated memory per sample: {memory_per_sample/1024**2:.1f}MB")
-        
-    except Exception as e:
-        print(f"Could not estimate memory usage: {e}")
-        # fallback estimate: ~2MB per sample
-        memory_per_sample = 2 * 1024 * 1024
-        print(f"Using fallback estimate: {memory_per_sample/1024**2:.1f}MB per sample")
+    # Very rough estimate: assume ~4 MB per sample (text + vision activations).
+    # This number is empirical and can be tuned per-project.
+    memory_per_sample = 4 * 1024 * 1024
     
-    # calculate usable VRAM (leaving safety margin)
-    usable_vram = available_vram * (1 - safety_margin)
-    
-    optimal_batch_size = int(usable_vram / memory_per_sample) 
+    optimal_batch_size = int(available_vram / memory_per_sample) 
     
     # apply limits
     optimal_batch_size = max(min_batch_size, min(optimal_batch_size, max_batch_size))
@@ -522,105 +429,41 @@ def calculate_optimal_batch_size(vision_encoder, tokenizer, safety_margin=0.15, 
 
 def collate(batch):
     """
-    Custom collate function to handle variable-sized vision features and text embeddings
-    
-    Parameters:
-        - batch: list of dictionaries with keys ['vision_features', 'input_ids', 'attention_mask']
-        
-    Returns:
-        - collated batch with padded tensors
+    Minimal collate-fn that:
+        • keeps the list of **PIL images** untouched (key ``images``)
+        • pads ``input_ids`` and ``attention_mask`` to the max length in the batch
+        • pads / stacks optional detection targets (``target_boxes`` / ``target_labels``)
     """
-    # separate the different fields
-    vision_features = [item['vision_features'] for item in batch]
-    input_ids = [item['input_ids'] for item in batch]
-    attention_masks = [item['attention_mask'] for item in batch]
-    
-    # handle additional fields like target_boxes and target_labels
-    additional_fields = {}
-    for key in batch[0].keys():
-        if key not in ['vision_features', 'input_ids', 'attention_mask']:
-            additional_fields[key] = [item[key] for item in batch]
-    
-    # Pad and stack target_labels if present
-    if "target_labels" in additional_fields:
-        label_tensors = []
-        for lbl in additional_fields["target_labels"]:
-            if isinstance(lbl, list):
-                lbl = torch.tensor(lbl)
-            if not isinstance(lbl, torch.Tensor):
-                lbl = torch.tensor(lbl)
-            label_tensors.append(lbl)
-        # Pad to the same length with ignore index -100
-        target_labels_padded = pad_sequence(label_tensors, batch_first=True, padding_value=-100)
-        # Clamp to valid range [0, 79] or set to -100 if out of range
-        num_classes = 80  # COCO
-        mask = (target_labels_padded != -100)
-        target_labels_padded[mask & (target_labels_padded < 0)] = -100
-        target_labels_padded[mask & (target_labels_padded >= num_classes)] = -100
-        additional_fields["target_labels"] = target_labels_padded
-    # Pad and stack target_boxes if present
-    if "target_boxes" in additional_fields:
-        box_tensors = []
-        for bx in additional_fields["target_boxes"]:
-            if isinstance(bx, list):
-                bx = torch.tensor(bx)
-            if not isinstance(bx, torch.Tensor):
-                bx = torch.tensor(bx)
-            box_tensors.append(bx)
-        # Pad to the same length with 0.0
-        target_boxes_padded = pad_sequence(box_tensors, batch_first=True, padding_value=0.0)
-        additional_fields["target_boxes"] = target_boxes_padded
-    
-    # convert to tensors and handle dimensions properly
-    vision_tensors = []
-    for vf in vision_features:
-        if isinstance(vf, list):
-            vf = torch.tensor(vf)
-        if not isinstance(vf, torch.Tensor):
-            vf = torch.tensor(vf)
-        # ensure 2D: [seq_len, hidden_dim]
-        if vf.dim() == 3:
-            vf = vf.squeeze(0)
-        elif vf.dim() == 1:
-            vf = vf.unsqueeze(0)
-        vision_tensors.append(vf)
-    
-    input_tensors = []
-    for ids in input_ids:
-        if isinstance(ids, list):
-            ids = torch.tensor(ids)
-        if not isinstance(ids, torch.Tensor):
-            ids = torch.tensor(ids)
-        # ensure 1D: [seq_len]
-        if ids.dim() == 2:
-            ids = ids.squeeze(0)
-        input_tensors.append(ids)
-    
-    mask_tensors = []
-    for mask in attention_masks:
-        if isinstance(mask, list):
-            mask = torch.tensor(mask)
-        if not isinstance(mask, torch.Tensor):
-            mask = torch.tensor(mask)
-        # ensure 1D: [seq_len]
-        if mask.dim() == 2:
-            mask = mask.squeeze(0)
-        mask_tensors.append(mask)
-    
-    # pad sequences to same length
-    vision_features_padded = pad_sequence(vision_tensors, batch_first=True, padding_value=0.0)
-    input_ids_padded = pad_sequence(input_tensors, batch_first=True, padding_value=0)
-    attention_masks_padded = pad_sequence(mask_tensors, batch_first=True, padding_value=0)
-    
+
+    images = [item["images"] for item in batch]          # list[ PIL.Image ]
+    input_ids = [item["input_ids"] for item in batch]
+    attention_masks = [item["attention_mask"] for item in batch]
+
+    # -------- text padding --------
+    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
+    attention_mask_padded = pad_sequence(attention_masks, batch_first=True, padding_value=0)
+
     result = {
-        'vision_features': vision_features_padded,
-        'input_ids': input_ids_padded,
-        'attention_mask': attention_masks_padded
+        "images": images,
+        "input_ids": input_ids_padded,
+        "attention_mask": attention_mask_padded,
     }
-    
-    # add additional fields
-    result.update(additional_fields)
-    
+
+    # -------- optional detection targets --------
+    additional_keys = [k for k in batch[0].keys() if k not in result]
+    for key in additional_keys:
+        elems = [item[key] for item in batch]
+
+        if key == "target_boxes":
+            # pad to same number of boxes per image (0.0 -> blank box)
+            tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
+            result[key] = pad_sequence(tensors, batch_first=True, padding_value=0.0)
+        elif key == "target_labels":
+            tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
+            result[key] = pad_sequence(tensors, batch_first=True, padding_value=-100)
+        else:
+            result[key] = elems  # leave as list
+
     return result
 
 def compute_embedding_similarity(vision_features, text_embeddings):
