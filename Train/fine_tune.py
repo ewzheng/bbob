@@ -16,7 +16,7 @@ import math
 import torch
 import torchvision
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 
 from transformers import get_linear_schedule_with_warmup, get_cosine_with_hard_restarts_schedule_with_warmup
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training

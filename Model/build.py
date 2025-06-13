@@ -5,7 +5,7 @@ import os
 import sys
 
 # import modules
-from model import BBOB
+from .model import BBOB
 
 def build_BBOB(model_path, bnb_config=None, load=False):
     '''
