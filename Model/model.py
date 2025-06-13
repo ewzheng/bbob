@@ -106,13 +106,17 @@ class BBOB(nn.Module):
         """
         Freeze base language model parameters
         """
-        self.base_model.freeze()
+        self.base_model.eval()
+        for param in self.base_model.parameters():
+            param.requires_grad = False
     
     def unfreeze_model(self):
         """
         Unfreeze base language model parameters
         """
-        self.base_model.unfreeze()
+        self.base_model.train()
+        for param in self.base_model.parameters():
+            param.requires_grad = True
 
     def train(self):
         """
