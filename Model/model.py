@@ -54,10 +54,13 @@ class BBOB(nn.Module):
         base_model_dtype = next(self.base_model.parameters()).dtype
         base_model_device = next(self.base_model.parameters()).device
 
+        self._dtype = base_model_dtype
+        self._device = base_model_device
+
         # store tokenizer
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
 
-        self.vision_tower = VisionTower(dtype=self.base_model.dtype, device=self.base_model.device)
+        self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
         self.image_processor = self.vision_tower.image_processor
         self.vision_encoder = self.vision_tower.model
 
@@ -131,6 +134,14 @@ class BBOB(nn.Module):
         """
         self.base_model.eval()
         self.projector.eval()
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def device(self):
+        return self._device
 
     '''
     API Functions

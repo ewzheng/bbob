@@ -74,10 +74,6 @@ class VisionTower(nn.Module):
         ).last_hidden_state  # (B, C, H, W)
 
         return seq_feats
-        
-    # ------------------------------------------------------------------
-    # Convenience accessors
-    # ------------------------------------------------------------------
 
     @property
     def dtype(self):
