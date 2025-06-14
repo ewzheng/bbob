@@ -1,5 +1,5 @@
-from .model import BBOB, BBOBConfig
-
+from Model.model import BBOB, BBOBConfig
+from Model.build import build_BBOB
 from transformers import AutoConfig, AutoModel
 
 # Register so that Auto classes can resolve our implementation
@@ -9,4 +9,5 @@ AutoModel.register(BBOBConfig, BBOB)
 __all__ = [
     "BBOBConfig",
     "BBOB",
+    "build_BBOB",
 ] 
