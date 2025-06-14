@@ -99,7 +99,11 @@ class BBOB(PreTrainedModel):
         except (NotImplementedError, AttributeError):
             text_hidden_size = getattr(self.base_model.config, "hidden_size", None)
             if text_hidden_size is None:
-                raise ValueError("Could not infer text hidden size from base model.")
+                # fall back to running a dummy forward pass
+                with torch.no_grad():
+                    dummy_id = torch.tensor([[self.base_tokenizer.eos_token_id]], device=base_model_device)
+                    hs = self.base_model(dummy_id).last_hidden_state
+                    text_hidden_size = hs.shape[-1]
 
         self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
         self.image_processor = self.vision_tower.image_processor
