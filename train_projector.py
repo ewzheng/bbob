@@ -96,9 +96,7 @@ def train(
         - None – model is saved to *output_dir* on completion.
     """
 
-    model.freeze_model()                       
-    model.vision_tower.eval()
-    model.vision_tower.freeze()           
+    model.freeze_model()                              
     model.unfreeze_projector()                  
 
     # config
