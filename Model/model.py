@@ -93,20 +93,9 @@ class BBOB(PreTrainedModel):
 
         # store tokenizer
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
-        cfg = self.base_model.config
-        text_hidden_size = None
-        for attr in ("hidden_size", "n_embd", "d_model"):
-            if hasattr(cfg, attr) and getattr(cfg, attr) is not None:
-                text_hidden_size = getattr(cfg, attr)
-                break
-
-        if text_hidden_size is None:
-            # fall back to dummy forward pass
-            with torch.no_grad():
-                tok_id = self.base_tokenizer.eos_token_id or 0
-                dummy = torch.tensor([[tok_id]], device=base_model_device)
-                h = self.base_model(dummy).last_hidden_state
-                text_hidden_size = h.shape[-1]
+        emb_layer = self._find_input_embedding(self.base_model)
+        self._embedding_layer = emb_layer  # cache for forward()
+        text_hidden_size = emb_layer.weight.shape[1]
 
         self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
         self.image_processor = self.vision_tower.image_processor
@@ -259,6 +248,35 @@ class BBOB(PreTrainedModel):
         visual_embeds = self.projector(feats)  # (B, H*W, D)
         return visual_embeds
 
+    def _embed_tokens(self, input_ids):
+        """Return input embeddings even if get_input_embeddings is not implemented."""
+        return self._embedding_layer(input_ids)
+
+    @staticmethod
+    def _find_input_embedding(model):
+        """Locate the token embedding layer without calling forward."""
+        # 1) Official accessor
+        if hasattr(model, "get_input_embeddings"):
+            try:
+                emb = model.get_input_embeddings()
+                if emb is not None:
+                    return emb
+            except NotImplementedError:
+                pass
+
+        # 2) Common attribute names
+        for name in ("embed_tokens", "wte", "tok_embeddings"):
+            if hasattr(model, name):
+                return getattr(model, name)
+
+        # 3) Heuristic search in parameters – large vocab dimension
+        state_dict = model.state_dict()
+        for key, weight in state_dict.items():
+            if weight.ndim == 2 and max(weight.shape) > 10000:  # vocab dim likely large
+                return torch.nn.Embedding.from_pretrained(weight, freeze=True)
+
+        raise RuntimeError("Cannot locate input embedding layer in base model")
+
     def forward(self, input_ids=None, input_embeds=None, attention_mask=None, images=None, labels=None, **kwargs):
         """
         Multimodal forward pass.
@@ -279,7 +297,7 @@ class BBOB(PreTrainedModel):
         if input_embeds is None:
             if input_ids is None:
                 raise ValueError("Either input_ids or input_embeds must be provided.")
-            text_embeds = self.base_model.get_input_embeddings()(input_ids)
+            text_embeds = self._embed_tokens(input_ids)
         else:
             text_embeds = input_embeds
 
