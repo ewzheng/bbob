@@ -53,6 +53,10 @@ def make_collate_fn(pad_token_id: int):
             if not isinstance(tgt_ids, torch.Tensor):
                 tgt_ids = torch.as_tensor(tgt_ids, dtype=torch.long)
 
+            # Ensure 1-D before concatenation
+            instr_ids = instr_ids.view(-1)
+            tgt_ids   = tgt_ids.view(-1)
+
             # drop padding tokens that were added during preprocessing
             instr_ids = instr_ids[instr_ids != pad_token_id]
             tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
