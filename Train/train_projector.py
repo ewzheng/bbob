@@ -18,11 +18,11 @@ import os
 import multiprocess as mp
 
 from train_common import load_and_prepare_dataset
-from Model.build import build_BBOB
 
 # training
 from trl import SFTTrainer, SFTConfig
-from Utils.logging import get_logger, LoggingCallback
+from Utils import get_logger, LoggingCallback
+from Model import build_BBOB
 
 # (re)set module-level logger (may receive handlers later via get_logger)
 logger = logging.getLogger(__name__)
