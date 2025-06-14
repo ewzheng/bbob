@@ -52,7 +52,7 @@ def make_collate_fn(pad_token_id: int):
         merged_labels = []
 
         for item in batch:
-            # coerce to tensors and flatten to 1-D (covers any nested list/2-D case)
+            # ensure 1-dim token sequences
             instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
             tgt_ids   = torch.as_tensor(item["target_text"], dtype=torch.long).flatten()
 

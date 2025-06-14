@@ -56,7 +56,7 @@ class BBOB(PreTrainedModel):
 
     def __init__(self, model_path=None, max_memory=None, bnb_config=None, config: BBOBConfig | None = None, **kwargs):
         '''
-        ctor.
+        constructor.
 
         parameters:
             - model_path (str|Path|None): base llm repo or ckpt dir.
