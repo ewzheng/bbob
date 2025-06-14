@@ -8,9 +8,7 @@ Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs
 
 import torch
 import argparse
-import time
 from datetime import datetime
-from torch.utils.data import DataLoader
 import logging
 
 
@@ -22,7 +20,7 @@ import multiprocess as mp
 from train_common import load_and_prepare_dataset
 from Model.build import build_BBOB
 
-# Hugging Face / TRL trainer imports
+# training
 from trl import SFTTrainer, SFTConfig
 from Utils.logging import get_logger, LoggingCallback
 
@@ -86,7 +84,6 @@ def train(
     batch_size: int,
     lr: float,
     grad_acc_steps: int = 1,
-    logger,
 ):
     """
     Fine-tune *only* the **projector** through TRL's ``SFTTrainer``.
@@ -200,7 +197,6 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         grad_acc_steps=args.gradient_accumulation_steps,
-        logger=logger,
     )
 
     logger.info("Projector training is complete, model successfully saved.")
