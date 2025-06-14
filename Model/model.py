@@ -38,6 +38,9 @@ class BBOBConfig(PretrainedConfig):
         self.vision_hidden_size = vision_hidden_size
         self.text_hidden_size = text_hidden_size
         self.base_model_name = base_model_name
+        # paths for extra components (filled during save_pretrained)
+        self.projector_path: str | None = kwargs.get("projector_path")
+        self.vision_tower_path: str | None = kwargs.get("vision_tower_path")
 
 class BBOB(PreTrainedModel):
     """Vision–language model with MobileViT tower and projector."""
@@ -90,6 +93,7 @@ class BBOB(PreTrainedModel):
 
         # store tokenizer
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
+        text_hidden_size = self.base_model.get_input_embeddings().embedding_dim
 
         self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
         self.image_processor = self.vision_tower.image_processor
@@ -98,7 +102,7 @@ class BBOB(PreTrainedModel):
         vision_hidden_size = self.vision_tower.hidden_size
         print(f"Using VisionTower with hidden_size={vision_hidden_size}")
 
-        self.projector = Projector(vision_hidden_size, self.base_model.config.hidden_size, dtype=base_model_dtype, device=base_model_device)
+        self.projector = Projector(vision_hidden_size, text_hidden_size, dtype=base_model_dtype, device=base_model_device)
 
         # ensure projector on same device/dtype as base model weights
         self.projector.to(base_model_device, dtype=base_model_dtype)
@@ -106,14 +110,13 @@ class BBOB(PreTrainedModel):
         print(f"Vision Tower device: {self.vision_tower.device}, dtype: {self.vision_tower.dtype}")
         print(f"Projector device: {next(self.projector.parameters()).device}, dtype: {next(self.projector.parameters()).dtype}")
 
-        # Finalise config if it wasn't supplied (fresh init)
         if self.config is None:
             self.config = BBOBConfig(
                 vision_hidden_size=vision_hidden_size,
-                text_hidden_size=self.base_model.config.hidden_size,
+                text_hidden_size=text_hidden_size,
                 base_model_name=str(model_path),
             )
-            # PreTrainedModel does its own weight initialisation earlier; nothing further needed.
+            
 
     ''' Helpers for interacting with internal components'''
     def get_tokenizer(self):    
@@ -283,6 +286,10 @@ class BBOB(PreTrainedModel):
 
     def save_pretrained(self, output_dir: str, **kwargs):
         """Leverage PreTrainedModel.save_pretrained then add projector/tower."""
+        # Update config with relative paths before saving
+        self.config.projector_path = "projector.safetensors"
+        self.config.vision_tower_path = "vision_tower"
+
         super().save_pretrained(output_dir, **kwargs)
 
         # Save extra pieces the vanilla save does not cover (optional)
@@ -302,14 +309,16 @@ class BBOB(PreTrainedModel):
 
         obj: "BBOB" = super().from_pretrained(model_path, *model_args, **kwargs)
 
-        # restore projector if separate file exists
-        proj_path = os.path.join(model_path, "projector.safetensors")
+        # restore projector using path from config if available
+        proj_rel = getattr(obj.config, "projector_path", "projector.safetensors")
+        proj_path = os.path.join(model_path, proj_rel)
         if os.path.isfile(proj_path):
             state = st.load_file(proj_path, device=obj.projector.device)
             obj.projector.load_state_dict(state)
 
         # restore vision tower if directory exists
-        vt_dir = os.path.join(model_path, "vision_tower")
+        vt_rel = getattr(obj.config, "vision_tower_path", "vision_tower")
+        vt_dir = os.path.join(model_path, vt_rel)
         if os.path.isdir(vt_dir):
             try:
                 obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
