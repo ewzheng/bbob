@@ -93,7 +93,13 @@ class BBOB(PreTrainedModel):
 
         # store tokenizer
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
-        text_hidden_size = self.base_model.get_input_embeddings().embedding_dim
+        try:
+            emb = self.base_model.get_input_embeddings()
+            text_hidden_size = emb.embedding_dim if hasattr(emb, "embedding_dim") else emb.weight.shape[1]
+        except (NotImplementedError, AttributeError):
+            text_hidden_size = getattr(self.base_model.config, "hidden_size", None)
+            if text_hidden_size is None:
+                raise ValueError("Could not infer text hidden size from base model.")
 
         self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
         self.image_processor = self.vision_tower.image_processor
