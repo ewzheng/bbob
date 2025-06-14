@@ -14,7 +14,7 @@ from datetime import datetime
 import sys
 import os
 import multiprocess as mp
-from transformers import get_cosine_schedule_with_hard_restarts
+from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 # training
 from trl import SFTTrainer, SFTConfig
 from Utils import get_logger, LoggingCallback
@@ -126,7 +126,7 @@ def train(
 
     optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)
     steps_per_epoch = (len(train_dataset) + grad_acc_steps - 1) // grad_acc_steps
-    scheduler = get_cosine_schedule_with_hard_restarts(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
+    scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
 
     trainer = SFTTrainer(
         model          = model,
