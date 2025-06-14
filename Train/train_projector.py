@@ -86,7 +86,7 @@ def train(
     grad_acc_steps: int = 1,
 ):
     """
-    Fine-tune *only* the **projector** through TRL's ``SFTTrainer``.
+    Train projector.
 
     Parameters:
         - model: BBOB instance (vision tower + base LLM already loaded).
@@ -146,15 +146,6 @@ def train(
     return
 
 def main():
-    """
-    Main entry point for projector training script
-    
-    Parameters:
-        - None (uses command line arguments)
-        
-    Returns:
-        - None (saves trained model to output directory)
-    """
     # parse command line arguments
     parser = argparse.ArgumentParser(description="Train BBOB projector")
     parser.add_argument("-m", "--model", required=True, help="Model location/path")
