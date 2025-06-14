@@ -22,6 +22,11 @@ from Utils import get_logger, LoggingCallback
 from Model import build_BBOB 
 from Train import load_and_prepare_dataset
 
+# img / tensor utilities
+from torchvision.transforms.functional import pil_to_tensor
+import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
+
 def make_collate_fn(pad_token_id: int):
     '''
     factory that builds a custom collate_fn for sfttrainer.
@@ -33,10 +38,7 @@ def make_collate_fn(pad_token_id: int):
     '''
 
     def _collate(batch):
-        from torch.nn.utils.rnn import pad_sequence
-        import torch
-
-        # find the image key dynamically (common fallbacks)
+        # find image key dynamically
         img_key = None
         for cand in ("images", "image", "pixel_values"):
             if cand in batch[0]:
@@ -45,8 +47,28 @@ def make_collate_fn(pad_token_id: int):
         if img_key is None:
             raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
-        # images are already preprocessed tensors stored in the dataset
-        pixel_values = torch.stack([item[img_key] for item in batch], 0)
+        target_size = (256, 256)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        processed = []
+        for pil in [item[img_key] for item in batch]:
+            t = pil_to_tensor(pil).float().div_(255.0).to(device)
+            _, H, W = t.shape
+            scale = min(target_size[1] / H, target_size[0] / W)
+            nh, nw = int(H * scale), int(W * scale)
+            resized = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
+
+            canvas = 0.5 * torch.ones(3, *target_size, device=device)
+            dh = (target_size[1] - nh) // 2
+            dw = (target_size[0] - nw) // 2
+            canvas[:, dh:dh+nh, dw:dw+nw] = resized
+
+            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3,1,1)
+            std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3,1,1)
+            canvas = (canvas - mean) / std
+            processed.append(canvas)
+
+        pixel_values = torch.stack(processed, 0)
 
         merged_input_ids = []
         merged_labels = []

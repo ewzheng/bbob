@@ -154,47 +154,20 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
     if images_field is None:
         raise KeyError("Batch dict must contain an 'images' or 'image' key with PIL images")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # store raw rgb images; resizing will be done in collate_fn on gpu
+    for img in batch[images_field]:
+        if not isinstance(img, Image.Image):
+            raise ValueError("images must be PIL.Image objects")
 
-    imgs_cpu = batch[images_field]
-    for start in range(0, len(imgs_cpu), gpu_batch_size):
-        chunk = imgs_cpu[start : start + gpu_batch_size]
+        rgb = img.convert("RGB")
 
-        # -> CUDA float32 tensors in [0,1]
-        tensors = [TF.pil_to_tensor(img.convert("RGB")).float().div_(255.0) for img in chunk]
-        tens = torch.stack(tensors, 0).to(device)
+        # compute resize params for bbox logic using cpu letterbox helper
+        lb_img, scale, pad_w, pad_h = letterbox_image(rgb, target_size=target_size)
 
-        B, _, H, W = tens.shape
-        scales = [] ; pad_ws = [] ; pad_hs = [] ; orig_sizes = []
-        canvases = []
-
-        for b in range(B):
-            t = tens[b]
-            C, h, w = t.shape
-            scale = min(target_size[1] / h, target_size[0] / w)
-            nh, nw = int(h * scale), int(w * scale)
-            resized = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
-
-            canvas = 0.5 * torch.ones(3, *target_size, device=device)
-            dh = (target_size[1] - nh) // 2
-            dw = (target_size[0] - nw) // 2
-            canvas[:, dh:dh+nh, dw:dw+nw] = resized
-
-            # MobileViT normalisation
-            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3,1,1)
-            std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3,1,1)
-            canvas = (canvas - mean) / std
-
-            canvases.append(canvas.cpu())  # move back to host – keeps dataset pickleable
-            scales.append(scale)
-            pad_ws.append(dw)
-            pad_hs.append(dh)
-            orig_sizes.append((w, h))
-
-        processed_images.extend(canvases)
-        image_sizes.extend(orig_sizes)
-        padded_image_sizes.extend([target_size]*len(canvases))
-        lb_params.extend(list(zip(scales, pad_ws, pad_hs)))
+        processed_images.append(rgb)  # keep original pil
+        image_sizes.append(rgb.size)
+        padded_image_sizes.append(target_size)
+        lb_params.append((scale, pad_w, pad_h))
 
     text = batch["text"]
     
