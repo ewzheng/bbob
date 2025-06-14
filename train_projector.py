@@ -90,7 +90,6 @@ def train(
     grad_acc_steps: int = 1,
     logger=None,
     warmup_steps: int = 0,
-    num_training_steps: int = 0,
 ):
     """
     Train projector.
@@ -133,6 +132,7 @@ def train(
         save_steps                  = max(steps_per_epoch // 3, 1),
         logging_steps               = max(32 // grad_acc_steps, 1),
         report_to                   = "none",
+        remove_unused_columns       = False,
     )
 
     # custom collator that injects labels based on *target_text*
