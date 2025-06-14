@@ -21,13 +21,7 @@ import math
 # Image processing imports for dynamic resizer
 from PIL import Image
 import numpy as np
-import warnings
-
-# import model components
-import sys
 import os
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-import Model.model as model
 
 import logging
 import yaml
@@ -368,16 +362,6 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction, dtype=torch.f
     test = preprocess_dataset(test, tokenizer, instruction, is_training=False, dtype=dtype)
 
     return train, test
-
-def load_model(src, bnb_config):
-    """
-    Build a new BBOB model given a *base* LLM checkpoint path or name.
-    The vision tower is now created internally (MobileViTV2).
-    """
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    return model.BBOB(src, bnb_config=bnb_config)
 
 def calculate_optimal_batch_size(
     workers = 1,
