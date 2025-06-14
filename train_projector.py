@@ -14,7 +14,7 @@ from datetime import datetime
 import sys
 import os
 import multiprocess as mp
-
+from transformers import get_cosine_schedule_with_hard_restarts
 # training
 from trl import SFTTrainer, SFTConfig
 from Utils import get_logger, LoggingCallback
@@ -78,6 +78,9 @@ def train(
     batch_size: int,
     lr: float,
     grad_acc_steps: int = 1,
+    logger=None,
+    warmup_steps: int = 0,
+    num_training_steps: int = 0,
 ):
     """
     Train projector.
@@ -115,12 +118,15 @@ def train(
         evaluation_strategy         = "epoch",
         save_strategy               = "epoch",
         logging_steps               = 50,
-        weight_decay                = 0.0,
         report_to                   = "none",
     )
 
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(model.get_tokenizer().pad_token_id)
+
+    optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)
+    steps_per_epoch = (len(train_dataset) + grad_acc_steps - 1) // grad_acc_steps
+    scheduler = get_cosine_schedule_with_hard_restarts(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
 
     trainer = SFTTrainer(
         model          = model,
@@ -128,7 +134,8 @@ def train(
         eval_dataset   = val_dataset,
         data_collator  = collate_fn,
         args           = cfg,
-        callbacks      = [LoggingCallback(logger)],
+        callbacks      = [LoggingCallback(logger)] if logger is not None else None,
+        optimizers     = (optimizer, scheduler),
     )
 
     logger.info("Starting training of projector...")
@@ -147,6 +154,7 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
     parser.add_argument("--bnb_config", type=str, default=None, help="Bits and bytes configuration (default: None)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
+    parser.add_argument("--warmup_steps", type=int, default=16, help="Number of warmup steps for scheduler (default: 16)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
     args = parser.parse_args()
     
@@ -180,6 +188,7 @@ def main():
         batch_size=args.batch_size,
         lr=args.lr,
         grad_acc_steps=args.gradient_accumulation_steps,
+        logger=logger,
     )
 
     logger.info("Projector training is complete, model successfully saved.")
