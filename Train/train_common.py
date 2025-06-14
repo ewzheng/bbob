@@ -23,6 +23,9 @@ from PIL import Image
 import numpy as np
 import os
 
+import torchvision.transforms.functional as TF
+import torch.nn.functional as F
+
 import logging
 import yaml
 import psutil
@@ -161,19 +164,47 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
     if images_field is None:
         raise KeyError("Batch dict must contain an 'images' or 'image' key with PIL images")
 
-    for img in batch[images_field]:
-        if not isinstance(img, Image.Image):
-            raise ValueError("Images must be PIL.Image objects")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        rgb = img.convert("RGB")
+    imgs_cpu = batch[images_field]
+    for start in range(0, len(imgs_cpu), gpu_batch_size):
+        chunk = imgs_cpu[start : start + gpu_batch_size]
 
-        # apply letter-box resize
-        lb_img, scale, pad_w, pad_h = letterbox_image(rgb, target_size=target_size)
+        # -> CUDA float32 tensors in [0,1]
+        tensors = [TF.pil_to_tensor(img.convert("RGB")).float().div_(255.0) for img in chunk]
+        tens = torch.stack(tensors, 0).to(device)
 
-        processed_images.append(lb_img)
-        image_sizes.append(rgb.size)          # (orig_w, orig_h)
-        padded_image_sizes.append(target_size)
-        lb_params.append((scale, pad_w, pad_h))
+        B, _, H, W = tens.shape
+        scales = [] ; pad_ws = [] ; pad_hs = [] ; orig_sizes = []
+        canvases = []
+
+        for b in range(B):
+            t = tens[b]
+            C, h, w = t.shape
+            scale = min(target_size[1] / h, target_size[0] / w)
+            nh, nw = int(h * scale), int(w * scale)
+            resized = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
+
+            canvas = 0.5 * torch.ones(3, *target_size, device=device)
+            dh = (target_size[1] - nh) // 2
+            dw = (target_size[0] - nw) // 2
+            canvas[:, dh:dh+nh, dw:dw+nw] = resized
+
+            # MobileViT normalisation
+            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3,1,1)
+            std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3,1,1)
+            canvas = (canvas - mean) / std
+
+            canvases.append(canvas.cpu())  # move back to host – keeps dataset pickleable
+            scales.append(scale)
+            pad_ws.append(dw)
+            pad_hs.append(dh)
+            orig_sizes.append((w, h))
+
+        processed_images.extend(canvases)
+        image_sizes.extend(orig_sizes)
+        padded_image_sizes.extend([target_size]*len(canvases))
+        lb_params.extend(list(zip(scales, pad_ws, pad_hs)))
 
     text = batch["text"]
     
@@ -446,20 +477,33 @@ def calculate_optimal_batch_size(
     return gpu_batch_size, cpu_batch_size
 
 def collate(batch):
-    """
-    Minimal collate-fn that:
-        • keeps the list of **PIL images** untouched (key ``images``)
-        • pads ``input_ids`` and ``attention_mask`` to the max length in the batch
-        • pads / stacks optional detection targets (``target_boxes`` / ``target_labels``)
+    """Merge a list of dataset items into a batch.
+
+    Assumptions
+    ----------
+    • Each item["images"] is already a *torch.Tensor* of shape `(3, 256, 256)`
+      and properly normalised for MobileViT (done in ``preprocess_batch``).
+    • ``input_ids`` / ``attention_mask`` are 1-D Python lists or tensors.
+    • Optional keys (``target_boxes``, ``target_labels``, ``target_text``)
+      may be present.
     """
 
-    images = [item["images"] for item in batch]          # list[ PIL.Image ]
-    input_ids = [item["input_ids"] for item in batch]
-    attention_masks = [item["attention_mask"] for item in batch]
+    from torch.nn.utils.rnn import pad_sequence
+    import torch
+
+    # stack image tensors -> (B, 3, 256, 256)
+    images = torch.stack([item["images"] if isinstance(item["images"], torch.Tensor)
+                          else torch.as_tensor(item["images"], dtype=torch.float32)
+                          for item in batch], 0)
 
     # -------- text padding --------
-    input_ids_padded = pad_sequence(input_ids, batch_first=True, padding_value=0)
-    attention_mask_padded = pad_sequence(attention_masks, batch_first=True, padding_value=0)
+    input_id_seqs = [torch.as_tensor(itm["input_ids"], dtype=torch.long)
+                     for itm in batch]
+    attn_seqs     = [torch.as_tensor(itm["attention_mask"], dtype=torch.long)
+                     for itm in batch]
+
+    input_ids_padded      = pad_sequence(input_id_seqs, batch_first=True, padding_value=0)
+    attention_mask_padded = pad_sequence(attn_seqs,     batch_first=True, padding_value=0)
 
     result = {
         "images": images,
@@ -467,103 +511,70 @@ def collate(batch):
         "attention_mask": attention_mask_padded,
     }
 
-    # -------- optional detection targets --------
+    # -------- optional detection / caption targets --------
     additional_keys = [k for k in batch[0].keys() if k not in result]
     for key in additional_keys:
         elems = [item[key] for item in batch]
 
         if key == "target_boxes":
-            # pad to same number of boxes per image (0.0 -> blank box)
-            tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
+            tensors = [torch.as_tensor(e, dtype=torch.float32) for e in elems]
             result[key] = pad_sequence(tensors, batch_first=True, padding_value=0.0)
         elif key == "target_labels":
-            tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
+            tensors = [torch.as_tensor(e, dtype=torch.long) for e in elems]
             result[key] = pad_sequence(tensors, batch_first=True, padding_value=-100)
         elif key == "target_text":
-            # already token ids – pad exactly like input_ids (value = pad_token_id==0)
-            tensors = [torch.tensor(e) if not isinstance(e, torch.Tensor) else e for e in elems]
+            tensors = [torch.as_tensor(e, dtype=torch.long) for e in elems]
             result[key] = pad_sequence(tensors, batch_first=True, padding_value=0)
         else:
-            result[key] = elems  # leave as list
+            result[key] = elems  # leave as list – Trainer will ignore unknowns
 
     return result
 
+
 def compute_embedding_similarity(vision_features, text_embeddings):
-    """
-    Compute average cosine similarity between vision and text embeddings
-    
-    Parameters:
-        - vision_features: projected vision features tensor [batch, seq_len, hidden_dim]
-        - text_embeddings: text embedding vectors [batch, seq_len, hidden_dim]
-        
-    Returns:
-        - average cosine similarity score as float
-    """
-    # pool features to get single representation per sample
-    vision_pooled = vision_features.mean(dim=1)  # [batch, hidden_dim]
-    text_pooled = text_embeddings.mean(dim=1)    # [batch, hidden_dim]
-    
-    # normalize for cosine similarity
-    vision_norm = nn.functional.normalize(vision_pooled, dim=-1)
-    text_norm = nn.functional.normalize(text_pooled, dim=-1)
-    
-    # compute pairwise similarities for diagonal (matching pairs)
-    similarities = torch.sum(vision_norm * text_norm, dim=-1)
-    return similarities.mean().item()
+    """Average cosine similarity between vision-tower features and text embeddings."""
+    import torch.nn.functional as F
+
+    vision_pooled = vision_features.mean(dim=1)
+    text_pooled   = text_embeddings.mean(dim=1)
+
+    sims = F.cosine_similarity(vision_pooled, text_pooled, dim=-1)
+    return sims.mean().item()
+
 
 def compute_gradient_norm(model):
-    """
-    Compute gradient norm for monitoring gradient health
-    
-    Parameters:
-        - model: BBOB model with projector parameters
-        
-    Returns:
-        - L2 norm of gradients across all projector parameters
-    """
-    # More robust gradient norm computation as per PyTorch forums
-    parameters = [p for p in model.projector.parameters() if p.grad is not None and p.requires_grad]
-    if len(parameters) == 0:
+    """Return global L2 norm of gradients on the projector parameters."""
+    import torch
+
+    grads = [p.grad.detach().flatten() for p in model.projector.parameters()
+             if p.grad is not None and p.requires_grad]
+    if not grads:
         return 0.0
-    
-    # Use the faster concatenation method for better performance
-    grads = [param.grad.detach().flatten() for param in parameters]
-    if len(grads) == 0:
-        return 0.0
-    
-    total_norm = torch.cat(grads).norm().item()
-    return total_norm
+    return torch.cat(grads).norm().item()
+
 
 def compute_parameter_norm(model):
-    """
-    Compute parameter norm to track weight magnitudes
-    
-    Parameters:
-        - model: BBOB model with projector parameters
-        
-    Returns:
-        - L2 norm of all projector parameters
-    """
-    total_norm = 0
+    """Return global L2 norm of the projector parameters themselves."""
+    import math
+
+    total = 0.0
     for p in model.projector.parameters():
-        param_norm = p.data.norm(2)
-        total_norm += param_norm.item() ** 2
-    return total_norm ** 0.5
+        total += p.data.norm(2).item() ** 2
+    return math.sqrt(total)
+
 
 def load_labels_from_yaml(yaml_path):
-    """Load label dictionary from a YAML file and return class_name -> index mapping."""
+    """Load class-name → index mapping from a YOLO-style YAML file."""
+    import os, yaml, logging
+
     if not os.path.exists(yaml_path):
         logging.error(f"Label YAML file not found: {yaml_path}")
-        raise FileNotFoundError(f"Label YAML file not found: {yaml_path}")
-    try:
-        with open(yaml_path, 'r') as f:
-            labels = yaml.safe_load(f)
-        if not isinstance(labels, dict) or 'names' not in labels:
-            raise ValueError("YAML file must contain a 'names' dictionary of labels.")
-        names = labels['names']
-        # Invert mapping: class_name -> index
-        class_map = {v: int(k) for k, v in names.items()}
-        return class_map
-    except Exception as e:
-        logging.error(f"Error loading labels from YAML: {e}")
-        raise
+        raise FileNotFoundError(yaml_path)
+
+    with open(yaml_path, "r") as f:
+        data = yaml.safe_load(f)
+
+    if not isinstance(data, dict) or "names" not in data:
+        raise ValueError("YAML file must contain a 'names' section")
+
+    return {v: int(k) for k, v in data["names"].items()}

@@ -236,8 +236,13 @@ class BBOB(PreTrainedModel):
         if images is None:
             return None
 
-        # Step-1: pixel values
-        pixel_values = self.vision_tower.process_image(images)
+        # Step-1: obtain pixel values
+        # If the caller already provides a BCHW tensor we assume it is
+        # correctly normalised for MobileViT and skip the image processor.
+        if isinstance(images, torch.Tensor):
+            pixel_values = images.to(device=self.device, dtype=self.dtype)
+        else:
+            pixel_values = self.vision_tower.process_image(images)
 
         # Step-2: spatial feature map from the frozen vision backbone
         with torch.no_grad():

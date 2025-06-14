@@ -38,8 +38,8 @@ def make_collate_fn(pad_token_id: int):
         if img_key is None:
             raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
-        # keep images untouched (PIL list or tensor); Trainer will move to device later
-        images = [item[img_key] for item in batch]
+        # images are already preprocessed tensors stored in the dataset
+        pixel_values = torch.stack([item[img_key] for item in batch], 0)
 
         merged_input_ids = []
         merged_labels = []
@@ -77,7 +77,7 @@ def make_collate_fn(pad_token_id: int):
         attention_mask = (input_ids_padded != pad_token_id).long()
 
         return {
-            "images": images,
+            "images": pixel_values,
             "input_ids": input_ids_padded,
             "attention_mask": attention_mask,
             "labels": labels_padded,
