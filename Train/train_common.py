@@ -235,12 +235,20 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
                 all_texts = [s["raw"] for s in sent_list if "raw" in s]
                 target_text = " ".join(all_texts)
             else:
-                # fallback: single dict
                 target_text = sent_list.get("raw", "")
-            # Tokenize
-            tokenized = tokenizer(target_text, return_tensors="pt", max_length=128, truncation=True, padding="max_length")
-            target_texts.append(tokenized["input_ids"].squeeze(0))
-        result["target_text"] = torch.stack(target_texts)
+
+            tokenized = tokenizer(
+                target_text,
+                return_tensors="pt",
+                max_length=128,
+                truncation=True,
+                padding="max_length",
+            )
+
+            # store as python list for HF datasets compatibility
+            target_texts.append(tokenized["input_ids"].squeeze(0).tolist())
+
+        result["target_text"] = target_texts
 
     # Store image sizes for denormalization during evaluation
     result["image_sizes"] = image_sizes
