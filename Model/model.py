@@ -93,17 +93,20 @@ class BBOB(PreTrainedModel):
 
         # store tokenizer
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
-        try:
-            emb = self.base_model.get_input_embeddings()
-            text_hidden_size = emb.embedding_dim if hasattr(emb, "embedding_dim") else emb.weight.shape[1]
-        except (NotImplementedError, AttributeError):
-            text_hidden_size = getattr(self.base_model.config, "hidden_size", None)
-            if text_hidden_size is None:
-                # fall back to running a dummy forward pass
-                with torch.no_grad():
-                    dummy_id = torch.tensor([[self.base_tokenizer.eos_token_id]], device=base_model_device)
-                    hs = self.base_model(dummy_id).last_hidden_state
-                    text_hidden_size = hs.shape[-1]
+        cfg = self.base_model.config
+        text_hidden_size = None
+        for attr in ("hidden_size", "n_embd", "d_model"):
+            if hasattr(cfg, attr) and getattr(cfg, attr) is not None:
+                text_hidden_size = getattr(cfg, attr)
+                break
+
+        if text_hidden_size is None:
+            # fall back to dummy forward pass
+            with torch.no_grad():
+                tok_id = self.base_tokenizer.eos_token_id or 0
+                dummy = torch.tensor([[tok_id]], device=base_model_device)
+                h = self.base_model(dummy).last_hidden_state
+                text_hidden_size = h.shape[-1]
 
         self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
         self.image_processor = self.vision_tower.image_processor
