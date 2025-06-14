@@ -155,20 +155,16 @@ class BBOB(PreTrainedModel):
         self.projector.unfreeze()
 
     def freeze_model(self):
-        """
-        Freeze base language model parameters
-        """
+        """Freeze language model parameters."""
         self.language_model.eval()
-        for param in self.language_model.parameters():
-            param.requires_grad = False
+        for p in self.language_model.parameters():
+            p.requires_grad = False
     
     def unfreeze_model(self):
-        """
-        Unfreeze base language model parameters
-        """
+        """Unfreeze language model parameters."""
         self.language_model.train()
-        for param in self.language_model.parameters():
-            param.requires_grad = True
+        for p in self.language_model.parameters():
+            p.requires_grad = True
 
     def train(self):
         """
