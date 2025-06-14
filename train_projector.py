@@ -15,12 +15,11 @@ import sys
 import os
 import multiprocess as mp
 
-from train_common import load_and_prepare_dataset
-
 # training
 from trl import SFTTrainer, SFTConfig
-from ..Utils import get_logger, LoggingCallback
-from ..Model import build_BBOB    
+from Utils import get_logger, LoggingCallback
+from Model import build_BBOB 
+from Train import load_and_prepare_dataset
 
 def make_collate_fn(pad_token_id: int):
     """Return a collate function capturing the pad id from the tokenizer."""
