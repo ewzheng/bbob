@@ -45,17 +45,9 @@ def make_collate_fn(pad_token_id: int):
         merged_labels = []
 
         for item in batch:
-            instr_ids = item["input_ids"]
-            tgt_ids   = item["target_text"]
-
-            if not isinstance(instr_ids, torch.Tensor):
-                instr_ids = torch.as_tensor(instr_ids, dtype=torch.long)
-            if not isinstance(tgt_ids, torch.Tensor):
-                tgt_ids = torch.as_tensor(tgt_ids, dtype=torch.long)
-
-            # Ensure 1-D before concatenation
-            instr_ids = instr_ids.view(-1)
-            tgt_ids   = tgt_ids.view(-1)
+            # coerce to tensors and flatten to 1-D (covers any nested list/2-D case)
+            instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
+            tgt_ids   = torch.as_tensor(item["target_text"], dtype=torch.long).flatten()
 
             # drop padding tokens that were added during preprocessing
             instr_ids = instr_ids[instr_ids != pad_token_id]
