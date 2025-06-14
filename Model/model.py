@@ -133,14 +133,14 @@ class BBOB(PreTrainedModel):
         """
         return self.base_tokenizer
     
-    def get_vision_tower(self):
+    def get_image_processor(self):
         """
         Get the vision processing components
         
         Returns:
             - tuple: image processor and vision encoder
         """
-        return self.image_processor, self.vision_tower
+        return self.image_processor
     
     def freeze_projector(self):
         """

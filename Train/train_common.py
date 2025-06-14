@@ -409,7 +409,7 @@ def calculate_optimal_batch_size(
 
         memory_per_sample_gpu = 4 * 1024 * 1024  # 4 MB heuristic per sample
         gpu_batch_size = int(available_vram / memory_per_sample_gpu)
-        gpu_batch_size = max(min_batch_size, min(gpu_batch_size, max_batch_size))
+        gpu_batch_size = max(min_batch_size, min(gpu_batch_size, max_batch_size*(workers//2)))
 
         if gpu_batch_size >= 2:
             gpu_batch_size = 2 ** int(math.log2(gpu_batch_size))
@@ -433,14 +433,10 @@ def calculate_optimal_batch_size(
     print(f"  Available RAM:    {available_ram/1024**3:.1f} GB")
 
     memory_per_sample_cpu = 2 * 1024 * 1024  
-    cpu_bs_mem = int(available_ram * (1 - safety_margin) / memory_per_sample_cpu)
+    # ram usage per worker
+    cpu_bs_mem = int(available_ram * (1 - safety_margin) / memory_per_sample_cpu) * workers
 
-    # also cap by CPU cores (e.g. 8 samples per logical core)
-    cpu_cores = os.cpu_count() or 4
-    cpu_bs_core = cpu_cores * 8
-
-    cpu_batch_size = min(cpu_bs_mem, cpu_bs_core)
-    cpu_batch_size = max(min_batch_size, min(cpu_batch_size, max_batch_size))
+    cpu_batch_size = min(cpu_bs_mem, max_batch_size)
     if cpu_batch_size >= 2:
         cpu_batch_size = 2 ** int(math.log2(cpu_batch_size))
 
