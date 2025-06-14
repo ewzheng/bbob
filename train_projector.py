@@ -29,8 +29,17 @@ def make_collate_fn(pad_token_id: int):
         from torch.nn.utils.rnn import pad_sequence
         import torch
 
-        # keep PIL images untouched; TRL Trainer will move them to device later
-        images = [item["images"] for item in batch]
+        # find the image key dynamically (common fallbacks)
+        img_key = None
+        for cand in ("images", "image", "pixel_values"):
+            if cand in batch[0]:
+                img_key = cand
+                break
+        if img_key is None:
+            raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
+
+        # keep images untouched (PIL list or tensor); Trainer will move to device later
+        images = [item[img_key] for item in batch]
 
         merged_input_ids = []
         merged_labels = []
@@ -122,7 +131,7 @@ def train(
         eval_steps                  = max(512 // grad_acc_steps, 1),
         save_strategy               = "steps",
         save_steps                  = max(steps_per_epoch // 3, 1),
-        logging_steps               = max(128 // grad_acc_steps, 1),
+        logging_steps               = max(32 // grad_acc_steps, 1),
         report_to                   = "none",
     )
 
