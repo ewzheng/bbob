@@ -183,10 +183,14 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
     
     tokenized_text = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True, padding=True)
     
+    # Convert tensors to python lists so each sample holds a 1-D list of token ids
+    input_id_rows      = tokenized_text["input_ids"].cpu().tolist()
+    attention_mask_rows = tokenized_text["attention_mask"].cpu().tolist()
+
     result = {
         "images": processed_images,
-        "input_ids": tokenized_text["input_ids"].cpu(),
-        "attention_mask": tokenized_text["attention_mask"].cpu(),
+        "input_ids": input_id_rows,
+        "attention_mask": attention_mask_rows,
     }
 
     # apply augmentations to objects
