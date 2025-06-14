@@ -9,6 +9,7 @@ Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs
 import torch
 import argparse
 from datetime import datetime
+import math
 
 # utils
 import sys
@@ -105,7 +106,8 @@ def train(
     # config
     cuda = torch.cuda.is_available()
     bf16_supported = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    steps_per_epoch = (len(train_dataset) + grad_acc_steps - 1) // grad_acc_steps
+    steps_per_epoch = math.ceil(len(train_dataset) / (batch_size * grad_acc_steps))
+    steps_per_epoch = max(steps_per_epoch, 1)  # safety guard
 
     cfg = SFTConfig(
         output_dir                  = output_dir,
@@ -117,10 +119,10 @@ def train(
         bf16                        = bf16_supported,
         fp16                        = cuda and not bf16_supported,
         eval_strategy               = "steps",
-        eval_steps                  = 512//grad_acc_steps,
+        eval_steps                  = max(512 // grad_acc_steps, 1),
         save_strategy               = "steps",
-        save_steps                  = steps_per_epoch//3,
-        logging_steps               = 128//grad_acc_steps,
+        save_steps                  = max(steps_per_epoch // 3, 1),
+        logging_steps               = max(128 // grad_acc_steps, 1),
         report_to                   = "none",
     )
 
@@ -139,7 +141,6 @@ def train(
         callbacks      = [LoggingCallback(logger)] if logger is not None else None,
         optimizers     = (optimizer, scheduler),
         processing_class = model.get_tokenizer(),
-        image_processor = model.get_image_processor(),
     )
 
     logger.info("Starting training of projector...")
