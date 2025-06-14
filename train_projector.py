@@ -138,6 +138,7 @@ def train(
         args           = cfg,
         callbacks      = [LoggingCallback(logger)] if logger is not None else None,
         optimizers     = (optimizer, scheduler),
+        tokenizer      = model.get_tokenizer(),
     )
 
     logger.info("Starting training of projector...")
