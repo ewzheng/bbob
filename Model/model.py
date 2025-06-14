@@ -1,8 +1,4 @@
-'''
-File: model.py
-Author: Elias Zheng and Claude
-Description: This script contains the BBOB model class.
-'''
+"""BBOB multimodal model and config."""
 
 import torch
 import torch.nn as nn
@@ -16,13 +12,39 @@ from safetensors.torch import save_file
 from .vision_tower import VisionTower
 import json
 import safetensors.torch as st
+from transformers import PreTrainedModel
 
-class BBOB(nn.Module):
-    """
-    BBOB multimodal model combining vision encoder, projector, and language model
-    """
-    
-    def __init__(self, model_path, max_memory=None, bnb_config=None):
+# -----------------------------------------------------------------------------
+# Configuration class – moved here for convenience
+# -----------------------------------------------------------------------------
+
+from transformers import PretrainedConfig
+
+
+class BBOBConfig(PretrainedConfig):
+    """Config for the BBOB model."""
+
+    model_type = "bbob"
+
+    def __init__(
+        self,
+        vision_hidden_size: int,
+        text_hidden_size: int,
+        base_model_name: str,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.vision_hidden_size = vision_hidden_size
+        self.text_hidden_size = text_hidden_size
+        self.base_model_name = base_model_name
+
+class BBOB(PreTrainedModel):
+    """Vision–language model with MobileViT tower and projector."""
+
+    config_class = BBOBConfig
+
+    def __init__(self, model_path=None, max_memory=None, bnb_config=None, config: BBOBConfig | None = None, **kwargs):
         """
         Initialize BBOB model with specified components
         
@@ -31,8 +53,15 @@ class BBOB(nn.Module):
             - vision_encoder: path or identifier for vision encoder
             - bnb_config: quantization configuration for model loading
         """
-        super(BBOB, self).__init__()
-     
+
+        if config is not None:
+            self.config = config
+            if model_path is None:
+                model_path = config.base_model_name
+        else:
+            self.config = None
+
+        super().__init__(self.config if self.config is not None else BBOBConfig(vision_hidden_size=1, text_hidden_size=1, base_model_name=str(model_path)))
 
         if bnb_config == "8bit":
             bnb_config = BitsAndBytesConfig(load_in_8bit=True)
@@ -77,6 +106,14 @@ class BBOB(nn.Module):
         print(f"Vision Tower device: {self.vision_tower.device}, dtype: {self.vision_tower.dtype}")
         print(f"Projector device: {next(self.projector.parameters()).device}, dtype: {next(self.projector.parameters()).dtype}")
 
+        # Finalise config if it wasn't supplied (fresh init)
+        if self.config is None:
+            self.config = BBOBConfig(
+                vision_hidden_size=vision_hidden_size,
+                text_hidden_size=self.base_model.config.hidden_size,
+                base_model_name=str(model_path),
+            )
+            # PreTrainedModel does its own weight initialisation earlier; nothing further needed.
 
     ''' Helpers for interacting with internal components'''
     def get_tokenizer(self):    
@@ -244,106 +281,41 @@ class BBOB(nn.Module):
             **kwargs,
         )
 
-    def save_pretrained(self, output_dir, save_vision_tower: bool = False):
-        """
-        Save the entire BBOB checkpoint to *output_dir*.
+    def save_pretrained(self, output_dir: str, **kwargs):
+        """Leverage PreTrainedModel.save_pretrained then add projector/tower."""
+        super().save_pretrained(output_dir, **kwargs)
 
-        Parameters:
-            - output_dir: str – target directory where the checkpoint is written.
-            - save_vision_tower: bool – if *True*, also persist the (potentially
-              fine-tuned) MobileViT-V2 backbone.  Set to *False* to shrink disk
-              footprint when the standard pretrained backbone is sufficient.
-
-        Creates the following structure:
-            • `config.json`           – minimal metadata to reload via
-              :py:meth:`from_pretrained`.
-            • `language_model/`       – sub-directory with base LLM + tokenizer
-              saved via `transformers.PreTrainedModel.save_pretrained()`.
-            • `projector.safetensors` – binary weights for the projector MLP.
-            • `vision_tower/`         – (optional) directory with vision-tower
-              weights.
-        """
-        os.makedirs(output_dir, exist_ok=True)
-
-        # 1. Save language model
-        lm_dir = os.path.join(output_dir, "language_model")
-        self.base_model.save_pretrained(lm_dir)
-        self.base_tokenizer.save_pretrained(lm_dir)
-
-        # 2. Save projector
+        # Save extra pieces the vanilla save does not cover (optional)
         proj_path = os.path.join(output_dir, "projector.safetensors")
         self.projector.save_pretrained(proj_path)
 
-        # 3. Optionally save vision tower (mostly for fine-tuned backbones)
-        if save_vision_tower and hasattr(self, "vision_tower"):
-            vt_dir = os.path.join(output_dir, "vision_tower")
-            os.makedirs(vt_dir, exist_ok=True)
-            try:
-                # If the underlying MobileViTV2 model implements save_pretrained, use that.
-                self.vision_tower.model.save_pretrained(vt_dir)
-            except Exception:
-                # Fallback – state_dict
-                torch.save(self.vision_tower.model.state_dict(), os.path.join(vt_dir, "pytorch_model.bin"))
-
-        # 4. Tiny JSON config so `from_pretrained` knows what to load.
-        config = {
-            "model_type": "BBOB",
-            "base_model": lm_dir,
-            "vision_tower": (vt_dir if save_vision_tower else None),
-            "projector": proj_path,
-            "vision_hidden_size": self.projector.indim,
-            "text_hidden_size": self.projector.outdim,
-        }
-        with open(os.path.join(output_dir, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+        vt_dir = os.path.join(output_dir, "vision_tower")
+        os.makedirs(vt_dir, exist_ok=True)
+        try:
+            self.vision_tower.model.save_pretrained(vt_dir)
+        except Exception:
+            torch.save(self.vision_tower.model.state_dict(), os.path.join(vt_dir, "pytorch_model.bin"))
 
     @classmethod
-    def from_pretrained(cls, model_path, max_memory=None, bnb_config=None, map_location=None):
-        """
-        Restore a BBOB checkpoint that was previously saved with
-        :py:meth:`save_pretrained`.
+    def from_pretrained(cls, model_path: str, *model_args, **kwargs):
+        """Load via the standard HF mechanism then restore projector & tower."""
 
-        Parameters:
-            - model_path: str – path to the root directory containing the
-              checkpoint.
-            - max_memory: dict | None – optional `transformers` style GPU memory
-              map (same semantics as the main constructor).
-            - bnb_config: BitsAndBytesConfig | str | None – optional quantisation
-              config (same semantics as the main constructor).
-            - map_location: torch.device | str | None – device mapping override
-              when loading raw `state_dict`s.
+        obj: "BBOB" = super().from_pretrained(model_path, *model_args, **kwargs)
 
-        Returns:
-            - BBOB – fully initialised model, ready for inference or further
-              fine-tuning.
-        """
-        # read config
-        cfg_file = os.path.join(model_path, "config.json")
-        if not os.path.isfile(cfg_file):
-            raise FileNotFoundError(f"Missing config.json in {model_path}")
-        with open(cfg_file, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-
-        # instantiate skeleton
-        obj = cls(cfg["base_model"], max_memory=max_memory, bnb_config=bnb_config)
-
-        # load projector
-        proj_path = cfg.get("projector")
-        if proj_path and os.path.isfile(proj_path):
+        # restore projector if separate file exists
+        proj_path = os.path.join(model_path, "projector.safetensors")
+        if os.path.isfile(proj_path):
             state = st.load_file(proj_path, device=obj.projector.device)
             obj.projector.load_state_dict(state)
-        else:
-            raise FileNotFoundError("Projector weights not found during from_pretrained")
 
-        # load vision tower if present and path exists
-        vt_dir = cfg.get("vision_tower")
-        if vt_dir and os.path.isdir(vt_dir):
+        # restore vision tower if directory exists
+        vt_dir = os.path.join(model_path, "vision_tower")
+        if os.path.isdir(vt_dir):
             try:
                 obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
             except Exception:
-                # fallback – load_state_dict
-                state_dict = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=map_location or obj.vision_tower.device)
-                obj.vision_tower.model.load_state_dict(state_dict)
+                sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj.vision_tower.device)
+                obj.vision_tower.model.load_state_dict(sd)
 
         return obj
         

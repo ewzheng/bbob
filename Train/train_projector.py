@@ -11,6 +11,7 @@ import argparse
 import time
 from datetime import datetime
 from torch.utils.data import DataLoader
+import logging
 
 
 # utils
@@ -25,6 +26,8 @@ from Model.build import build_BBOB
 from trl import SFTTrainer, SFTConfig
 from Utils.logging import get_logger, LoggingCallback
 
+# (re)set module-level logger (may receive handlers later via get_logger)
+logger = logging.getLogger(__name__)
 
 def make_collate_fn(pad_token_id: int):
     """Return a collate function capturing the pad id from the tokenizer."""
@@ -142,7 +145,6 @@ def train(
     logger.info("Starting training of projector...")
 
     trainer.train()
-    model.save_pretrained(output_dir)
 
     return
 
@@ -174,7 +176,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     # logging
-    logger = get_logger(output_dir) 
+    logger = get_logger(output_dir, "projector_training.log") 
 
     logger.info(f"Loading base language model from: {args.model}")
     logger.info(f"Loading dataset from: {args.dataset}")
@@ -202,6 +204,7 @@ def main():
     )
 
     logger.info("Projector training is complete, model successfully saved.")
+    
     return
 
 if __name__ == "__main__":
