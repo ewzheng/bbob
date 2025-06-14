@@ -105,6 +105,7 @@ def train(
     # config
     cuda = torch.cuda.is_available()
     bf16_supported = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    steps_per_epoch = (len(train_dataset) + grad_acc_steps - 1) // grad_acc_steps
 
     cfg = SFTConfig(
         output_dir                  = output_dir,
@@ -115,9 +116,11 @@ def train(
         learning_rate               = lr,
         bf16                        = bf16_supported,
         fp16                        = cuda and not bf16_supported,
-        evaluation_strategy         = "epoch",
-        save_strategy               = "epoch",
-        logging_steps               = 50,
+        eval_strategy               = "steps",
+        eval_steps                  = 512//grad_acc_steps,
+        save_strategy               = "steps",
+        save_steps                  = steps_per_epoch//3,
+        logging_steps               = 128//grad_acc_steps,
         report_to                   = "none",
     )
 
@@ -125,7 +128,6 @@ def train(
     collate_fn = make_collate_fn(model.get_tokenizer().pad_token_id)
 
     optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)
-    steps_per_epoch = (len(train_dataset) + grad_acc_steps - 1) // grad_acc_steps
     scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
 
     trainer = SFTTrainer(
