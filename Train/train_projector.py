@@ -9,8 +9,6 @@ Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs
 import torch
 import argparse
 from datetime import datetime
-import logging
-
 
 # utils
 import sys
@@ -21,11 +19,8 @@ from train_common import load_and_prepare_dataset
 
 # training
 from trl import SFTTrainer, SFTConfig
-from Utils import get_logger, LoggingCallback
-from Model import build_BBOB
-
-# (re)set module-level logger (may receive handlers later via get_logger)
-logger = logging.getLogger(__name__)
+from ..Utils import get_logger, LoggingCallback
+from ..Model import build_BBOB    
 
 def make_collate_fn(pad_token_id: int):
     """Return a collate function capturing the pad id from the tokenizer."""
