@@ -62,7 +62,14 @@ def make_collate_fn(pad_token_id: int):
             tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
 
             # concatenate instruction + target ⇒ model input
-            ids = torch.cat([instr_ids, tgt_ids], dim=0)
+            try:
+                ids = torch.cat([instr_ids, tgt_ids], dim=0)
+            except RuntimeError as e:
+                # print detailed debug info once then re-raise
+                print("[COLLATE-DEBUG] torch.cat failed")
+                print(f"  instr_ids shape: {instr_ids.shape}  sample: {instr_ids[:20]}")
+                print(f"  tgt_ids   shape: {tgt_ids.shape}  sample: {tgt_ids[:20]}")
+                raise
 
             # labels: ignore instruction tokens; learn on target tokens only
             lbl = ids.clone()
