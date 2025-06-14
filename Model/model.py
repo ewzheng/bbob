@@ -77,7 +77,10 @@ class BBOB(PreTrainedModel):
         else:
             bnb_config = None
 
-        self.base_model = transformers.AutoModelForCausalLM.from_pretrained(
+        # ensure we don't clash with PreTrainedModel.base_model property
+        self.base_model_prefix = "language_model"
+
+        self.language_model = transformers.AutoModelForCausalLM.from_pretrained(
             model_path,
             max_memory=max_memory,
             quantization_config=bnb_config,
@@ -85,15 +88,15 @@ class BBOB(PreTrainedModel):
             torch_dtype="auto",
         )
 
-        base_model_dtype = next(self.base_model.parameters()).dtype
-        base_model_device = next(self.base_model.parameters()).device
+        base_model_dtype = next(self.language_model.parameters()).dtype
+        base_model_device = next(self.language_model.parameters()).device
 
         self._dtype = base_model_dtype
         self._device = base_model_device
 
         # store tokenizer
         self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
-        emb_layer = self._find_input_embedding(self.base_model)
+        emb_layer = self._find_input_embedding(self.language_model)
         self._embedding_layer = emb_layer  # cache for forward()
         text_hidden_size = emb_layer.weight.shape[1]
 
@@ -155,30 +158,30 @@ class BBOB(PreTrainedModel):
         """
         Freeze base language model parameters
         """
-        self.base_model.eval()
-        for param in self.base_model.parameters():
+        self.language_model.eval()
+        for param in self.language_model.parameters():
             param.requires_grad = False
     
     def unfreeze_model(self):
         """
         Unfreeze base language model parameters
         """
-        self.base_model.train()
-        for param in self.base_model.parameters():
+        self.language_model.train()
+        for param in self.language_model.parameters():
             param.requires_grad = True
 
     def train(self):
         """
         Set all model components to training mode
         """ 
-        self.base_model.train()
+        self.language_model.train()
         self.projector.train()
 
     def eval(self):
         """
         Set all model components to evaluation mode
         """
-        self.base_model.eval()
+        self.language_model.eval()
         self.projector.eval()
 
     @property
@@ -308,7 +311,7 @@ class BBOB(PreTrainedModel):
             labels = torch.cat([pad, labels], dim=1)
 
         # Pass through language model
-        return self.base_model(
+        return self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=combined_mask,
             labels=labels,
