@@ -22,7 +22,9 @@ from transformers import PretrainedConfig
 
 
 class BBOBConfig(PretrainedConfig):
-    """Config for the BBOB model."""
+    """
+    configuration container for the bbob model.
+    """
 
     model_type = "bbob"
 
@@ -43,19 +45,25 @@ class BBOBConfig(PretrainedConfig):
         self.vision_tower_path: str | None = kwargs.get("vision_tower_path")
 
 class BBOB(PreTrainedModel):
-    """Vision–language model with MobileViT tower and projector."""
+    """
+    vision-language model composed of:
+    • mobilevit-v2 backbone (frozen)
+    • learnable projector to text space
+    • hf causal-lm language head.
+    """
 
     config_class = BBOBConfig
 
     def __init__(self, model_path=None, max_memory=None, bnb_config=None, config: BBOBConfig | None = None, **kwargs):
-        """
-        Initialize BBOB model with specified components
-        
-        Parameters:
-            - base_model: path or identifier for base language model
-            - vision_encoder: path or identifier for vision encoder
-            - bnb_config: quantization configuration for model loading
-        """
+        '''
+        ctor.
+
+        parameters:
+            - model_path (str|Path|None): base llm repo or ckpt dir.
+            - max_memory (dict|None): per-gpu memory map for hf `device_map`.
+            - bnb_config (str|BitsAndBytesConfig|None): "8bit"/"4bit"/"bf16"/"fp16".
+            - config (BBOBConfig|None): pre-built config when loading.
+        '''
 
         if config is not None:
             self.config = config
@@ -125,21 +133,15 @@ class BBOB(PreTrainedModel):
 
     ''' Helpers for interacting with internal components'''
     def get_tokenizer(self):    
-        """
-        Get the tokenizer for text processing
-        
-        Returns:
-            - tokenizer: the base model tokenizer
-        """
+        '''
+        returns: hf tokenizer tied to the base language model.
+        '''
         return self.base_tokenizer
     
     def get_image_processor(self):
-        """
-        Get the vision processing components
-        
-        Returns:
-            - tuple: image processor and vision encoder
-        """
+        '''
+        returns: mobilevit image processor instance.
+        '''
         return self.image_processor
     
     def freeze_projector(self):
@@ -193,18 +195,16 @@ class BBOB(PreTrainedModel):
     '''
 
     def _merge_multimodal_inputs(self, visual_embeds, text_embeds, attention_mask):
-        """
-        Merge visual-token embeddings in front of text-token embeddings.
+        '''
+        prepend visual tokens to text tokens.
 
-        Parameters:
-            - visual_embeds: torch.Tensor shape (B, V, D) or *None*
-            - text_embeds:  torch.Tensor shape (B, T, D)
-            - attention_mask: torch.Tensor shape (B, T) or *None*
+        parameters:
+            - visual_embeds (tensor|None): `(b, v, d)` or none.
+            - text_embeds (tensor): `(b, t, d)`.
+            - attention_mask (tensor|None): `(b, t)`.
 
-        Returns:
-            - combined_embeds: torch.Tensor shape (B, V+T, D)
-            - combined_mask:   torch.Tensor shape (B, V+T)
-        """
+        returns: tuple(tensor, tensor) -> combined_embeds, combined_mask.
+        '''
 
         if visual_embeds is None:
             return text_embeds, attention_mask
@@ -222,17 +222,14 @@ class BBOB(PreTrainedModel):
         return combined_embeds, combined_mask
 
     def _prepare_visual_inputs(self, images):
-        """
-        Turn a batch of raw images into language-space visual tokens.
+        '''
+        convert raw images to projected visual tokens.
 
-        Parameters:
-            - images: list | torch.Tensor – raw images accepted by the
-              `VisionTower.image_processor` (e.g. PIL.Image, numpy array, etc.)
+        parameters:
+            - images (list|tensor|None): raw images or pre-norm tensor.
 
-        Returns:
-            - torch.Tensor | *None*, shape (B, V, D) where *V = H×W*, the
-              number of spatial locations after flattening.
-        """
+        returns: tensor `(b, v, d)` or *none* when `images` is none.
+        '''
         if images is None:
             return None
 
@@ -282,19 +279,18 @@ class BBOB(PreTrainedModel):
         raise RuntimeError("Cannot locate input embedding layer in base model")
 
     def forward(self, input_ids=None, input_embeds=None, attention_mask=None, images=None, labels=None, **kwargs):
-        """
-        Multimodal forward pass.
+        '''
+        multimodal causal-lm pass.
 
-        Parameters:
-            - input_ids:      torch.LongTensor shape (B, T) – token ids. Optional if *input_embeds* is given.
-            - input_embeds:   torch.FloatTensor shape (B, T, D) – pre-computed embeddings.
-            - attention_mask: torch.LongTensor shape (B, T)
-            - images:         list | torch.Tensor – raw images (optional)
-            - labels:         torch.LongTensor shape (B, T) – language modelling labels
+        parameters:
+            - input_ids (tensor|None): token ids `(b, t)`.
+            - input_embeds (tensor|None): pre-computed embeddings.
+            - attention_mask (tensor|None): mask.
+            - images (list|tensor|None): raw or processed images.
+            - labels (tensor|None): lm labels.
 
-        Returns:
-            - transformers.modeling_outputs.CausalLMOutput (or subclass)
-        """
+        returns: `transformers.CausalLMOutput`.
+        '''
 
         visual_embeds = self._prepare_visual_inputs(images)
 
@@ -320,7 +316,9 @@ class BBOB(PreTrainedModel):
         )
 
     def save_pretrained(self, output_dir: str, **kwargs):
-        """Leverage PreTrainedModel.save_pretrained then add projector/tower."""
+        '''
+        save model using hf routine plus extra tower/projector weights.
+        '''
         # Update config with relative paths before saving
         self.config.projector_path = "projector.safetensors"
         self.config.vision_tower_path = "vision_tower"
@@ -340,7 +338,9 @@ class BBOB(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, model_path: str, *model_args, **kwargs):
-        """Load via the standard HF mechanism then restore projector & tower."""
+        '''
+        load weights and reconstruct projector + vision tower.
+        '''
 
         obj: "BBOB" = super().from_pretrained(model_path, *model_args, **kwargs)
 

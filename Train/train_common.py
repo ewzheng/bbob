@@ -128,32 +128,22 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
     return torch.tensor(adjusted, dtype=dtype)
 
 def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256), dtype=torch.float32):
-    """
-    Convert a raw *batch* of samples into model-ready tensors.
+    '''
+    build vision-language features for one raw dataset batch.
 
-    Steps performed per sample
-        1.  Convert image → RGB and **letter-box** it to *target_size* while
-            preserving aspect-ratio (padding = 128 grey).
-        2.  Tokenise the instructional *text* field with padding/truncation.
-        3.  (Optional) Jitter and re-scale COCO-style bounding-boxes, then
-            normalise them to the padded image size.
+    pre: batch must include keys `image`/`images` and `text`.
 
-    Parameters:
-        - batch: dict with keys like ``image`` / ``text`` / ``objects`` …
-        - vision_tower: VisionTower object for processing images
-        - tokenizer: HuggingFace tokenizer (will auto-add pad token if missing)
-        - gpu_batch_size: unused here – kept for backwards compatibility.
-        - bbox_jitter_ratio: float, jitter amplitude for bboxes when *training*.
-        - training: bool, enables bbox jitter.
-        - target_size: tuple(int, int), final (W, H) after letter-boxing.
+    parameters:
+        - batch (dict): incoming dataset slice.
+        - tokenizer (PreTrainedTokenizer): hf tokenizer.
+        - gpu_batch_size (int): images processed per cuda chunk.
+        - bbox_jitter_ratio (float): amplitude of bbox noise.
+        - training (bool): enables bbox jitter.
+        - target_size (tuple[int,int]): final (w, h) resolution.
+        - dtype (torch.dtype): dtype for tensors.
 
-    Returns:
-        dict containing:
-            • images              – list[ PIL.Image ] (letter-boxed)
-            • input_ids           – LongTensor[B, T]
-            • attention_mask      – LongTensor[B, T]
-            • *optional* target_boxes / target_labels / target_text …
-    """
+    returns: dict with image tensors, token ids, masks and optional targets.
+    '''
 
     processed_images = []      # PIL.Image (letter-boxed)
     image_sizes = []           # original (w, h) per image
@@ -477,16 +467,16 @@ def calculate_optimal_batch_size(
     return gpu_batch_size, cpu_batch_size
 
 def collate(batch):
-    """Merge a list of dataset items into a batch.
+    '''
+    join pre-processed samples into a single trainer batch.
 
-    Assumptions
-    ----------
-    • Each item["images"] is already a *torch.Tensor* of shape `(3, 256, 256)`
-      and properly normalised for MobileViT (done in ``preprocess_batch``).
-    • ``input_ids`` / ``attention_mask`` are 1-D Python lists or tensors.
-    • Optional keys (``target_boxes``, ``target_labels``, ``target_text``)
-      may be present.
-    """
+    pre: each sample has `images`, `input_ids`, `attention_mask` keys.
+
+    parameters:
+        - batch (list[dict]): mini-batch from torch DataLoader.
+
+    returns: dict ready for `model(**batch)`.
+    '''
 
     from torch.nn.utils.rnn import pad_sequence
     import torch

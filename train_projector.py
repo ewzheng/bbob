@@ -23,7 +23,14 @@ from Model import build_BBOB
 from Train import load_and_prepare_dataset
 
 def make_collate_fn(pad_token_id: int):
-    """Return a collate function capturing the pad id from the tokenizer."""
+    '''
+    factory that builds a custom collate_fn for sfttrainer.
+
+    parameters:
+        - pad_token_id (int): tokenizer pad id.
+
+    returns: callable(list[dict]) -> batch dict.
+    '''
 
     def _collate(batch):
         from torch.nn.utils.rnn import pad_sequence
@@ -99,22 +106,21 @@ def train(
     logger=None,
     warmup_steps: int = 0,
 ):
-    """
-    Train projector.
+    '''
+    fine-tune projector weights only.
 
-    Parameters:
-        - model: BBOB instance (vision tower + base LLM already loaded).
-        - train_dataset: processed dataset created by ``load_and_prepare_dataset``.
-        - val_dataset:   validation dataset (same structure).
-        - output_dir: str – directory for checkpoints.
-        - epochs: int – number of epochs.
-        - batch_size: int – per-device batch size.
-        - lr: float – learning rate for AdamW.
-        - grad_acc_steps: int – gradient-accumulation steps (default 1).
-
-    Returns:
-        - None – model is saved to *output_dir* on completion.
-    """
+    parameters:
+        - model (BBOB): model with frozen lm & vision tower.
+        - train_dataset (Dataset): processed train split.
+        - val_dataset (Dataset): validation split.
+        - output_dir (str): path to save checkpoints.
+        - epochs (int): training epochs.
+        - batch_size (int): per-device batch size.
+        - lr (float): learning rate.
+        - grad_acc_steps (int): gradient accumulation.
+        - logger (logging.Logger|None): optional logger.
+        - warmup_steps (int): lr warmup steps.
+    '''
 
     model.freeze_model()                              
     model.unfreeze_projector()                  
@@ -167,8 +173,8 @@ def train(
     return
 
 def main():
-    # parse command line arguments
-    parser = argparse.ArgumentParser(description="Train BBOB projector")
+    # parse command-line arguments
+    parser = argparse.ArgumentParser(description='train bbob projector')
     parser.add_argument("-m", "--model", required=True, help="Model location/path")
     parser.add_argument("-d", "--dataset", required=True, help="Dataset location/path")
     parser.add_argument("-e", "--epochs", type=int, default=1, help="Maximum number of training epochs (default: 1)")

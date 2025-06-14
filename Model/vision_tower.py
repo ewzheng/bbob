@@ -5,11 +5,13 @@ from transformers import MobileViTV2Model, MobileViTImageProcessor
 class VisionTower(nn.Module):
     def __init__(self, dtype, device):
         '''
-        Initialize vision tower with MobileViTV2 model and image processor
+        construct a frozen mobilevit-v2 vision tower.
 
-        Parameters:
-            - dtype: data type
-            - device: device to move the vision tower to
+        parameters:
+            - dtype (torch.dtype): weight / activation dtype.
+            - device (str | torch.device): target device.
+
+        returns: instance ready for `.process_image()` / `.forward()`.
         '''
         super().__init__()
 
@@ -43,26 +45,30 @@ class VisionTower(nn.Module):
 
     def process_image(self, images):
         '''
-        Process images into pixel values
+        convert raw images to mobilevit pixel tensors.
 
-        Pre: images should be formatted correctly prior to running through the image processor
+        pre: `images` must be list[pil.Image] or equivalent format
+        accepted by `MobileViTImageProcessor`.
 
-        Parameters:
-            - images: list of images
+        parameters:
+            - images (list[Any]): list of input images.
 
-        Returns:
-            - pixel_values: tensor of pixel values
+        returns: torch.tensor of shape `(b, 3, h, w)` on tower.device.
         '''
         return self.image_processor(images, return_tensors="pt").pixel_values.to(self.device, dtype=self.dtype)
 
     @torch.no_grad()
     def forward(self, images):
         '''
-        Pre: images are the processed pixel values outputted by the image processor
+        run the backbone and return the spatial feature map.
 
-        Parameters:
-            - images: tensor of pixel values
+        pre: `images` is already normalised float tensor produced by
+        `process_image` or the gpu collate path.
 
+        parameters:
+            - images (torch.Tensor): pixel tensor `(b, 3, h, w)`.
+
+        returns: torch.tensor `(b, c, h', w')` where `c = hidden_size`.
         Returns:
             - features: tensor of shape (B, C, H, W) ready for the projector
         '''

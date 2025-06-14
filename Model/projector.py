@@ -9,20 +9,30 @@ import torch.nn as nn
 from safetensors.torch import save_file
 
 class Projector(nn.Module):
-    """
-    Two layer multi-layer perception projector
-    """
+    '''
+    two-layer perceptron projector.
+
+    pre: `indim` must equal the channel dim of the vision tower.
+
+    parameters:
+        - indim (int): input dim from vision encoder.
+        - outdim (int): target dim (text embedding size).
+        - dtype (torch.dtype): dtype for weights.
+        - device (str | torch.device): where to allocate parameters.
+
+    returns: instance ready for `.forward()`.
+    '''
 
     def __init__(self, indim, outdim, dtype, device):
-        """
-        Initialize projector with input and output dimensions
-        
-        Parameters:
-            - indim: input dimension from vision encoder
-            - outdim: output dimension matching text embedding space
-            - dtype: data type
-            - device: device to move the projector to
-        """
+        '''
+        ctor.
+
+        parameters:
+            - indim (int): see class doc.
+            - outdim (int): see class doc.
+            - dtype (torch.dtype): torch dtype.
+            - device (str | torch.device): allocation device.
+        '''
         super().__init__()
         # two layer MLP: visiondim > textdim, GELU activation
         self.net = nn.Sequential(
@@ -88,15 +98,14 @@ class Projector(nn.Module):
     '''
 
     def forward(self, vision_in):
-        """
-        Projector forward pass
+        '''
+        forward pass.
 
-        Parameters:
-            - vision_in: torch.Tensor format is (B, C, H, W)
-        
-        Returns: 
-            - torch.Tensor, vision_in projected to outdim
-        """
+        parameters:
+            - vision_in (torch.Tensor): shape `(b, c, h, w)`.
+
+        returns: torch.tensor shape `(b, h*w, outdim)`.
+        '''
 
         if vision_in is None: return None
 
@@ -123,9 +132,9 @@ class Projector(nn.Module):
 
     @classmethod
     def from_pretrained(cls, model_path, indim, outdim, dtype, device):
-        """
-        Load projector from pretrained checkpoint
-        """
+        '''
+        load weights from a saved safetensor / pt file.
+        '''
         projector = cls(indim, outdim, dtype, device)
         projector.load_state_dict(torch.load(model_path, map_location=device))
     

@@ -9,7 +9,15 @@ from Model.model import BBOB
 
 def build_BBOB(model_path, bnb_config=None, load=False):
     '''
-    Build a BBOB model
+    construct or load a bbob model instance.
+
+    parameters:
+        - model_path (str): hf repo or local ckpt dir of the base llm.
+        - bnb_config (str|None): quantisation mode – {"8bit","4bit","bf16","fp16"}.
+        - load (bool): when true, load from `model_path` via
+          `BBOB.from_pretrained`; otherwise initialise new weights.
+
+    returns: BBOB model ready for training/inference.
     '''
 
     # informational print, initialize gpu
