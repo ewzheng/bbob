@@ -28,6 +28,9 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
+# Prevent "tokenizers parallelism" fork warnings inside multiprocess map
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 def make_collate_fn(pad_token_id: int, tokenizer):
     '''
     factory that builds a custom collate_fn for sfttrainer.
