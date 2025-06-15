@@ -100,5 +100,37 @@ class LoggingCallback(TrainerCallback):
         )
         self.logger.info("%s %s", prefix, joined)
 
+    # Extra callback – compute embedding similarity for the current batch and
+    # log it once per step.
+    def on_step_end(self, args, state, control, **kwargs):
+        model  = kwargs.get("model")
+        inputs = kwargs.get("inputs")
+
+        if model is None or inputs is None:
+            return
+
+        try:
+            from Train.train_common import compute_embedding_similarity
+            import torch
+
+            images = inputs.get("images")
+            input_ids = inputs.get("input_ids")
+
+            if images is None or input_ids is None:
+                return
+
+            with torch.no_grad():
+                vision_feats = model._prepare_visual_inputs(images)
+                text_embeds  = model._embed_tokens(input_ids.to(model.device))
+
+            if vision_feats is None:
+                return
+
+            sim = compute_embedding_similarity(vision_feats, text_embeds)
+            self.logger.info("[step %d] embedding_similarity=%.6f", state.global_step, sim)
+        except Exception as e:
+            # Fail silently in similarity computation to not disturb training
+            self.logger.debug("Similarity computation failed: %s", e)
+
 
 
