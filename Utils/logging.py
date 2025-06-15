@@ -126,7 +126,7 @@ class LoggingCallback(TrainerCallback):
             from Train.train_common import compute_embedding_similarity
             import torch
 
-            images = inputs.get("images")
+            images = inputs.get("pixel_values", inputs.get("images"))
             input_ids = inputs.get("input_ids")
 
             if images is None or input_ids is None:
