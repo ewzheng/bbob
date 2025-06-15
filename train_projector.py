@@ -130,7 +130,10 @@ def make_collate_fn(pad_token_id: int, tokenizer):
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
         labels_padded    = pad_sequence(merged_labels,    batch_first=True, padding_value=-100)
 
-        attention_mask = (input_ids_padded != pad_token_id).long()
+        # mask for text tokens; visual tokens (64) will be prepended → mark as 0
+        text_mask = (input_ids_padded != pad_token_id).long()
+        visual_mask = torch.zeros(text_mask.size(0), 64, dtype=text_mask.dtype)
+        attention_mask = torch.cat([visual_mask, text_mask], dim=1)
 
         return {
             "images": pixel_values,
