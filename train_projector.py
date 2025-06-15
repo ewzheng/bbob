@@ -204,8 +204,10 @@ def train(
         per_device_eval_batch_size  = batch_size,
         gradient_accumulation_steps = grad_acc_steps,
         learning_rate               = lr,
+        optim                       = "adamw_torch",
+        weight_decay                = 0,
         bf16                        = bf16_supported,
-        fp16                        = cuda and not bf16_supported,
+        fp16                        = cuda and not bf16_supported,  
         eval_strategy               = "steps",
         eval_steps                  = max(512 // grad_acc_steps, 1),
         save_strategy               = "steps",
@@ -217,7 +219,8 @@ def train(
         dataloader_pin_memory       = True,
         warmup_steps                = warmup_steps,
         save_total_limit            = 2,
-        dataset_kwargs              = {"skip_prepare_dataset": True}
+        dataset_kwargs              = {"skip_prepare_dataset": True},
+        lr_scheduler_type           = "cosine_with_restarts",
     )
 
     # guarantee pad token exists (some LLM tokenizers lack one by default)
@@ -228,10 +231,6 @@ def train(
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
-    optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr, weight_decay=0)
-    scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
-    scheduler.step(0)
-
     trainer = SFTTrainer(
         model          = model,
         train_dataset  = train_dataset,
@@ -239,10 +238,9 @@ def train(
         data_collator  = collate_fn,
         args           = cfg,
         callbacks      = [LoggingCallback(logger)] if logger is not None else None,
-        optimizers     = (optimizer, scheduler),
         processing_class = tokenizer
     )
-
+    
     logger.info("Starting training of projector...")
 
     trainer.train()
