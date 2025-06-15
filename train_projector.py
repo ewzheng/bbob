@@ -216,11 +216,11 @@ def train(
         report_to                   = "none",
         remove_unused_columns       = False,
         dataloader_num_workers      = num_workers,
-        dataloader_pin_memory       = True,
+        dataloader_pin_memory       = True, 
         save_total_limit            = 2,
         dataset_kwargs              = {"skip_prepare_dataset": True},
         lr_scheduler_type           = "cosine",   
-        lr_scheduler_args           = {"num_warmup_steps": warmup_steps, "num_training_steps": steps_per_epoch*epochs-warmup_steps}
+        warmup_steps                = warmup_steps,
     )
 
     # guarantee pad token exists (some LLM tokenizers lack one by default)
@@ -296,6 +296,7 @@ def main():
         grad_acc_steps=args.gradient_accumulation_steps,
         logger=logger,
         num_workers=args.num_workers,
+        warmup_steps=args.warmup_steps
     )
 
     logger.info("Projector training is complete, model successfully saved.")
