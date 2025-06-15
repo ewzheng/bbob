@@ -443,7 +443,42 @@ def load_and_prepare_dataset(
     if on_the_fly:
         # Light transform: just add instruction text; collate will tokenize & process images
         def _insert_instruction(example):
+            """Add the user instruction and (optionally) build `target_text`.
+
+            • `text`        → raw system/instruction prompt (always present).
+            • `target_text` → *token-id list* for the caption that the model
+              should predict.  If a COCO sample has several captions we join
+              them with spaces before tokenising.  When no caption is found
+              we store an empty list so the collate-fn can fall back to
+              producing an all-ignored label sequence (loss will be zero).
+            """
+
             example["text"] = instruction
+
+            raw_caption = ""
+
+            # HF COCO format → list[{raw: str, ...}] under "sentences"
+            if "sentences" in example and example["sentences"]:
+                if isinstance(example["sentences"], list):
+                    raw_caption = " ".join(
+                        s.get("raw", "") for s in example["sentences"] if isinstance(s, dict)
+                    ).strip()
+                elif isinstance(example["sentences"], dict):
+                    raw_caption = example["sentences"].get("raw", "").strip()
+
+            # Some variants expose a single string field, e.g. ``caption``
+            elif "caption" in example:
+                raw_caption = str(example["caption"]).strip()
+
+            # Tokenise *without* padding ─ we'll pad in the collator
+            if raw_caption:
+                ids = tokenizer(raw_caption, return_tensors="pt", truncation=True, max_length=128)[
+                    "input_ids"
+                ].squeeze(0).tolist()
+                example["target_text"] = ids
+            else:
+                example["target_text"] = []  # will yield all-ignored labels
+
             return example
 
         train = train.map(_insert_instruction)
