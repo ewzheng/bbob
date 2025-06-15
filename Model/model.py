@@ -341,7 +341,9 @@ class BBOB(PreTrainedModel):
         # `shared tensors … mismatching the transformers base configuration`
         # runtime error (see HF issue #32354).
 
-        kwargs.setdefault("safe_serialization", False)
+        # Trainer passes `safe_serialization=self.args.save_safetensors`.
+        # Override unconditionally so we never hit the shared-tensor guard.
+        kwargs["safe_serialization"] = False
 
         super().save_pretrained(output_dir, **kwargs)
 
