@@ -220,7 +220,7 @@ def train(
         warmup_steps                = warmup_steps,
         save_total_limit            = 2,
         dataset_kwargs              = {"skip_prepare_dataset": True},
-        lr_scheduler_type           = "cosine_with_restarts",
+        lr_scheduler_type           = "cosine",    
     )
 
     # guarantee pad token exists (some LLM tokenizers lack one by default)
