@@ -70,7 +70,9 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             _, H, W = t.shape
             if (H, W) != target_size:
                 scale = min(target_size[1] / H, target_size[0] / W)
-                nh, nw = int(H * scale), int(W * scale)
+                # Clamp to at least 1 px to avoid zero-dimension resize errors
+                nh = max(1, int(H * scale))
+                nw = max(1, int(W * scale))
                 t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
 
                 canvas = 0.5 * torch.ones(3, *target_size)
