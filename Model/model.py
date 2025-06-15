@@ -330,6 +330,19 @@ class BBOB(PreTrainedModel):
         self.config.projector_path = "projector.safetensors"
         self.config.vision_tower_path = "vision_tower"
 
+        # Hugging-Face raises an error when two distinct parameter names share
+        # the same underlying storage *and* `safe_serialization=True` (the
+        # default since Transformers v4.40). Our model purposefully alias-ties
+        # several weights between the public `vision_tower` handle and the
+        # internal `vision_encoder` pointer, as well as between the LM input
+        # embedding and a convenience `_embedding_layer` wrapper.  Because the
+        # Trainer passes the flag straight through, we override it here – if
+        # the caller did not already opt-out – to avoid the
+        # `shared tensors … mismatching the transformers base configuration`
+        # runtime error (see HF issue #32354).
+
+        kwargs.setdefault("safe_serialization", False)
+
         super().save_pretrained(output_dir, **kwargs)
 
         # Save extra pieces the vanilla save does not cover (optional)
