@@ -110,18 +110,19 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
 
             # concatenate instruction + target ⇒ model input
-            try:
-                ids = torch.cat([instr_ids, tgt_ids], dim=0)
-            except RuntimeError as e:
-                # print detailed debug info once then re-raise
-                print("[COLLATE-DEBUG] torch.cat failed")
-                print(f"  instr_ids shape: {instr_ids.shape}  sample: {instr_ids[:20]}")
-                print(f"  tgt_ids   shape: {tgt_ids.shape}  sample: {tgt_ids[:20]}")
-                raise
+            ids = torch.cat([instr_ids, tgt_ids], dim=0)
 
-            # labels: ignore instruction tokens; learn on target tokens only
-            lbl = ids.clone()
-            lbl[: instr_ids.size(0)] = -100
+            # prepend visual token placeholders to both ids and labels
+            VIS_TOKENS = 64  # 8x8 grid from MobileViT
+            visual_pad = torch.full((VIS_TOKENS,), pad_token_id, dtype=torch.long)
+            ids_with_vis = torch.cat([visual_pad, ids], dim=0)
+
+            # labels: ignore visual + instruction tokens; learn on target tokens only
+            lbl = torch.full_like(ids_with_vis, -100)
+            start_target = VIS_TOKENS + instr_ids.size(0)
+            lbl[start_target:] = ids_with_vis[start_target:]
+
+            ids = ids_with_vis
 
             merged_input_ids.append(ids)
             merged_labels.append(lbl)
