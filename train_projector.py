@@ -112,9 +112,11 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             # concatenate instruction + target ⇒ model input (text only)
             ids = torch.cat([instr_ids, tgt_ids], dim=0)
 
-            # build labels: mask instruction tokens, keep rest
-            lbl = ids.clone()
-            lbl[: instr_ids.size(0)] = -100  # ignore instruction
+            # build labels: prepend placeholders for visual tokens (64) and mask instruction
+            VIS_TOKENS = 64
+            visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
+            lbl = torch.cat([visual_ignore, ids.clone()])
+            lbl[: VIS_TOKENS + instr_ids.size(0)] = -100  # ignore vision + instruction
 
             merged_input_ids.append(ids)
             merged_labels.append(lbl)
@@ -123,8 +125,10 @@ def make_collate_fn(pad_token_id: int, tokenizer):
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
         labels_padded    = pad_sequence(merged_labels,    batch_first=True, padding_value=-100)
 
-        # build attention mask AFTER padding (text tokens only — visual mask added in model.forward)
-        attention_mask = (input_ids_padded != pad_token_id).long()
+        # build attention mask AFTER padding, prepend zeros for visual tokens
+        text_mask   = (input_ids_padded != pad_token_id).long()
+        visual_mask = torch.zeros(text_mask.size(0), 64, dtype=text_mask.dtype)
+        attention_mask = torch.cat([visual_mask, text_mask], dim=1)
 
         return {
             "images": pixel_values,

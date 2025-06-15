@@ -304,8 +304,11 @@ class BBOB(PreTrainedModel):
         inputs_embeds, combined_mask = self._merge_multimodal_inputs(visual_embeds, text_embeds, attention_mask)
 
         if labels is not None and visual_embeds is not None:
-            pad = torch.full((labels.size(0), visual_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
-            labels = torch.cat([pad, labels], dim=1)
+            # If labels already include placeholders for visual tokens, skip adding again
+            expected_len = text_embeds.size(1) + visual_embeds.size(1)
+            if labels.size(1) < expected_len:
+                pad = torch.full((labels.size(0), visual_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
+                labels = torch.cat([pad, labels], dim=1)
 
         # Pass through language model
         return self.language_model(
