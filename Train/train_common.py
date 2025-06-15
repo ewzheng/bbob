@@ -335,7 +335,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProces
     # add instruction to each sample to create "text" field
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
-    max_workers = min(mp.cpu_count() - 1, 8)
+    max_workers = min(mp.cpu_count() - 1, 4)
     
     # determine optimal batch sizes ----------------------------------------------------
     gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=0.15)
