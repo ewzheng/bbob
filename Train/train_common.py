@@ -664,3 +664,28 @@ def load_labels_from_yaml(yaml_path):
         raise ValueError("YAML file must contain a 'names' section")
 
     return {v: int(k) for k, v in data["names"].items()}
+
+
+def _convert_dtype_to_str(value):
+    """Return value with torch.dtype objects replaced by their string name."""
+
+    if isinstance(value, torch.dtype):
+        return str(value).split(".")[-1]
+    if isinstance(value, dict):
+        return {k: _convert_dtype_to_str(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_convert_dtype_to_str(v) for v in value]
+    return value
+
+
+def clean_tokenizer_config(tokenizer):
+    """In-place convert any torch.dtype values inside `tokenizer.init_kwargs`.
+
+    Call this once after the tokenizer is created/before `Trainer` starts so
+    that checkpoints can be saved without hitting JSON serialization errors.
+    """
+
+    if not hasattr(tokenizer, "init_kwargs") or not isinstance(tokenizer.init_kwargs, dict):
+        return
+
+    tokenizer.init_kwargs = _convert_dtype_to_str(tokenizer.init_kwargs)

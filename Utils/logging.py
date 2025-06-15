@@ -95,7 +95,7 @@ class LoggingCallback(TrainerCallback):
 
         prefix = f"[step {state.global_step}]"
         joined = ", ".join(
-            f"{k}={v:.6f}" if isinstance(v, (float, int)) else f"{k}={v}"
+            f"{k}={v:.10f}" if isinstance(v, (float, int)) else f"{k}={v}"
             for k, v in logs.items()
         )
         self.logger.info("%s %s", prefix, joined)

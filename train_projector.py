@@ -20,7 +20,7 @@ from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 from trl import SFTTrainer, SFTConfig
 from Utils import get_logger, LoggingCallback
 from Model import build_BBOB 
-from Train import load_and_prepare_dataset
+from Train import load_and_prepare_dataset, clean_tokenizer_config
 
 # img / tensor utilities
 from torchvision.transforms.functional import pil_to_tensor
@@ -227,6 +227,14 @@ def train(
     tokenizer = model.get_tokenizer()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+
+    # sanitise dtype entries so tokenizer can be saved by Trainer
+    try:
+        clean_tokenizer_config(tokenizer)
+    except Exception as _e:
+        # do not fail training if helper import fails – just log once
+        if logger is not None:
+            logger.warning("Tokenizer config sanitisation skipped: %s", _e)
 
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
