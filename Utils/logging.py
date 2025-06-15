@@ -112,13 +112,15 @@ class LoggingCallback(TrainerCallback):
         self.logger.info("%s %s", prefix, joined)
 
     # Extra callback – compute embedding similarity for the current batch and
-    # log it once per step.
-    def on_step_end(self, args, state, control, **kwargs):
+    # log it once per step. We use `on_train_batch_end` because HF passes both
+    # `inputs` and `model` to that hook (they are *not* available in
+    # `on_step_end`).
+    def on_train_batch_end(self, args, state, control, **kwargs):
         model  = kwargs.get("model")
         inputs = kwargs.get("inputs")
 
         if model is None or inputs is None:
-            return
+            return control
 
         try:
             from Train.train_common import compute_embedding_similarity
@@ -128,20 +130,27 @@ class LoggingCallback(TrainerCallback):
             input_ids = inputs.get("input_ids")
 
             if images is None or input_ids is None:
-                return
+                return control
 
             with torch.no_grad():
-                vision_feats = model._prepare_visual_inputs(images)
-                text_embeds  = model._embed_tokens(input_ids.to(model.device))
+                # Model‐specific helpers. Fall back gracefully if absent.
+                if hasattr(model, "_prepare_visual_inputs"):
+                    vision_feats = model._prepare_visual_inputs(images)
+                else:
+                    return control
 
-            if vision_feats is None:
-                return
+                if hasattr(model, "_embed_tokens"):
+                    text_embeds = model._embed_tokens(input_ids.to(model.device))
+                else:
+                    return control
 
             sim = compute_embedding_similarity(vision_feats, text_embeds)
             self.logger.info("[step %d] embedding_similarity=%.6f", state.global_step, sim)
         except Exception as e:
-            # Fail silently in similarity computation to not disturb training
+            # Fail silently so training is never interrupted by metrics
             self.logger.debug("Similarity computation failed: %s", e)
+
+        return control
 
 
 
