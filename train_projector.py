@@ -228,8 +228,9 @@ def train(
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
-    optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr, weight_decay=0)
     scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
+    scheduler.step(0)
 
     trainer = SFTTrainer(
         model          = model,
@@ -239,7 +240,7 @@ def train(
         args           = cfg,
         callbacks      = [LoggingCallback(logger)] if logger is not None else None,
         optimizers     = (optimizer, scheduler),
-        processing_class = model.get_tokenizer()
+        processing_class = tokenizer
     )
 
     logger.info("Starting training of projector...")
