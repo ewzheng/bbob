@@ -109,29 +109,23 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             instr_ids = instr_ids[instr_ids != pad_token_id]
             tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
 
-            # concatenate instruction + target ⇒ model input
+            # concatenate instruction + target ⇒ model input (text only)
             ids = torch.cat([instr_ids, tgt_ids], dim=0)
 
-            # prepend visual token placeholders to both ids and labels
-            VIS_TOKENS = 64  # 8x8 grid from MobileViT
-            visual_pad = torch.full((VIS_TOKENS,), pad_token_id, dtype=torch.long)
-            ids_with_vis = torch.cat([visual_pad, ids], dim=0)
-
-            # labels: ignore visual + instruction tokens; learn on target tokens only
-            lbl = torch.full_like(ids_with_vis, -100)
-            start_target = VIS_TOKENS + instr_ids.size(0)
-            lbl[start_target:] = ids_with_vis[start_target:]
-
-            ids = ids_with_vis
+            # labels: add placeholders for forthcoming visual tokens, ignore instr
+            VIS_TOKENS = 64
+            visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
+            lbl = torch.cat([visual_ignore, ids.clone()])
+            lbl[: VIS_TOKENS + instr_ids.size(0)] = -100
 
             merged_input_ids.append(ids)
             merged_labels.append(lbl)
 
-        # pad to max length in batch
+        # pad to max length first
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
         labels_padded    = pad_sequence(merged_labels,    batch_first=True, padding_value=-100)
 
-        # mask for text tokens; visual tokens (64) will be prepended → mark as 0
+        # build attention mask AFTER padding
         text_mask = (input_ids_padded != pad_token_id).long()
         visual_mask = torch.zeros(text_mask.size(0), 64, dtype=text_mask.dtype)
         attention_mask = torch.cat([visual_mask, text_mask], dim=1)
