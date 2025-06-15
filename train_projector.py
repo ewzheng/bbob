@@ -86,10 +86,19 @@ def make_collate_fn(pad_token_id: int, tokenizer):
         merged_labels = []
 
         for item in batch:
-            text = item.get("text", "")
-            tokens = tokenizer(text, return_tensors="pt")
-            instr_ids = tokens["input_ids"].squeeze(0)
-            tgt_ids = torch.tensor([], dtype=torch.long)
+            # --- instruction tokens ---
+            if "input_ids" in item:
+                instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
+            else:
+                text = item.get("text", "")
+                tokens = tokenizer(text, return_tensors="pt")
+                instr_ids = tokens["input_ids"].squeeze(0)
+
+            # --- target tokens (may be absent in on-the-fly mode) ---
+            if "target_text" in item:
+                tgt_ids = torch.as_tensor(item["target_text"], dtype=torch.long).flatten()
+            else:
+                tgt_ids = torch.tensor([], dtype=torch.long)
 
             # drop padding tokens that were added during preprocessing
             instr_ids = instr_ids[instr_ids != pad_token_id]
@@ -241,7 +250,7 @@ def main():
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
         dtype=model.dtype,
-        on_the_fly=True,
+        on_the_fly=False,
     )
 
     train(
