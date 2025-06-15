@@ -67,10 +67,14 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             if t.dim() == 2:  # grayscale H×W
                 t = t.unsqueeze(0).expand(3, -1, -1)  # repeat channels
             elif t.dim() == 3:
-                if t.shape[0] == 3:
-                    pass  # already C,H,W
-                elif t.shape[2] == 3:
+                if t.shape[0] == 3:  # C,H,W RGB
+                    pass
+                elif t.shape[0] == 1:  # C=1, H, W  -> replicate channel
+                    t = t.expand(3, -1, -1)
+                elif t.shape[2] == 3:  # H,W,C RGB
                     t = t.permute(2, 0, 1)
+                elif t.shape[2] == 1:  # H,W,1 grayscale
+                    t = t.permute(2, 0, 1).expand(3, -1, -1)
                 else:
                     raise RuntimeError(f"Unexpected image shape {t.shape}; cannot determine channel dimension")
             else:
