@@ -96,9 +96,13 @@ def make_collate_fn(pad_token_id: int, tokenizer):
 
             # --- target tokens (may be absent in on-the-fly mode) ---
             if "target_text" in item:
-                tgt_ids = torch.as_tensor(item["target_text"], dtype=torch.long).flatten()
+                tgt_ids = torch.as_tensor(item["target_text"], dtype=torch.long)
             else:
                 tgt_ids = torch.tensor([], dtype=torch.long)
+
+            # ensure both are 1-D
+            instr_ids = instr_ids.flatten()
+            tgt_ids   = tgt_ids.flatten()
 
             # drop padding tokens that were added during preprocessing
             instr_ids = instr_ids[instr_ids != pad_token_id]
