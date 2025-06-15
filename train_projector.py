@@ -49,15 +49,16 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
         target_size = (256, 256)
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Stay on CPU inside worker; main process/Accelerate will move to GPU
+        device = "cpu"
 
         processed = []
         for img in [item[img_key] for item in batch]:
             # Case-1: pre-normalised numpy array (3,H,W) or tensor
             if isinstance(img, torch.Tensor):
-                t = img.to(device=device, dtype=torch.float32)
+                t = img.to(dtype=torch.float32)
             elif isinstance(img, np.ndarray):
-                t = torch.as_tensor(img, dtype=torch.float32, device=device)
+                t = torch.as_tensor(img, dtype=torch.float32)
             else:
                 # Fallback: PIL → tensor path (rare after preprocessing refactor)
                 t = pil_to_tensor(img).float().div_(255.0).to(device)
@@ -72,7 +73,7 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 nh, nw = int(H * scale), int(W * scale)
                 t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
 
-                canvas = 0.5 * torch.ones(3, *target_size, device=device)
+                canvas = 0.5 * torch.ones(3, *target_size)
                 dh = (target_size[1] - nh) // 2
                 dw = (target_size[0] - nw) // 2
                 canvas[:, dh:dh+nh, dw:dw+nw] = t
