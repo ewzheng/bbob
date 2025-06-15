@@ -94,10 +94,21 @@ class LoggingCallback(TrainerCallback):
             return
 
         prefix = f"[step {state.global_step}]"
-        joined = ", ".join(
-            f"{k}={v:.10f}" if isinstance(v, (float, int)) else f"{k}={v}"
-            for k, v in logs.items()
-        )
+        # Format numbers; show LR in scientific notation so values like 1e-5 are readable
+        def _fmt(k, v):
+            if not isinstance(v, (float, int)):
+                return f"{k}={v}"
+
+            if k == "learning_rate":
+                # 6-sigfigs scientific notation, e.g. 1.999750e-05
+                return f"{k}={v:.6e}"
+
+            # default – fixed-point with 6 decimals; switch to sci-notation for very small/large
+            if abs(v) < 1e-3 or abs(v) >= 1e4:
+                return f"{k}={v:.4e}"
+            return f"{k}={v:.6f}"
+
+        joined = ", ".join(_fmt(k, v) for k, v in logs.items())
         self.logger.info("%s %s", prefix, joined)
 
     # Extra callback – compute embedding similarity for the current batch and
