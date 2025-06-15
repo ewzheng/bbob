@@ -361,6 +361,8 @@ def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProces
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size}, GPU batch={gpu_batch_size})",
+        writer_batch_size=min(512, cpu_batch_size // 2),  # keep each Arrow chunk <2 GB
+        keep_in_memory=False,
         load_from_cache_file=False,  # force reprocessing after code changes
     )
 
@@ -494,7 +496,8 @@ def calculate_optimal_batch_size(
     print(f"  Total RAM:        {total_ram/1024**3:.1f} GB")
     print(f"  Available RAM:    {available_ram/1024**3:.1f} GB")
 
-    memory_per_sample_cpu = 2 * 1024 * 1024  
+    # After introducing MobileViT pre-processing each sample is ~6 MB in RAM.
+    memory_per_sample_cpu = 6 * 1024 * 1024  
 
     cpu_bs_mem = int(available_ram * (1 - safety_margin) / memory_per_sample_cpu) // workers
 
