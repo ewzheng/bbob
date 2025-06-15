@@ -12,6 +12,7 @@ from .train_common import (
     compute_gradient_norm,
     compute_parameter_norm,
     load_labels_from_yaml,
+    clean_tokenizer_config
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "compute_gradient_norm",
     "compute_parameter_norm",
     "load_labels_from_yaml",
+    "clean_tokenizer_config"
 ]
