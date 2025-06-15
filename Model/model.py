@@ -30,16 +30,20 @@ class BBOBConfig(PretrainedConfig):
 
     def __init__(
         self,
-        vision_hidden_size: int,
-        text_hidden_size: int,
-        base_model_name: str,
+        vision_hidden_size: int | None = None,
+        text_hidden_size: int | None = None,
+        base_model_name: str | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        self.vision_hidden_size = vision_hidden_size
-        self.text_hidden_size = text_hidden_size
-        self.base_model_name = base_model_name
+        # Use placeholder values when none are provided – this allows
+        # `BBOBConfig()` to be instantiated with zero args, which
+        # Hugging-Face does internally when it compares against a default
+        # config during `save_pretrained()`.
+        self.vision_hidden_size = vision_hidden_size if vision_hidden_size is not None else 1
+        self.text_hidden_size   = text_hidden_size   if text_hidden_size   is not None else 1
+        self.base_model_name    = base_model_name    if base_model_name    is not None else "unknown"
         # paths for extra components (filled during save_pretrained)
         self.projector_path: str | None = kwargs.get("projector_path")
         self.vision_tower_path: str | None = kwargs.get("vision_tower_path")
