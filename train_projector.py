@@ -217,7 +217,6 @@ def train(
         dataloader_pin_memory       = True,
         warmup_steps                = warmup_steps,
         save_total_limit            = 2,
-        remove_unused_columns       = False,
         dataset_kwargs              = {"skip_prepare_dataset": True}
     )
 
