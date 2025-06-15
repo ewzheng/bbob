@@ -217,6 +217,8 @@ def train(
         dataloader_pin_memory       = True,
         warmup_steps                = warmup_steps,
         save_total_limit            = 2,
+        remove_unused_columns       = False,
+        dataset_kwargs              = {"skip_prepare_dataset": True}
     )
 
     # guarantee pad token exists (some LLM tokenizers lack one by default)
@@ -238,6 +240,7 @@ def train(
         args           = cfg,
         callbacks      = [LoggingCallback(logger)] if logger is not None else None,
         optimizers     = (optimizer, scheduler),
+        processing_class = model.get_tokenizer()
     )
 
     logger.info("Starting training of projector...")
