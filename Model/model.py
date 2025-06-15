@@ -323,59 +323,54 @@ class BBOB(PreTrainedModel):
         )
 
     def save_pretrained(self, output_dir: str, **kwargs):
-        '''
-        save model using hf routine plus extra tower/projector weights.
-        '''
-        # Update config with relative paths before saving
+        """Persist only the **small** pieces we actually fine-tune.
+
+        We do **not** store the full language-model weights ─ they are unchanged
+        from the public checkpoint referenced by ``config.base_model_name`` and
+        would massively bloat every projector checkpoint.  Instead we save:
+
+        1. ``config.json`` – updated so it knows where to find the base model
+           and the projector file.
+        2. ``projector.safetensors`` – a few-MB state-dict with the learned
+           projection layer.
+        3. (optional) a fine-tuned vision-tower dir if the user ever unfreezes
+           those parameters.
+        """
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # --- 1) config -----------------------------------------------------------------
         self.config.projector_path = "projector.safetensors"
-        self.config.vision_tower_path = "vision_tower"
+        self.config.save_pretrained(output_dir)
 
-        # Hugging-Face raises an error when two distinct parameter names share
-        # the same underlying storage *and* `safe_serialization=True` (the
-        # default since Transformers v4.40). Our model purposefully alias-ties
-        # several weights between the public `vision_tower` handle and the
-        # internal `vision_encoder` pointer, as well as between the LM input
-        # embedding and a convenience `_embedding_layer` wrapper.  Because the
-        # Trainer passes the flag straight through, we override it here – if
-        # the caller did not already opt-out – to avoid the
-        # `shared tensors … mismatching the transformers base configuration`
-        # runtime error (see HF issue #32354).
+        # --- 2) projector --------------------------------------------------------------
+        proj_path = os.path.join(output_dir, self.config.projector_path)
+        st.save_file(self.projector.state_dict(), proj_path)
 
-        # Trainer passes `safe_serialization=self.args.save_safetensors`.
-        # Override unconditionally so we never hit the shared-tensor guard.
-        kwargs["safe_serialization"] = False
-
-        super().save_pretrained(output_dir, **kwargs)
-
-        # Save extra pieces the vanilla save does not cover (optional)
-        proj_path = os.path.join(output_dir, "projector.safetensors")
-        self.projector.save_pretrained(proj_path)
-
-        vt_dir = os.path.join(output_dir, "vision_tower")
-        os.makedirs(vt_dir, exist_ok=True)
-        try:
+        # --- 3) vision tower (rarely trainable) ---------------------------------------
+        if any(p.requires_grad for p in self.vision_tower.model.parameters()):
+            vt_dir = os.path.join(output_dir, "vision_tower")
+            os.makedirs(vt_dir, exist_ok=True)
             self.vision_tower.model.save_pretrained(vt_dir)
-        except Exception:
-            torch.save(self.vision_tower.model.state_dict(), os.path.join(vt_dir, "pytorch_model.bin"))
 
     @classmethod
-    def from_pretrained(cls, model_path: str, *model_args, **kwargs):
-        '''
-        load weights and reconstruct projector + vision tower.
-        '''
+    def from_pretrained(cls, ckpt_dir: str, *model_args, **kwargs):
+        """Rebuild a BBOB instance from a lightweight checkpoint saved above."""
 
-        obj: "BBOB" = super().from_pretrained(model_path, *model_args, **kwargs)
+        # 1) Load BBOBConfig first
+        cfg = BBOBConfig.from_pretrained(ckpt_dir)
 
-        # restore projector using path from config if available
-        proj_rel = getattr(obj.config, "projector_path", "projector.safetensors")
-        proj_path = os.path.join(model_path, proj_rel)
+        # 2) Re-instantiate the full model; the heavy base LM comes from HF Hub
+        obj: "BBOB" = cls(model_path=cfg.base_model_name, config=cfg, *model_args, **kwargs)
+
+        # 3) Projector weights
+        proj_rel = getattr(cfg, "projector_path", "projector.safetensors")
+        proj_path = os.path.join(ckpt_dir, proj_rel)
         if os.path.isfile(proj_path):
-            state = st.load_file(proj_path, device=obj.projector.device)
-            obj.projector.load_state_dict(state)
+            obj.projector.load_state_dict(st.load_file(proj_path, device=obj.projector.device))
 
-        # restore vision tower if directory exists
-        vt_rel = getattr(obj.config, "vision_tower_path", "vision_tower")
-        vt_dir = os.path.join(model_path, vt_rel)
+        # 4) Vision tower (optional)
+        vt_dir = os.path.join(ckpt_dir, "vision_tower")
         if os.path.isdir(vt_dir):
             try:
                 obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
