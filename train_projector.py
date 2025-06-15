@@ -63,9 +63,18 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 # Fallback: PIL → tensor path (rare after preprocessing refactor)
                 t = pil_to_tensor(img).float().div_(255.0).to(device)
 
-            # Ensure channel-first shape
-            if t.dim() == 3 and t.shape[0] != 3:
-                t = t.permute(2, 0, 1)
+            # Ensure channel-first shape (3, H, W)
+            if t.dim() == 2:  # grayscale H×W
+                t = t.unsqueeze(0).expand(3, -1, -1)  # repeat channels
+            elif t.dim() == 3:
+                if t.shape[0] == 3:
+                    pass  # already C,H,W
+                elif t.shape[2] == 3:
+                    t = t.permute(2, 0, 1)
+                else:
+                    raise RuntimeError(f"Unexpected image shape {t.shape}; cannot determine channel dimension")
+            else:
+                raise RuntimeError(f"Unsupported tensor dim {t.dim()} for image input")
 
             _, H, W = t.shape
             if (H, W) != target_size:
