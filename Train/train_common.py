@@ -336,7 +336,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProces
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
     if max_workers is None:
-        max_workers = min(mp.cpu_count() - 1, 8)
+        max_workers = min(mp.cpu_count() - 1, 16)
     
     # determine optimal batch sizes ----------------------------------------------------
     gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=0.15)
@@ -362,7 +362,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProces
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size}, GPU batch={gpu_batch_size})",
-        load_from_cache_file=False,  # force reprocessing after code changes
+        load_from_cache_file=True
     )
 
     return dataset

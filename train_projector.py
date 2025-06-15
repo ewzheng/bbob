@@ -153,6 +153,7 @@ def train(
     grad_acc_steps: int = 1,
     logger=None,
     warmup_steps: int = 0,
+    num_workers: int = 4,
 ):
     '''
     fine-tune projector weights only.
@@ -195,10 +196,17 @@ def train(
         logging_steps               = max(32 // grad_acc_steps, 1),
         report_to                   = "none",
         remove_unused_columns       = False,
+        dataloader_num_workers      = num_workers,
+        dataloader_pin_memory       = True,
     )
 
+    # guarantee pad token exists (some LLM tokenizers lack one by default)
+    tokenizer = model.get_tokenizer()
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     # custom collator that injects labels based on *target_text*
-    collate_fn = make_collate_fn(model.get_tokenizer().pad_token_id, model.get_tokenizer())
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
     optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)
     scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
@@ -232,6 +240,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
     parser.add_argument("--warmup_steps", type=int, default=16, help="Number of warmup steps for scheduler (default: 16)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
+    parser.add_argument("--num_workers", type=int, default=4, help="Number of CPU workers for DataLoader preprocessing (default: 4)")
     args = parser.parse_args()
     
     # create output directory 
@@ -254,7 +263,7 @@ def main():
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
         dtype=model.dtype,
-        on_the_fly=False,
+        on_the_fly=True
     )
 
     train(
@@ -267,6 +276,7 @@ def main():
         lr=args.lr,
         grad_acc_steps=args.gradient_accumulation_steps,
         logger=logger,
+        num_workers=args.num_workers,
     )
 
     logger.info("Projector training is complete, model successfully saved.")
@@ -279,4 +289,4 @@ if __name__ == "__main__":
     except RuntimeError:
         pass
 
-    main()
+    main()  
