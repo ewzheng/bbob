@@ -30,6 +30,8 @@ import logging
 import yaml
 import psutil
 
+from transformers import MobileViTImageProcessor
+
 def jitter_bboxes(bboxes, img_width, img_height, dtype, jitter_ratio=0.05):
     """
     Randomly jitter bounding boxes by a fraction of their size (COCO format).
@@ -127,7 +129,57 @@ def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, targe
         ])
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256), dtype=torch.float32):
+def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.float32):
+    """Resize bbox coordinates using MobileViT shortest-edge resize followed by
+    center crop to `target`×`target`, then normalise to 0-1.
+
+    Parameters
+    ----------
+    bboxes : Tensor | list
+        Boxes in COCO format [x, y, w, h].
+    orig_w, orig_h : int
+        Original image dimensions.
+    target : int
+        Final square side after crop – 256 for MobileViT default.
+    dtype : torch.dtype
+        Output tensor dtype.
+    """
+
+    if isinstance(bboxes, torch.Tensor):
+        bboxes = bboxes.clone().detach().cpu().numpy()
+
+    ratio = target / min(orig_w, orig_h)
+    resized_w, resized_h = orig_w * ratio, orig_h * ratio
+
+    # integer pixel dims
+    resized_w_i, resized_h_i = int(round(resized_w)), int(round(resized_h))
+
+    crop_left = max((resized_w_i - target) // 2, 0)
+    crop_top  = max((resized_h_i - target) // 2, 0)
+
+    adjusted = []
+    for x, y, w, h in bboxes:
+        x = x * ratio - crop_left
+        y = y * ratio - crop_top
+        w = w * ratio
+        h = h * ratio
+
+        # clamp to crop area
+        x = max(0, min(x, target - 1))
+        y = max(0, min(y, target - 1))
+        w = max(0, min(w, target - x))
+        h = max(0, min(h, target - y))
+
+        adjusted.append([
+            x / target,
+            y / target,
+            w / target,
+            h / target,
+        ])
+
+    return torch.tensor(adjusted, dtype=dtype)
+
+def preprocess_batch(batch, tokenizer, image_processor: MobileViTImageProcessor, gpu_batch_size=64, bbox_jitter_ratio=0.05, training=False, target_size=(256, 256), dtype=torch.float32):
     '''
     build vision-language features for one raw dataset batch.
 
@@ -136,6 +188,7 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
     parameters:
         - batch (dict): incoming dataset slice.
         - tokenizer (PreTrainedTokenizer): hf tokenizer.
+        - image_processor: MobileViTImageProcessor instance for image processing
         - gpu_batch_size (int): images processed per cuda chunk.
         - bbox_jitter_ratio (float): amplitude of bbox noise.
         - training (bool): enables bbox jitter.
@@ -161,13 +214,24 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
 
         rgb = img.convert("RGB")
 
-        # compute resize params for bbox logic using cpu letterbox helper
-        lb_img, scale, pad_w, pad_h = letterbox_image(rgb, target_size=target_size)
+        # --- MobileViT image processor ---
+        px = image_processor(
+            rgb,
+            return_tensors="np",
+        )["pixel_values"][0]  # (3, 256, 256) float32 already normalised
 
-        processed_images.append(rgb)  # keep original pil
+        processed_images.append(px)
+
         image_sizes.append(rgb.size)
         padded_image_sizes.append(target_size)
-        lb_params.append((scale, pad_w, pad_h))
+
+        # store params for bbox transform
+        orig_w, orig_h = rgb.size
+        ratio = target_size[0] / min(orig_w, orig_h)
+        resized_w, resized_h = int(round(orig_w * ratio)), int(round(orig_h * ratio))
+        crop_left = max((resized_w - target_size[0]) // 2, 0)
+        crop_top = max((resized_h - target_size[1]) // 2, 0)
+        lb_params.append((ratio, crop_left, crop_top))
 
     text = batch["text"]
     
@@ -205,22 +269,20 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
                 )
 
             # 2) adjust to letter-boxed, padded coordinates then normalise
-            scale, pad_w, pad_h = lb_params[i]
-            tgt_w, tgt_h = target_size
-            bboxes = adjust_boxes_for_letterbox(
+            ratio, crop_left, crop_top = lb_params[i]
+            bboxes = adjust_boxes_resize_crop(
                 bboxes,
-                scale=scale,
-                pad_w=pad_w,
-                pad_h=pad_h,
-                orig_w=image_sizes[i][0],
-                orig_h=image_sizes[i][1],
-                target_w=tgt_w,
-                target_h=tgt_h,
-                dtype=dtype,
+                orig_w = image_sizes[i][0],
+                orig_h = image_sizes[i][1],
+                target = target_size[0],
+                dtype = dtype,
             )
             sample_boxes = []
             sample_labels = []
             for bbox, category in zip(bboxes, sample["category"]):
+                # convert tensors to plain python lists to prevent Arrow encoding errors
+                if isinstance(bbox, torch.Tensor):
+                    bbox = bbox.tolist()
                 sample_boxes.append(bbox)
                 sample_labels.append(category)
             result["target_boxes"].append(sample_boxes)
@@ -255,13 +317,14 @@ def preprocess_batch(batch, tokenizer, gpu_batch_size=64, bbox_jitter_ratio=0.05
     return result
 
 
-def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype=torch.float32):
+def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProcessor, instruction, is_training=False, dtype=torch.float32):
     """
     Process entire dataset through image resizing and feature extraction
     
     Parameters:
         - dataset: HuggingFace dataset containing images and text
         - tokenizer: text tokenizer for processing text inputs
+        - image_processor: MobileViTImageProcessor instance for image processing
         - instruction: instruction text to add to each example
         - is_training: boolean indicating whether this is a training set
         
@@ -272,7 +335,7 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype
     # add instruction to each sample to create "text" field
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
-    max_workers = min(mp.cpu_count() - 1, 16)
+    max_workers = min(mp.cpu_count() - 1, 8)
     
     # determine optimal batch sizes ----------------------------------------------------
     gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=0.15)
@@ -285,6 +348,7 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype
     _preprocessing_function = partial(
         preprocess_batch,
         tokenizer=tokenizer,
+        image_processor=image_processor,
         gpu_batch_size=gpu_batch_size,
         training=is_training,
         dtype=dtype,
@@ -302,7 +366,7 @@ def preprocess_dataset(dataset, tokenizer, instruction, is_training=False, dtype
 
     return dataset
 
-def load_and_prepare_dataset(dataset_name, tokenizer, instruction, dtype=torch.float32):
+def load_and_prepare_dataset(dataset_name, tokenizer, instruction, image_processor: MobileViTImageProcessor | None = None, dtype=torch.float32):
     """
     Load dataset from HuggingFace hub and create train/test splits
     
@@ -310,6 +374,7 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction, dtype=torch.f
         - dataset_name: HuggingFace dataset identifier
         - tokenizer: text tokenizer for processing text inputs
         - instruction: instruction text to add to each example
+        - image_processor: MobileViTImageProcessor instance for image processing
         
     Returns:
         - train, test datasets with extracted features
@@ -361,11 +426,14 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction, dtype=torch.f
         test = split["test"]
         print(f"Created splits: {len(train)} train, {len(test)} test")
 
+    # instantiate default processor if not provided
+    if image_processor is None:
+        image_processor = MobileViTImageProcessor.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256")
 
     print("Preprocessing train dataset...")
-    train = preprocess_dataset(train, tokenizer, instruction, is_training=True, dtype=dtype)
+    train = preprocess_dataset(train, tokenizer, image_processor, instruction, is_training=True, dtype=dtype)
     print("Preprocessing test dataset...")
-    test = preprocess_dataset(test, tokenizer, instruction, is_training=False, dtype=dtype)
+    test = preprocess_dataset(test, tokenizer, image_processor, instruction, is_training=False, dtype=dtype)
 
     return train, test
 

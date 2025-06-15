@@ -26,6 +26,7 @@ from Train import load_and_prepare_dataset
 from torchvision.transforms.functional import pil_to_tensor
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
+import numpy as np
 
 def make_collate_fn(pad_token_id: int):
     '''
@@ -51,22 +52,33 @@ def make_collate_fn(pad_token_id: int):
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         processed = []
-        for pil in [item[img_key] for item in batch]:
-            t = pil_to_tensor(pil).float().div_(255.0).to(device)
+        for img in [item[img_key] for item in batch]:
+            # Case-1: pre-normalised numpy array (3,H,W) or tensor
+            if isinstance(img, torch.Tensor):
+                t = img.to(device=device, dtype=torch.float32)
+            elif isinstance(img, np.ndarray):
+                t = torch.as_tensor(img, dtype=torch.float32, device=device)
+            else:
+                # Fallback: PIL → tensor path (rare after preprocessing refactor)
+                t = pil_to_tensor(img).float().div_(255.0).to(device)
+
+            # Ensure channel-first shape
+            if t.dim() == 3 and t.shape[0] != 3:
+                t = t.permute(2, 0, 1)
+
             _, H, W = t.shape
-            scale = min(target_size[1] / H, target_size[0] / W)
-            nh, nw = int(H * scale), int(W * scale)
-            resized = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
+            if (H, W) != target_size:
+                scale = min(target_size[1] / H, target_size[0] / W)
+                nh, nw = int(H * scale), int(W * scale)
+                t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
 
-            canvas = 0.5 * torch.ones(3, *target_size, device=device)
-            dh = (target_size[1] - nh) // 2
-            dw = (target_size[0] - nw) // 2
-            canvas[:, dh:dh+nh, dw:dw+nw] = resized
+                canvas = 0.5 * torch.ones(3, *target_size, device=device)
+                dh = (target_size[1] - nh) // 2
+                dw = (target_size[0] - nw) // 2
+                canvas[:, dh:dh+nh, dw:dw+nw] = t
+                t = canvas
 
-            mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3,1,1)
-            std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3,1,1)
-            canvas = (canvas - mean) / std
-            processed.append(canvas)
+            processed.append(t)
 
         pixel_values = torch.stack(processed, 0)
 
@@ -226,7 +238,8 @@ def main():
         args.dataset,
         tokenizer=model.get_tokenizer(),
         instruction=args.instruction,
-        dtype=model.dtype
+        image_processor=model.get_image_processor(),
+        dtype=model.dtype,
     )
 
     train(
