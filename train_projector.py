@@ -28,7 +28,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
-def make_collate_fn(pad_token_id: int):
+def make_collate_fn(pad_token_id: int, tokenizer):
     '''
     factory that builds a custom collate_fn for sfttrainer.
 
@@ -86,9 +86,10 @@ def make_collate_fn(pad_token_id: int):
         merged_labels = []
 
         for item in batch:
-            # ensure 1-dim token sequences
-            instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
-            tgt_ids   = torch.as_tensor(item["target_text"], dtype=torch.long).flatten()
+            text = item.get("text", "")
+            tokens = tokenizer(text, return_tensors="pt")
+            instr_ids = tokens["input_ids"].squeeze(0)
+            tgt_ids = torch.tensor([], dtype=torch.long)
 
             # drop padding tokens that were added during preprocessing
             instr_ids = instr_ids[instr_ids != pad_token_id]
@@ -184,7 +185,7 @@ def train(
     )
 
     # custom collator that injects labels based on *target_text*
-    collate_fn = make_collate_fn(model.get_tokenizer().pad_token_id)
+    collate_fn = make_collate_fn(model.get_tokenizer().pad_token_id, model.get_tokenizer())
 
     optimizer = torch.optim.AdamW(model.projector.parameters(), lr=lr)
     scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=steps_per_epoch*epochs-warmup_steps, num_cycles=epochs)
@@ -240,6 +241,7 @@ def main():
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
         dtype=model.dtype,
+        on_the_fly=True,
     )
 
     train(

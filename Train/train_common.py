@@ -317,7 +317,7 @@ def preprocess_batch(batch, tokenizer, image_processor: MobileViTImageProcessor,
     return result
 
 
-def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProcessor, instruction, is_training=False, dtype=torch.float32):
+def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProcessor, instruction, is_training=False, dtype=torch.float32, max_workers: int | None = None):
     """
     Process entire dataset through image resizing and feature extraction
     
@@ -335,7 +335,8 @@ def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProces
     # add instruction to each sample to create "text" field
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
-    max_workers = min(mp.cpu_count() - 1, 4)
+    if max_workers is None:
+        max_workers = min(mp.cpu_count() - 1, 8)
     
     # determine optimal batch sizes ----------------------------------------------------
     gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=0.15)
@@ -366,7 +367,15 @@ def preprocess_dataset(dataset, tokenizer, image_processor: MobileViTImageProces
 
     return dataset
 
-def load_and_prepare_dataset(dataset_name, tokenizer, instruction, image_processor: MobileViTImageProcessor | None = None, dtype=torch.float32):
+def load_and_prepare_dataset(
+    dataset_name,
+    tokenizer,
+    instruction,
+    *,
+    image_processor: MobileViTImageProcessor | None = None,
+    dtype: torch.dtype = torch.float32,
+    on_the_fly: bool = False,
+):
     """
     Load dataset from HuggingFace hub and create train/test splits
     
@@ -375,6 +384,8 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction, image_process
         - tokenizer: text tokenizer for processing text inputs
         - instruction: instruction text to add to each example
         - image_processor: MobileViTImageProcessor instance for image processing
+        - dtype: dtype for tensors
+        - on_the_fly: boolean indicating whether to skip heavy preprocessing
         
     Returns:
         - train, test datasets with extracted features
@@ -426,14 +437,22 @@ def load_and_prepare_dataset(dataset_name, tokenizer, instruction, image_process
         test = split["test"]
         print(f"Created splits: {len(train)} train, {len(test)} test")
 
-    # instantiate default processor if not provided
     if image_processor is None:
         image_processor = MobileViTImageProcessor.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256")
 
-    print("Preprocessing train dataset...")
-    train = preprocess_dataset(train, tokenizer, image_processor, instruction, is_training=True, dtype=dtype)
-    print("Preprocessing test dataset...")
-    test = preprocess_dataset(test, tokenizer, image_processor, instruction, is_training=False, dtype=dtype)
+    if on_the_fly:
+        # Light transform: just add instruction text; collate will tokenize & process images
+        def _insert_instruction(example):
+            example["text"] = instruction
+            return example
+
+        train = train.map(_insert_instruction)
+        test  = test.map(_insert_instruction)
+    else:
+        print("Preprocessing train dataset...")
+        train = preprocess_dataset(train, tokenizer, image_processor, instruction, is_training=True, dtype=dtype)
+        print("Preprocessing test dataset...")
+        test = preprocess_dataset(test, tokenizer, image_processor, instruction, is_training=False, dtype=dtype)
 
     return train, test
 
