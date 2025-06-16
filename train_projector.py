@@ -243,7 +243,7 @@ def train(
         save_total_limit            = 2,
         lr_scheduler_type           = "cosine",   
         warmup_ratio                = warmup_ratio,
-        lr_scheduler_kwargs         = {"num_cycles": 0.25},
+        lr_scheduler_kwargs         = {"num_cycles": 0.2},
         torch_empty_cache_steps     = max(512 // grad_acc_steps, 1) + max(batch_size // grad_acc_steps, 1), # flush cache after eval
         include_num_input_tokens_seen = True,  # Enable token counting for metrics
     )
