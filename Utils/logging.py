@@ -20,6 +20,8 @@ def create_metrics_functions():
     """
     # Local lists to accumulate metrics (avoiding global variables)
     token_accuracies = []
+    top3_accuracies = []
+    top5_accuracies = []
     embedding_similarities = []
 
     def preprocess_logits_for_metrics_impl(logits, labels):
@@ -27,19 +29,34 @@ def create_metrics_functions():
         Memory-efficient preprocessing to avoid OOM during evaluation.
         Processes logits immediately instead of accumulating them all in GPU memory.
         """
-        nonlocal token_accuracies, embedding_similarities
+        nonlocal token_accuracies, top3_accuracies, top5_accuracies, embedding_similarities
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
             pred_ids = torch.argmax(logits, dim=-1)
             
-            # Calculate token accuracy right here to avoid storing large tensors
+            # Calculate multiple accuracy metrics
             if labels is not None:
                 mask = (labels != -100)
                 if mask.sum() > 0:
+                    # Exact token accuracy (top-1)
                     correct = (pred_ids == labels) & mask
                     accuracy = correct.sum().float() / mask.sum().float()
                     token_accuracies.append(accuracy.item())
+                    
+                    # Top-3 accuracy - much more forgiving
+                    top3_preds = torch.topk(logits, k=3, dim=-1).indices  # [batch, seq, 3]
+                    labels_expanded = labels.unsqueeze(-1).expand_as(top3_preds)  # [batch, seq, 3]
+                    top3_correct = (top3_preds == labels_expanded).any(dim=-1) & mask
+                    top3_acc = top3_correct.sum().float() / mask.sum().float()
+                    top3_accuracies.append(top3_acc.item())
+                    
+                    # Top-5 accuracy - even more forgiving  
+                    top5_preds = torch.topk(logits, k=5, dim=-1).indices  # [batch, seq, 5]
+                    labels_expanded = labels.unsqueeze(-1).expand_as(top5_preds)  # [batch, seq, 5]
+                    top5_correct = (top5_preds == labels_expanded).any(dim=-1) & mask
+                    top5_acc = top5_correct.sum().float() / mask.sum().float()
+                    top5_accuracies.append(top5_acc.item())
             
             # Calculate semantic similarity using softmax-normalized probability distributions
             # This converts logits to meaningful probability distributions over vocabulary
@@ -83,22 +100,26 @@ def create_metrics_functions():
         """
         Memory-efficient compute_metrics that works with preprocessed predictions.
         """
-        nonlocal token_accuracies, embedding_similarities
+        nonlocal token_accuracies, top3_accuracies, top5_accuracies, embedding_similarities
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
-        # Calculate final token accuracy from accumulated values
+        # Calculate final metrics from accumulated values
         mean_token_accuracy = sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0
-        
-        # Calculate embedding similarity if available
+        mean_top3_accuracy = sum(top3_accuracies) / len(top3_accuracies) if top3_accuracies else 0.0
+        mean_top5_accuracy = sum(top5_accuracies) / len(top5_accuracies) if top5_accuracies else 0.0
         mean_embedding_similarity = sum(embedding_similarities) / len(embedding_similarities) if embedding_similarities else 0.0
         
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
+        top3_accuracies.clear()
+        top5_accuracies.clear()
         embedding_similarities.clear()
         
         return {
-            "mean_token_accuracy": mean_token_accuracy,
+            "exact_token_accuracy": mean_token_accuracy,      # Renamed for clarity
+            "top3_token_accuracy": mean_top3_accuracy,        # More forgiving
+            "top5_token_accuracy": mean_top5_accuracy,        # Most forgiving  
             "mean_embedding_similarity": mean_embedding_similarity,
         }
     
@@ -124,7 +145,7 @@ def get_logger(dir, filename="training.log"):
     # create a stream handler
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setLevel(logging.DEBUG)
+        stream_handler.setLevel(logging.INFO)
         stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(stream_handler)
 
@@ -212,7 +233,7 @@ class LoggingCallback(TrainerCallback):
         if k == "learning_rate" or "grad" in k:
             # 6-sigfigs scientific notation, e.g. 1.999750e-05  
             return f"{k}={v:.6e}"
-        if "token" in k:
+        if "token" in k or "accuracy" in k:
             return f"{k}={v:.2f}"
         if "epoch" in k:
             return f"{k}={v:.2f}"
