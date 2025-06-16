@@ -129,9 +129,9 @@ def get_logger(dir, filename="training.log"):
     '''
     Get a logger for the given directory
     '''
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)      
+    logger.setLevel(logging.INFO)      
 
     # create a file handler
     logfile = os.path.join(dir, filename)
