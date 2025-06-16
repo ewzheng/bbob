@@ -44,8 +44,8 @@ class Projector(nn.Module):
         # learnable row and column embeddings
         max_h = 32  # maximum grid height supported
         max_w = 32  # maximum grid width supported
-        self.row_embedding = nn.Parameter(torch.empty(max_h, indim, dtype=dtype, device=device))
-        self.col_embedding = nn.Parameter(torch.empty(max_w, indim, dtype=dtype, device=device))
+        self.row_embedding = nn.Parameter(torch.empty(max_h, outdim, dtype=dtype, device=device))
+        self.col_embedding = nn.Parameter(torch.empty(max_w, outdim, dtype=dtype, device=device))
         nn.init.trunc_normal_(self.row_embedding, std=0.02)
         nn.init.trunc_normal_(self.col_embedding, std=0.02)
 
