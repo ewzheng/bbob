@@ -168,6 +168,20 @@ def size_of_module(module):
     return total / (1024 ** 2)  # MB
 
 
+# New helper to count parameters
+def param_count_module(module):
+    """
+    Get the number of parameters of a module.
+
+    Parameters:
+        - module: the module to count parameters for.
+
+    Returns:
+        - count: the total number of parameters (int).
+    """
+    return sum(p.numel() for p in module.parameters())
+
+
 def model_size_breakdown(components, root_name="model"):
     """
     Get the size of a model or collection of components in MB.
@@ -181,8 +195,9 @@ def model_size_breakdown(components, root_name="model"):
     Returns:
         - A formatted multiline string with the size breakdown in MB.
     """
-    lines = ["Model size breakdown (MB):"]
-    total = 0.0
+    lines = ["Model size breakdown:"]
+    total_mb = 0.0
+    total_params = 0
 
     # Detect a BBOB model instance (or other similar wrapper) by attribute names
     if not isinstance(components, dict):
@@ -205,14 +220,21 @@ def model_size_breakdown(components, root_name="model"):
 
         if isinstance(module, (list, tuple)):
             size_mb = sum(size_of_module(m) for m in module)
+            param_cnt = sum(param_count_module(m) for m in module)
         else:
             size_mb = size_of_module(module)
+            param_cnt = param_count_module(module)
 
-        total += size_mb
-        lines.append(f"  {name:<15}: {size_mb:8.2f} MB")
+        total_mb += size_mb
+        total_params += param_cnt
+
+        # Format parameters in millions for readability, keep exact count too if desired
+        param_millions = param_cnt / 1_000_000
+        lines.append(f"  {name:<15}: {size_mb:8.2f} MB | {param_millions:8.2f}M params ({param_cnt:,})")
 
     lines.append("-----------------------------")
-    lines.append(f"  Total            : {total:8.2f} MB")
+    total_param_millions = total_params / 1_000_000
+    lines.append(f"  Total            : {total_mb:8.2f} MB | {total_param_millions:8.2f}M params ({total_params:,})")
     return "\n".join(lines)
 
 

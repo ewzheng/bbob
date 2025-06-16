@@ -143,10 +143,14 @@ def make_collate_fn(pad_token_id: int, tokenizer):
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
         labels_padded    = pad_sequence(merged_labels,    batch_first=True, padding_value=-100)
 
-        # build attention mask AFTER padding, prepend zeros for visual tokens
-        text_mask   = (input_ids_padded != pad_token_id).long()
-        visual_mask = torch.zeros(text_mask.size(0), 64, dtype=text_mask.dtype)
-        attention_mask = torch.cat([visual_mask, text_mask], dim=1)
+        # build attention mask AFTER padding – **visual tokens should be *visible***
+        # The language model receives the visual embeddings prepended internally
+        # by `BBOB._merge_multimodal_inputs`, which itself creates a 1-filled
+        # attention mask for those tokens.  Hence we only need to pass the text
+        # mask here.  Setting the visual part to 0 would make the model ignore
+        # the image information entirely.
+
+        attention_mask = (input_ids_padded != pad_token_id).long()
 
         return {
             "images": pixel_values,
