@@ -135,23 +135,24 @@ class LoggingCallback(TrainerCallback):
         self._sim_sum   = 0.0
         self._sim_count = 0
 
-    def on_prediction_step(self, args, state, control, inputs, outputs, **kwargs):
+    def on_prediction_step(self, args, state, control, **kwargs):
         """Accumulate cosine similarity for *evaluation* steps.
 
-        The Trainer triggers `on_prediction_step` for both evaluation and
-        prediction loops.  We gate on `state.is_running_eval` so training
-        batches are ignored.
+        Runs during evaluation/prediction loops. We gate on
+        `state.is_running_eval` so that training batches are ignored.
         """
         if not state.is_running_eval:
             return control
 
-        # We need model reference to obtain embeddings
-        model = kwargs.get("model")
-        if model is None:
+        # Extract from kwargs (per HF callback API)
+        inputs  = kwargs.get("inputs")
+        model   = kwargs.get("model")
+        # outputs ignored here
+
+        if model is None or inputs is None:
             return control
 
         try:
-            # We expect inputs to carry images + input_ids
             images    = inputs.get("pixel_values", inputs.get("images"))
             input_ids = inputs.get("input_ids")
             if images is None or input_ids is None:
@@ -173,11 +174,9 @@ class LoggingCallback(TrainerCallback):
 
                 sim = compute_embedding_similarity(vision_feats, text_embeds)
 
-            # Aggregate
             self._sim_sum += float(sim)
             self._sim_count += 1
         except Exception as e:
-            # Never break evaluation due to metric failure – keep debug level
             self.logger.debug("Eval similarity computation failed: %s", e)
 
         return control

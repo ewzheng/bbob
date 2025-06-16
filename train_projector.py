@@ -227,7 +227,7 @@ def train(
         lr_scheduler_kwargs         = {"num_cycles": 1}
     )
 
-    # guarantee pad token exists (some LLM tokenizers lack one by default)
+    # guarantee pad token exists
     tokenizer = model.get_tokenizer()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
