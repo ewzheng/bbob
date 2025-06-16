@@ -261,6 +261,7 @@ def train(
         save_strategy               = "steps",
         save_steps                  = max(steps_per_epoch // 3, 1),
         logging_steps               = max(32 // grad_acc_steps, 1),
+        eval_accumulation_steps     = max(32 // grad_acc_steps, 1),
         report_to                   = "none",
         remove_unused_columns       = False,
         dataloader_num_workers      = num_workers,
@@ -299,7 +300,7 @@ def train(
         callbacks      = [LoggingCallback(logger    )] if logger is not None else None,
         compute_metrics = lambda eval_pred: _compute_metrics(eval_pred, logger, model),
         processing_class = tokenizer
-    )
+    )   
     
     logger.info("Starting training of projector...")
 
