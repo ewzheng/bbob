@@ -18,7 +18,7 @@ def get_logger(dir, filename="training.log"):
     logfile = os.path.join(dir, filename)
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(logfile) for h in logger.handlers):
         file_handler = logging.FileHandler(logfile)
-        file_handler.setLevel(logging.DEBUG)
+        file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
      
         logger.addHandler(file_handler)
@@ -142,12 +142,13 @@ class LoggingCallback(TrainerCallback):
 
         Runs once per batch inside the evaluation / prediction loops.
         """
-        # Extract from kwargs (per HF callback API)
+        self.logger.info("fart")
         inputs  = kwargs.get("inputs")
         model   = kwargs.get("model")
         # outputs ignored here
 
         if model is None or inputs is None:
+            self.logger.info("no fart")
             return control
 
         try:
