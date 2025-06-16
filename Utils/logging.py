@@ -138,12 +138,8 @@ class LoggingCallback(TrainerCallback):
     def on_prediction_step(self, args, state, control, **kwargs):
         """Accumulate cosine similarity for *evaluation* steps.
 
-        Runs during evaluation/prediction loops. We gate on
-        `state.is_running_eval` so that training batches are ignored.
+        Runs once per batch inside the evaluation / prediction loops.
         """
-        if not state.is_running_eval:
-            return control
-
         # Extract from kwargs (per HF callback API)
         inputs  = kwargs.get("inputs")
         model   = kwargs.get("model")
