@@ -41,20 +41,26 @@ def create_metrics_functions():
                     accuracy = correct.sum().float() / mask.sum().float()
                     token_accuracies.append(accuracy.item())
             
-            # For embedding similarity: Use logits as embeddings!
-            # Logits are actually a form of semantic representation
-            # We can calculate similarity between logit distributions
+            # Calculate semantic similarity using softmax-normalized probability distributions
+            # This converts logits to meaningful probability distributions over vocabulary
             if labels is not None and logits.shape[0] > 1:  # Need at least 2 samples
                 try:
-                    # Flatten logits for similarity calculation
-                    logits_flat = logits.view(logits.shape[0], -1)  # [batch_size, seq_len * vocab_size]
+                    batch_size, seq_len, vocab_size = logits.shape
                     
-                    # Calculate pairwise cosine similarity within the batch
-                    logits_norm = F.normalize(logits_flat, p=2, dim=1)
-                    similarity_matrix = torch.mm(logits_norm, logits_norm.t())
+                    # Apply softmax to get probability distributions
+                    # Shape: [batch_size, seq_len, vocab_size]
+                    probs = F.softmax(logits, dim=-1)
+                    
+                    # Flatten to get sentence-level representations
+                    # Shape: [batch_size, seq_len * vocab_size]
+                    probs_flat = probs.view(batch_size, -1)
+                    
+                    # Calculate pairwise cosine similarity between probability distributions
+                    # This is a principled way to measure semantic similarity between model outputs
+                    probs_norm = F.normalize(probs_flat, p=2, dim=1)
+                    similarity_matrix = torch.mm(probs_norm, probs_norm.t())
                     
                     # Take mean of off-diagonal elements (similarity between different samples)
-                    batch_size = similarity_matrix.shape[0]
                     if batch_size > 1:
                         mask = ~torch.eye(batch_size, dtype=torch.bool, device=similarity_matrix.device)
                         mean_similarity = similarity_matrix[mask].mean().item()
@@ -207,10 +213,6 @@ class LoggingCallback(TrainerCallback):
         super().__init__()
         self.logger = logger or logging.getLogger(__name__)
         
-        # Initialize tracking variables
-        self.total_input_tokens = 0
-        self.embedding_similarities = []
-        self.token_accuracies = []
 
     def _fmt(self, k, v):
         if not isinstance(v, (float, int)):
@@ -225,90 +227,11 @@ class LoggingCallback(TrainerCallback):
             return f"{k}={v:.4e}"
         return f"{k}={v:.6f}"
 
-    def _count_tokens(self, input_ids):
-        """Count the number of tokens in input_ids, excluding padding tokens."""
-        if input_ids is None:
-            return 0
-        
-        # Assuming pad_token_id is 0 or -100 (common conventions)
-        # You may need to adjust this based on your tokenizer
-        if hasattr(input_ids, 'ne'):  # tensor
-            return (input_ids != 0).sum().item()
-        else:  # assume it's already a count or list
-            return len(input_ids) if isinstance(input_ids, (list, tuple)) else input_ids
-
-    def _calculate_embedding_similarity(self, outputs, labels=None):
-        """Calculate embedding similarity using the imported function."""
-        try:
-            return compute_embedding_similarity(outputs, labels)
-        except Exception as e:
-            self.logger.warning(f"Could not calculate embedding similarity: {e}")
-            return None
-
-    def _calculate_token_accuracy(self, outputs, labels):
-        """Calculate token-level accuracy."""
-        if labels is None or not hasattr(outputs, 'logits'):
-            return None
-            
-        try:
-            logits = outputs.logits
-            
-            # Get predictions
-            predictions = torch.argmax(logits, dim=-1)
-            
-            # Mask out padding tokens (assuming -100 is ignore index)
-            mask = (labels != -100)
-            
-            if mask.sum() == 0:
-                return None
-                
-            # Calculate accuracy only on non-masked tokens
-            correct = (predictions == labels) & mask
-            accuracy = correct.sum().float() / mask.sum().float()
-            
-            return accuracy.item()
-        except Exception as e:
-            self.logger.warning(f"Could not calculate token accuracy: {e}")
-            return None
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        """Called at the beginning of each training step."""
-        # Use built-in token tracking from TrainerState
-        self.total_input_tokens = state.num_input_tokens_seen
-
-    def on_step_end(self, args, state, control, **kwargs):
-        """Called at the end of each training step to update metrics."""
-        # Update token count from built-in tracking
-        self.total_input_tokens = state.num_input_tokens_seen
-        
-
-    def on_substep_end(self, args, state, control, **kwargs):
-        """Called at the end of a substep during gradient accumulation."""
-        # Update token count from built-in tracking
-        self.total_input_tokens = state.num_input_tokens_seen
-
-    def on_evaluate(self, args, state, control, **kwargs):
-        """Called after an evaluation phase."""
-        # Update token count - no additional computation needed
-        self.total_input_tokens = state.num_input_tokens_seen
 
     def on_log(self, args, state, control, logs=None, **kwargs):  
         if not logs:
             return
-
-        # Add our custom metrics directly to logs
-        logs['total_input_tokens'] = self.total_input_tokens
         
-        # Add mean embedding similarity if we have data
-        if self.embedding_similarities:
-            mean_similarity = sum(self.embedding_similarities) / len(self.embedding_similarities)
-            logs['mean_embedding_similarity'] = mean_similarity
-        
-        # Add mean token accuracy if we have data
-        if self.token_accuracies:
-            mean_accuracy = sum(self.token_accuracies) / len(self.token_accuracies)
-            logs['mean_token_accuracy'] = mean_accuracy
-
         prefix = f"[step {state.global_step}]"
 
         joined = ", ".join(self._fmt(k, v) for k, v in logs.items())
