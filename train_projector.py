@@ -225,6 +225,7 @@ def train(
         warmup_steps                = warmup_steps,
         lr_scheduler_kwargs         = {"num_cycles": 1},
         torch_empty_cache_steps     = max(512 // grad_acc_steps, 1) + max(batch_size // grad_acc_steps, 1), # flush cache after eval
+        include_num_input_tokens_seen = True,  # Enable token counting for metrics
     )
 
     # guarantee pad token exists
