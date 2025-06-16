@@ -19,7 +19,7 @@ import numpy as np
 
 # training
 from transformers import Trainer, TrainingArguments
-from Utils import get_logger, LoggingCallback, model_size_breakdown, create_metrics_functions
+from Utils import get_logger, LoggingCallback, model_size_breakdown, create_metrics_functions   
 from Model import build_BBOB 
 from Train import load_and_prepare_dataset, clean_tokenizer_config
 
@@ -129,7 +129,22 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             instr_ids = instr_ids[instr_ids != pad_token_id]
             tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
 
-            # concatenate instruction + target ⇒ model input (text only)
+            # -------------------------------------------------------------
+            # Ensure combined text length stays within positional budget
+            # -------------------------------------------------------------
+            max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+
+            if instr_ids.size(0) > max_txt_len:
+                # Extremely long instruction – keep the *last* segment so that
+                # targets remain aligned to the end.
+                instr_ids = instr_ids[-max_txt_len:]
+                tgt_ids = torch.tensor([], dtype=torch.long)
+            else:
+                remaining = max_txt_len - instr_ids.size(0)
+                if tgt_ids.size(0) > remaining:
+                    tgt_ids = tgt_ids[:remaining]
+
+            # concatenate instruction + (possibly truncated) target ⇒ model input (text only)
             ids = torch.cat([instr_ids, tgt_ids], dim=0)
 
             # build labels: prepend placeholders for visual tokens (64) and mask instruction

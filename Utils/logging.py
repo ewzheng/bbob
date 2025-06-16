@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 
 from transformers import TrainerCallback
-from Train import compute_embedding_similarity
 
 def create_metrics_functions():
     """
@@ -25,8 +24,12 @@ def create_metrics_functions():
     token_accuracies = []
     top3_accuracies = []
     top5_accuracies = []
-    sequence_accuracies = []
-    prediction_target_similarities = []
+    # -- new scalar accumulators -------------------------------------------------
+    seq_correct_total = 0      # number of sequences predicted fully-correct
+    seq_total         = 0      # total number of sequences evaluated
+
+    pred_target_sim_sum   = 0.0  # summed cosine similarities
+    pred_target_sim_count = 0     # number of token positions contributing
 
     def preprocess_logits_for_metrics_impl(logits, labels):
         """
@@ -36,7 +39,8 @@ def create_metrics_functions():
         Now receives inputs parameter with original forward() inputs.
         """
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
-        nonlocal sequence_accuracies, prediction_target_similarities
+        nonlocal seq_correct_total, seq_total
+        nonlocal pred_target_sim_sum, pred_target_sim_count
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
@@ -65,31 +69,30 @@ def create_metrics_functions():
                     top5_acc = top5_correct.sum().float() / mask.sum().float()
                     top5_accuracies.append(top5_acc.item())
                     
-                    # Sequence-level accuracy - entire sequence must be correct
-                    batch_size, seq_len = pred_ids.shape
-                    for i in range(batch_size):
-                        seq_mask = mask[i]  # [seq_len]
-                        if seq_mask.sum() > 0:  # Only evaluate sequences with valid tokens
-                            seq_correct = ((pred_ids[i] == labels[i]) | ~seq_mask).all()
-                            sequence_accuracies.append(seq_correct.item())
+                    # Sequence-level accuracy (vectorised)
+                    seq_correct = ((pred_ids == labels) | ~mask).all(dim=1)  # (batch,)
+                    seq_correct_total += seq_correct.sum().item()
+                    seq_total         += seq_correct.numel()
                     
                     # Prediction-target similarity (most important for projector training)
                     try:
                         batch_size, seq_len, vocab_size = logits.shape
                         probs = F.softmax(logits, dim=-1)
-                        
-                        # Convert target tokens to one-hot distributions
-                        targets_onehot = F.one_hot(labels, num_classes=vocab_size).float()
-                        
-                        # Only measure on non-masked tokens
-                        if mask.sum() > 0:
-                            probs_masked = probs[mask]
-                            targets_masked = targets_onehot[mask]
-                            
-                            # Cosine similarity between predicted probs and target distributions
-                            pred_target_sims = F.cosine_similarity(probs_masked, targets_masked, dim=-1)
-                            mean_pred_target_sim = pred_target_sims.mean().item()
-                            prediction_target_similarities.append(mean_pred_target_sim)
+
+                        # Only operate on non-ignored target positions (labels != -100)
+                        if mask.any():
+                            labels_valid  = labels[mask]           # (N,)
+                            probs_valid   = probs[mask]            # (N, V)
+
+                            # gather probability mass assigned to the true token
+                            p_target = probs_valid.gather(1, labels_valid.unsqueeze(1)).squeeze(1)  # (N,)
+
+                            # cosine similarity with one-hot equals p_true / ||p||₂
+                            l2_norm  = probs_valid.norm(dim=1).clamp(min=1e-12)
+                            cos_sim  = p_target / l2_norm          # (N,)
+
+                            pred_target_sim_sum   += cos_sim.sum().item()
+                            pred_target_sim_count += cos_sim.numel()
                     except Exception as e:
                         print(f"Error calculating prediction-target similarity: {e}")                        
             
@@ -108,7 +111,8 @@ def create_metrics_functions():
         Now has access to inputs via eval_pred.inputs if include_for_metrics=["inputs"] is set.
         """
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
-        nonlocal sequence_accuracies, prediction_target_similarities
+        nonlocal seq_correct_total, seq_total
+        nonlocal pred_target_sim_sum, pred_target_sim_count
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
@@ -124,15 +128,17 @@ def create_metrics_functions():
         mean_token_accuracy = sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0
         mean_top3_accuracy = sum(top3_accuracies) / len(top3_accuracies) if top3_accuracies else 0.0
         mean_top5_accuracy = sum(top5_accuracies) / len(top5_accuracies) if top5_accuracies else 0.0
-        mean_sequence_accuracy = sum(sequence_accuracies) / len(sequence_accuracies) if sequence_accuracies else 0.0
-        mean_prediction_target_similarity = sum(prediction_target_similarities) / len(prediction_target_similarities) if prediction_target_similarities else 0.0
+        mean_sequence_accuracy = seq_correct_total / seq_total if seq_total else 0.0
+        mean_prediction_target_similarity = pred_target_sim_sum / pred_target_sim_count if pred_target_sim_count else 0.0
      
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
         top3_accuracies.clear()
         top5_accuracies.clear()
-        sequence_accuracies.clear()
-        prediction_target_similarities.clear()
+        seq_correct_total = 0
+        seq_total         = 0
+        pred_target_sim_sum   = 0.0
+        pred_target_sim_count = 0
         
         return {
             "exact_token_accuracy": mean_token_accuracy,
