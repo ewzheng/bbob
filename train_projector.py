@@ -9,15 +9,15 @@ Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs
 import torch
 import argparse
 from datetime import datetime
-import math
 
 # utils
 import sys
 import os
 import multiprocess as mp
-from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
+import math
+
 # training
-from trl import SFTTrainer, SFTConfig
+from transformers import Trainer, TrainingArguments
 from Utils import get_logger, LoggingCallback, model_size_breakdown
 from Model import build_BBOB 
 from Train import load_and_prepare_dataset, clean_tokenizer_config
@@ -29,7 +29,7 @@ from torch.nn.utils.rnn import pad_sequence
 import numpy as np
 
 # Prevent "tokenizers parallelism" fork warnings inside multiprocess map
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")    
 
 def make_collate_fn(pad_token_id: int, tokenizer):
     '''
@@ -197,7 +197,7 @@ def train(
     steps_per_epoch = math.ceil(len(train_dataset) / (batch_size * grad_acc_steps))
     steps_per_epoch = max(steps_per_epoch, 1)  # safety guard
 
-    cfg = SFTConfig(
+    cfg = TrainingArguments(
         output_dir                  = output_dir,
         num_train_epochs            = epochs,
         per_device_train_batch_size = batch_size,
@@ -221,7 +221,6 @@ def train(
         dataloader_num_workers      = num_workers,
         dataloader_pin_memory       = True, 
         save_total_limit            = 2,
-        dataset_kwargs              = {"skip_prepare_dataset": True},
         lr_scheduler_type           = "cosine_with_restarts",   
         warmup_steps                = warmup_steps,
         lr_scheduler_kwargs         = {"num_cycles": 1}
@@ -244,7 +243,7 @@ def train(
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model          = model,
         train_dataset  = train_dataset,
         eval_dataset   = val_dataset,
