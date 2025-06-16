@@ -93,12 +93,26 @@ def create_metrics_functions():
         # Calculate embedding similarity if available
         mean_embedding_similarity = sum(embedding_similarities) / len(embedding_similarities) if embedding_similarities else 0.0
         
-        # Calculate additional metrics from predictions
-        mask = (labels != -100)
-        if mask.sum() > 0:
-            # Alternative accuracy calculation from final predictions (should match accumulated)
-            final_accuracy = ((predictions == labels) & mask).sum() / mask.sum()
-        else:
+        # Calculate additional metrics from predictions  
+        final_accuracy = 0.0
+        try:
+            if predictions is not None and labels is not None:
+                # Ensure predictions and labels have same shape
+                if predictions.shape != labels.shape:
+                    # If shapes don't match, flatten both
+                    predictions_flat = predictions.flatten()
+                    labels_flat = labels.flatten()
+                    mask = (labels_flat != -100)
+                else:
+                    predictions_flat = predictions
+                    labels_flat = labels
+                    mask = (labels_flat != -100)
+                
+                if mask.sum() > 0:
+                    correct = (predictions_flat == labels_flat) & mask
+                    final_accuracy = correct.sum().float() / mask.sum().float()
+                    final_accuracy = torch.clamp(final_accuracy, 0.0, 1.0)  # Ensure [0,1] range
+        except Exception as e:
             final_accuracy = 0.0
         
         # Clear accumulated metrics for next evaluation
@@ -221,9 +235,11 @@ class LoggingCallback(TrainerCallback):
         if k == "learning_rate":
             # 6-sigfigs scientific notation, e.g. 1.999750e-05
             return f"{k}={v:.6e}"
+        if "token" in k:
+            return f"{k}={v:.2f}"
 
-        # default – fixed-point with 6 decimals; switch to sci-notation for very small/large
-        if abs(v) < 1e-3 or abs(v) >= 1e4:
+        # default – fixed-point with 6 decimals; switch to sci-notation for very small
+        if abs(v) < 1e-3:
             return f"{k}={v:.4e}"
         return f"{k}={v:.6f}"
 
