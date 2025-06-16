@@ -210,7 +210,7 @@ class LoggingCallback(TrainerCallback):
             return f"{k}={v}"
 
         if k == "learning_rate" or "grad" in k:
-            # 6-sigfigs scientific notation, e.g. 1.999750e-05
+            # 6-sigfigs scientific notation, e.g. 1.999750e-05  
             return f"{k}={v:.6e}"
         if "token" in k:
             return f"{k}={v:.2f}"

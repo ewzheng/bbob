@@ -211,7 +211,7 @@ def train(
         bf16                        = bf16_supported,
         fp16                        = cuda and not bf16_supported,  
         eval_strategy               = "steps",
-        eval_steps                  = max(512 // grad_acc_steps, 1),
+        eval_steps                  = max(steps_per_epoch // 4, 1),
         eval_accumulation_steps     = 4,  # Memory optimization for evaluation
         save_strategy               = "steps",
         save_steps                  = max(steps_per_epoch // 3, 1),
