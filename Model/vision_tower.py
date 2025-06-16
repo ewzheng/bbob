@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import MobileViTV2Model, MobileViTImageProcessor
+ENCODER = "apple/mobilevitv2-2.0-imagenet1k-256"
 
 class VisionTower(nn.Module):
     def __init__(self, dtype, device):
@@ -15,8 +16,8 @@ class VisionTower(nn.Module):
         '''
         super().__init__()
 
-        self.model = MobileViTV2Model.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256", torch_dtype=dtype)
-        self.image_processor = MobileViTImageProcessor.from_pretrained("apple/mobilevitv2-1.0-imagenet1k-256")
+        self.model = MobileViTV2Model.from_pretrained(ENCODER, torch_dtype=dtype)
+        self.image_processor = MobileViTImageProcessor.from_pretrained(ENCODER)
         self._dtype = dtype
         self._device = torch.device(device)
         

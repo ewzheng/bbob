@@ -18,7 +18,7 @@ import multiprocess as mp
 from transformers import get_cosine_with_hard_restarts_schedule_with_warmup
 # training
 from trl import SFTTrainer, SFTConfig
-from Utils import get_logger, LoggingCallback
+from Utils import get_logger, LoggingCallback, model_size_breakdown
 from Model import build_BBOB 
 from Train import load_and_prepare_dataset, clean_tokenizer_config
 
@@ -240,6 +240,7 @@ def train(
         if logger is not None:
             logger.warning("Tokenizer config sanitisation skipped: %s", _e)
 
+    logger.info(model_size_breakdown(model))
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
