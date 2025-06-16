@@ -142,7 +142,7 @@ class LoggingCallback(TrainerCallback):
 
         Runs once per batch inside the evaluation / prediction loops.
         """
-        inputs  = kwargs.get("inputs") or kwargs.get("batch")
+        inputs  = kwargs.get("inputs")
         model   = kwargs.get("model")
 
         # If either the model or inputs are missing, skip similarity computation silently.

@@ -225,7 +225,7 @@ def train(
         warmup_steps                = warmup_steps,
         lr_scheduler_kwargs         = {"num_cycles": 1},
         torch_empty_cache_steps     = 1024,
-        include_inputs_for_metrics  = True
+        include_for_metrics         = ["loss", "inputs"]
     )
 
     # guarantee pad token exists
