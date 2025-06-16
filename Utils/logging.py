@@ -10,15 +10,15 @@ def get_logger(dir, filename="training.log"):
     '''
     Get a logger for the given directory
     '''
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.DEBUG)      
 
     # create a file handler
     logfile = os.path.join(dir, filename)
     if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(logfile) for h in logger.handlers):
         file_handler = logging.FileHandler(logfile)
-        file_handler.setLevel(logging.INFO)
+        file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
      
         logger.addHandler(file_handler)
@@ -26,7 +26,7 @@ def get_logger(dir, filename="training.log"):
     # create a stream handler
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         stream_handler = logging.StreamHandler(sys.stdout)
-        stream_handler.setLevel(logging.INFO)
+        stream_handler.setLevel(logging.DEBUG)
         stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(stream_handler)
 
@@ -196,17 +196,6 @@ class LoggingCallback(TrainerCallback):
         except Exception as e:
             self.logger.debug("Eval similarity computation failed: %s", e)
 
-        return control
-
-    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        """Log the average similarity after the evaluation dataloader finishes."""
-        if self._sim_count > 0:
-            avg = self._sim_sum / self._sim_count
-            if metrics is not None:
-                metrics["embedding_similarity"] = avg
-            self.logger.info("[eval step %d] embedding_similarity=%.6f", state.global_step, avg)
-            # Reset counters for next eval
-            self._reset_eval_sim()
         return control
 
     
