@@ -93,28 +93,6 @@ def create_metrics_functions():
         # Calculate embedding similarity if available
         mean_embedding_similarity = sum(embedding_similarities) / len(embedding_similarities) if embedding_similarities else 0.0
         
-        # Calculate additional metrics from predictions  
-        final_accuracy = 0.0
-        try:
-            if predictions is not None and labels is not None:
-                # Ensure predictions and labels have same shape
-                if predictions.shape != labels.shape:
-                    # If shapes don't match, flatten both
-                    predictions_flat = predictions.flatten()
-                    labels_flat = labels.flatten()
-                    mask = (labels_flat != -100)
-                else:
-                    predictions_flat = predictions
-                    labels_flat = labels
-                    mask = (labels_flat != -100)
-                
-                if mask.sum() > 0:
-                    correct = (predictions_flat == labels_flat) & mask
-                    final_accuracy = correct.sum().float() / mask.sum().float()
-                    final_accuracy = torch.clamp(final_accuracy, 0.0, 1.0)  # Ensure [0,1] range
-        except Exception as e:
-            final_accuracy = 0.0
-        
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
         embedding_similarities.clear()
@@ -122,7 +100,6 @@ def create_metrics_functions():
         return {
             "mean_token_accuracy": mean_token_accuracy,
             "mean_embedding_similarity": mean_embedding_similarity,
-            "final_token_accuracy": final_accuracy.item() if torch.is_tensor(final_accuracy) else final_accuracy,
         }
     
     return compute_metrics_impl, preprocess_logits_for_metrics_impl
@@ -232,12 +209,13 @@ class LoggingCallback(TrainerCallback):
         if not isinstance(v, (float, int)):
             return f"{k}={v}"
 
-        if k == "learning_rate":
+        if k == "learning_rate" or "grad" in k:
             # 6-sigfigs scientific notation, e.g. 1.999750e-05
             return f"{k}={v:.6e}"
         if "token" in k:
             return f"{k}={v:.2f}"
-
+        if "epoch" in k:
+            return f"{k}={v:.2f}"
         # default – fixed-point with 6 decimals; switch to sci-notation for very small
         if abs(v) < 1e-3:
             return f"{k}={v:.4e}"
