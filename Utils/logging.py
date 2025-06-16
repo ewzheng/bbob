@@ -151,6 +151,7 @@ class LoggingCallback(TrainerCallback):
         try:
             images    = inputs.get("pixel_values", inputs.get("images"))
             input_ids = inputs.get("input_ids")
+            labels     = inputs.get("labels")
             if images is None or input_ids is None:
                 return control
 
@@ -170,8 +171,29 @@ class LoggingCallback(TrainerCallback):
 
                 sim = compute_embedding_similarity(vision_feats, text_embeds)
 
+                # ---------------- token-level accuracy ----------------
+                # Forward pass to get logits only when labels available
+                token_acc = None
+                if labels is not None:
+                    outputs = kwargs.get("outputs")
+                    if outputs is not None and hasattr(outputs, "logits"):
+                        logits = outputs.logits  # (B, T, V)
+                        preds  = logits.argmax(dim=-1)  # (B, T)
+                        # mask out ignored positions (-100)
+                        mask = labels != -100
+                        if mask.any():
+                            correct = (preds == labels) & mask
+                            token_acc = correct.sum().item() / mask.sum().item()
+
+            # Aggregate similarity for later averaging
             self._sim_sum += float(sim)
             self._sim_count += 1
+
+            # Log per-step statistics
+            if token_acc is not None:
+                self.logger.info("[eval step %d] embedding_similarity=%.6f, token_accuracy=%.4f", state.global_step, sim, token_acc)
+            else:
+                self.logger.info("[eval step %d] embedding_similarity=%.6f", state.global_step, sim)
         except Exception as e:
             self.logger.debug("Eval similarity computation failed: %s", e)
 
