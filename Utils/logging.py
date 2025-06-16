@@ -106,6 +106,7 @@ class LoggingCallback(TrainerCallback):
     def __init__(self, logger: logging.Logger | None = None):
         super().__init__()
         self.logger = logger or logging.getLogger(__name__)
+        self._reset_eval_sim()
 
     def on_log(self, args, state, control, logs=None, **kwargs):  
         if not logs:
@@ -129,29 +130,37 @@ class LoggingCallback(TrainerCallback):
         joined = ", ".join(_fmt(k, v) for k, v in logs.items())
         self.logger.info("%s %s", prefix, joined)
 
-    # Extra callback – compute embedding similarity for the current batch and
-    # log it once per step. We use `on_train_batch_end` because HF passes both
-    # `inputs` and `model` to that hook (they are *not* available in
-    # `on_step_end`).
-    def on_train_batch_end(self, args, state, control, **kwargs):
-        model  = kwargs.get("model")
-        inputs = kwargs.get("inputs")
+    def _reset_eval_sim(self):
+        """Internal helper to zero the running similarity counters."""
+        self._sim_sum   = 0.0
+        self._sim_count = 0
 
-        if model is None or inputs is None:
+    def on_prediction_step(self, args, state, control, inputs, outputs, **kwargs):
+        """Accumulate cosine similarity for *evaluation* steps.
+
+        The Trainer triggers `on_prediction_step` for both evaluation and
+        prediction loops.  We gate on `state.is_running_eval` so training
+        batches are ignored.
+        """
+        if not state.is_running_eval:
+            return control
+
+        # We need model reference to obtain embeddings
+        model = kwargs.get("model")
+        if model is None:
             return control
 
         try:
-            from Train.train_common import compute_embedding_similarity
-            import torch
-
-            images = inputs.get("pixel_values", inputs.get("images"))
+            # We expect inputs to carry images + input_ids
+            images    = inputs.get("pixel_values", inputs.get("images"))
             input_ids = inputs.get("input_ids")
-
             if images is None or input_ids is None:
                 return control
 
+            import torch
+            from Train.train_common import compute_embedding_similarity
+
             with torch.no_grad():
-                # Model‐specific helpers. Fall back gracefully if absent.
                 if hasattr(model, "_prepare_visual_inputs"):
                     vision_feats = model._prepare_visual_inputs(images)
                 else:
@@ -162,13 +171,29 @@ class LoggingCallback(TrainerCallback):
                 else:
                     return control
 
-            sim = compute_embedding_similarity(vision_feats, text_embeds)
-            self.logger.info("[step %d] embedding_similarity=%.6f", state.global_step, sim)
+                sim = compute_embedding_similarity(vision_feats, text_embeds)
+
+            # Aggregate
+            self._sim_sum += float(sim)
+            self._sim_count += 1
         except Exception as e:
-            # Fail silently so training is never interrupted by metrics
-            self.logger.debug("Similarity computation failed: %s", e)
+            # Never break evaluation due to metric failure – keep debug level
+            self.logger.debug("Eval similarity computation failed: %s", e)
 
         return control
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        """Log the average similarity after the evaluation dataloader finishes."""
+        if self._sim_count > 0:
+            avg = self._sim_sum / self._sim_count
+            if metrics is not None:
+                metrics["embedding_similarity"] = avg
+            self.logger.info("[eval step %d] embedding_similarity=%.6f", state.global_step, avg)
+            # Reset counters for next eval
+            self._reset_eval_sim()
+        return control
+
+    
 
 
 
