@@ -2,15 +2,17 @@ import logging
 import os
 import sys
 
+import torch
 from transformers import TrainerCallback
+from Train import compute_embedding_similarity
 
-def get_logger(dir, filename="training.log"):
+def get_logger(dir, filename="training.log"):   
     '''
     Get a logger for the given directory
     '''
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     # create a file handler
     logfile = os.path.join(dir, filename)
@@ -153,10 +155,7 @@ class LoggingCallback(TrainerCallback):
             input_ids = inputs.get("input_ids")
             labels     = inputs.get("labels")
             if images is None or input_ids is None:
-                return control
-
-            import torch
-            from Train.train_common import compute_embedding_similarity
+                return control 
 
             with torch.no_grad():
                 if hasattr(model, "_prepare_visual_inputs"):

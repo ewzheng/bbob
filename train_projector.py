@@ -223,7 +223,8 @@ def train(
         save_total_limit            = 2,
         lr_scheduler_type           = "cosine_with_restarts",   
         warmup_steps                = warmup_steps,
-        lr_scheduler_kwargs         = {"num_cycles": 1}
+        lr_scheduler_kwargs         = {"num_cycles": 1},
+        torch_empty_cache_steps     = 1024
     )
 
     # guarantee pad token exists

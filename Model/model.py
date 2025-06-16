@@ -316,7 +316,7 @@ class BBOB(PreTrainedModel):
 
         # Pass through language model
         return self.language_model(
-            inputs_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds,   
             attention_mask=combined_mask,
             labels=labels,
             **kwargs,
