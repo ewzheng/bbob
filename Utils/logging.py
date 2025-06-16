@@ -175,21 +175,33 @@ class LoggingCallback(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         """Called at the beginning of each training step to capture inputs."""
+        print(f"on_step_begin kwargs: {list(kwargs.keys())}")
+        
         # Store inputs for use in other callback methods
         inputs = kwargs.get("inputs")
         if inputs is not None:
             self.current_step_inputs = inputs
+            print(f"Found inputs with keys: {list(inputs.keys())}")
             
             # Count input tokens when inputs are available
             if 'input_ids' in inputs:
                 token_count = self._count_tokens(inputs['input_ids'])
                 self.total_input_tokens += token_count
+                print(f"Counted {token_count} tokens, total: {self.total_input_tokens}")
+        else:
+            print("No inputs in on_step_begin")
 
     def on_step_end(self, args, state, control, **kwargs):
         """Called at the end of each training step to update metrics."""
+        print(f"on_step_end kwargs: {list(kwargs.keys())}")
+        
         # Get inputs and outputs from kwargs, falling back to stored inputs
         inputs = kwargs.get("inputs") or self.current_step_inputs
         outputs = kwargs.get("outputs")
+        
+        print(f"Found inputs: {inputs is not None}, outputs: {outputs is not None}")
+        if inputs is not None:
+            print(f"Input keys: {list(inputs.keys()) if isinstance(inputs, dict) else 'not a dict'}")
         
         if outputs is not None and inputs is not None:
             # Calculate embedding similarity
@@ -197,27 +209,35 @@ class LoggingCallback(TrainerCallback):
             similarity = self._calculate_embedding_similarity(outputs, labels)
             if similarity is not None:
                 self.embedding_similarities.append(similarity)
+                print(f"Added similarity: {similarity}")
             
             # Calculate token accuracy
             if labels is not None:
                 accuracy = self._calculate_token_accuracy(outputs, labels)
                 if accuracy is not None:
                     self.token_accuracies.append(accuracy)
+                    print(f"Added accuracy: {accuracy}")
         
         # Clear stored inputs after processing
         self.current_step_inputs = None
 
     def on_substep_end(self, args, state, control, **kwargs):
         """Called at the end of a substep during gradient accumulation."""
+        print(f"on_substep_end kwargs: {list(kwargs.keys())}")
+        
         # Also try to capture inputs during gradient accumulation steps
         inputs = kwargs.get("inputs")
         if inputs is not None and self.current_step_inputs is None:
             self.current_step_inputs = inputs
+            print(f"Found inputs in substep with keys: {list(inputs.keys())}")
             
             # Count tokens for gradient accumulation steps too
             if 'input_ids' in inputs:
                 token_count = self._count_tokens(inputs['input_ids'])
                 self.total_input_tokens += token_count
+                print(f"Counted {token_count} tokens in substep, total: {self.total_input_tokens}")
+        else:
+            print(f"No new inputs in substep (inputs available: {inputs is not None})")
 
     def on_log(self, args, state, control, logs=None, **kwargs):  
         if not logs:
