@@ -1,8 +1,11 @@
 import logging
 import os
 import sys
+import torch
+import torch.nn.functional as F
 
 from transformers import TrainerCallback
+from Train import compute_embedding_similarity
 
 def get_logger(dir, filename="training.log"):   
     '''
@@ -95,10 +98,6 @@ def model_size_breakdown(components, root_name="model"):
     return "\n".join(lines)
 
 
-# --------------------------------------------------------------------------------------
-# HuggingFace / TRL Trainer logging callback
-# --------------------------------------------------------------------------------------
-
 
 class LoggingCallback(TrainerCallback):
     """Send Trainer logs to the given logger."""
@@ -106,25 +105,138 @@ class LoggingCallback(TrainerCallback):
     def __init__(self, logger: logging.Logger | None = None):
         super().__init__()
         self.logger = logger or logging.getLogger(__name__)
+        
+        # Initialize tracking variables
+        self.total_input_tokens = 0
+        self.embedding_similarities = []
+        self.token_accuracies = []
+        
+        # Store current step inputs for sharing between methods
+        self.current_step_inputs = None
+
+    def _fmt(self, k, v):
+        if not isinstance(v, (float, int)):
+            return f"{k}={v}"
+
+        if k == "learning_rate":
+            # 6-sigfigs scientific notation, e.g. 1.999750e-05
+            return f"{k}={v:.6e}"
+
+        # default – fixed-point with 6 decimals; switch to sci-notation for very small/large
+        if abs(v) < 1e-3 or abs(v) >= 1e4:
+            return f"{k}={v:.4e}"
+        return f"{k}={v:.6f}"
+
+    def _count_tokens(self, input_ids):
+        """Count the number of tokens in input_ids, excluding padding tokens."""
+        if input_ids is None:
+            return 0
+        
+        # Assuming pad_token_id is 0 or -100 (common conventions)
+        # You may need to adjust this based on your tokenizer
+        if hasattr(input_ids, 'ne'):  # tensor
+            return (input_ids != 0).sum().item()
+        else:  # assume it's already a count or list
+            return len(input_ids) if isinstance(input_ids, (list, tuple)) else input_ids
+
+    def _calculate_embedding_similarity(self, outputs, labels=None):
+        """Calculate embedding similarity using the imported function."""
+        try:
+            return compute_embedding_similarity(outputs, labels)
+        except Exception as e:
+            self.logger.warning(f"Could not calculate embedding similarity: {e}")
+            return None
+
+    def _calculate_token_accuracy(self, outputs, labels):
+        """Calculate token-level accuracy."""
+        if labels is None or not hasattr(outputs, 'logits'):
+            return None
+            
+        try:
+            logits = outputs.logits
+            
+            # Get predictions
+            predictions = torch.argmax(logits, dim=-1)
+            
+            # Mask out padding tokens (assuming -100 is ignore index)
+            mask = (labels != -100)
+            
+            if mask.sum() == 0:
+                return None
+                
+            # Calculate accuracy only on non-masked tokens
+            correct = (predictions == labels) & mask
+            accuracy = correct.sum().float() / mask.sum().float()
+            
+            return accuracy.item()
+        except Exception as e:
+            self.logger.warning(f"Could not calculate token accuracy: {e}")
+            return None
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Called at the beginning of each training step to capture inputs."""
+        # Store inputs for use in other callback methods
+        inputs = kwargs.get("inputs")
+        if inputs is not None:
+            self.current_step_inputs = inputs
+            
+            # Count input tokens when inputs are available
+            if 'input_ids' in inputs:
+                token_count = self._count_tokens(inputs['input_ids'])
+                self.total_input_tokens += token_count
+
+    def on_step_end(self, args, state, control, **kwargs):
+        """Called at the end of each training step to update metrics."""
+        # Get inputs and outputs from kwargs, falling back to stored inputs
+        inputs = kwargs.get("inputs") or self.current_step_inputs
+        outputs = kwargs.get("outputs")
+        
+        if outputs is not None and inputs is not None:
+            # Calculate embedding similarity
+            labels = inputs.get('labels') if inputs else None
+            similarity = self._calculate_embedding_similarity(outputs, labels)
+            if similarity is not None:
+                self.embedding_similarities.append(similarity)
+            
+            # Calculate token accuracy
+            if labels is not None:
+                accuracy = self._calculate_token_accuracy(outputs, labels)
+                if accuracy is not None:
+                    self.token_accuracies.append(accuracy)
+        
+        # Clear stored inputs after processing
+        self.current_step_inputs = None
+
+    def on_substep_end(self, args, state, control, **kwargs):
+        """Called at the end of a substep during gradient accumulation."""
+        # Also try to capture inputs during gradient accumulation steps
+        inputs = kwargs.get("inputs")
+        if inputs is not None and self.current_step_inputs is None:
+            self.current_step_inputs = inputs
+            
+            # Count tokens for gradient accumulation steps too
+            if 'input_ids' in inputs:
+                token_count = self._count_tokens(inputs['input_ids'])
+                self.total_input_tokens += token_count
 
     def on_log(self, args, state, control, logs=None, **kwargs):  
         if not logs:
             return
 
+        # Add our custom metrics directly to logs
+        logs['total_input_tokens'] = self.total_input_tokens
+        
+        # Add mean embedding similarity if we have data
+        if self.embedding_similarities:
+            mean_similarity = sum(self.embedding_similarities) / len(self.embedding_similarities)
+            logs['mean_embedding_similarity'] = mean_similarity
+        
+        # Add mean token accuracy if we have data
+        if self.token_accuracies:
+            mean_accuracy = sum(self.token_accuracies) / len(self.token_accuracies)
+            logs['mean_token_accuracy'] = mean_accuracy
+
         prefix = f"[step {state.global_step}]"
-        # Format numbers; show LR in scientific notation so values like 1e-5 are readable
-        def _fmt(k, v):
-            if not isinstance(v, (float, int)):
-                return f"{k}={v}"
 
-            if k == "learning_rate":
-                # 6-sigfigs scientific notation, e.g. 1.999750e-05
-                return f"{k}={v:.6e}"
-
-            # default – fixed-point with 6 decimals; switch to sci-notation for very small/large
-            if abs(v) < 1e-3 or abs(v) >= 1e4:
-                return f"{k}={v:.4e}"
-            return f"{k}={v:.6f}"
-
-        joined = ", ".join(_fmt(k, v) for k, v in logs.items())
+        joined = ", ".join(self._fmt(k, v) for k, v in logs.items())
         self.logger.info("%s %s", prefix, joined)
