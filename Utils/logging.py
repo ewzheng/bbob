@@ -7,6 +7,106 @@ import torch.nn.functional as F
 from transformers import TrainerCallback
 from Train import compute_embedding_similarity
 
+def create_metrics_functions():
+    """
+    Factory function that creates compute_metrics and preprocess_logits_for_metrics
+    with shared state for accumulating metrics across batches.
+    
+    This uses closures to avoid global variables while still allowing the two functions
+    to share state. Call this once in your train() function to get both functions.
+    
+    Returns:
+        tuple: (compute_metrics_func, preprocess_logits_for_metrics_func)
+    """
+    # Local lists to accumulate metrics (avoiding global variables)
+    token_accuracies = []
+    embedding_similarities = []
+
+    def preprocess_logits_for_metrics_impl(logits, labels):
+        """
+        Memory-efficient preprocessing to avoid OOM during evaluation.
+        Processes logits immediately instead of accumulating them all in GPU memory.
+        """
+        nonlocal token_accuracies, embedding_similarities
+        
+        try:
+            # Convert logits to predictions immediately (much smaller memory footprint)
+            pred_ids = torch.argmax(logits, dim=-1)
+            
+            # Calculate token accuracy right here to avoid storing large tensors
+            if labels is not None:
+                mask = (labels != -100)
+                if mask.sum() > 0:
+                    correct = (pred_ids == labels) & mask
+                    accuracy = correct.sum().float() / mask.sum().float()
+                    token_accuracies.append(accuracy.item())
+            
+            # For embedding similarity: Use logits as embeddings!
+            # Logits are actually a form of semantic representation
+            # We can calculate similarity between logit distributions
+            if labels is not None and logits.shape[0] > 1:  # Need at least 2 samples
+                try:
+                    # Flatten logits for similarity calculation
+                    logits_flat = logits.view(logits.shape[0], -1)  # [batch_size, seq_len * vocab_size]
+                    
+                    # Calculate pairwise cosine similarity within the batch
+                    logits_norm = F.normalize(logits_flat, p=2, dim=1)
+                    similarity_matrix = torch.mm(logits_norm, logits_norm.t())
+                    
+                    # Take mean of off-diagonal elements (similarity between different samples)
+                    batch_size = similarity_matrix.shape[0]
+                    if batch_size > 1:
+                        mask = ~torch.eye(batch_size, dtype=torch.bool, device=similarity_matrix.device)
+                        mean_similarity = similarity_matrix[mask].mean().item()
+                        embedding_similarities.append(mean_similarity)
+                        
+                except Exception as e:
+                    # If similarity calculation fails, continue without it
+                    pass
+            
+            # Return only predictions and labels (much smaller than full logits)
+            return pred_ids, labels
+            
+        except Exception as e:
+            print(f"Error in preprocess_logits_for_metrics: {e}")
+            # Fallback: just return argmax predictions
+            pred_ids = torch.argmax(logits, dim=-1)
+            return pred_ids, labels
+
+    def compute_metrics_impl(eval_pred):
+        """
+        Memory-efficient compute_metrics that works with preprocessed predictions.
+        """
+        nonlocal token_accuracies, embedding_similarities
+        
+        predictions, labels = eval_pred.predictions, eval_pred.label_ids
+        
+        # Calculate final token accuracy from accumulated values
+        mean_token_accuracy = sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0
+        
+        # Calculate embedding similarity if available
+        mean_embedding_similarity = sum(embedding_similarities) / len(embedding_similarities) if embedding_similarities else 0.0
+        
+        # Calculate additional metrics from predictions
+        mask = (labels != -100)
+        if mask.sum() > 0:
+            # Alternative accuracy calculation from final predictions (should match accumulated)
+            final_accuracy = ((predictions == labels) & mask).sum() / mask.sum()
+        else:
+            final_accuracy = 0.0
+        
+        # Clear accumulated metrics for next evaluation
+        token_accuracies.clear()
+        embedding_similarities.clear()
+        
+        return {
+            "mean_token_accuracy": mean_token_accuracy,
+            "mean_embedding_similarity": mean_embedding_similarity,
+            "final_token_accuracy": final_accuracy.item() if torch.is_tensor(final_accuracy) else final_accuracy,
+        }
+    
+    return compute_metrics_impl, preprocess_logits_for_metrics_impl
+
 def get_logger(dir, filename="training.log"):   
     '''
     Get a logger for the given directory
@@ -99,6 +199,7 @@ def model_size_breakdown(components, root_name="model"):
 
 
 
+
 class LoggingCallback(TrainerCallback):
     """Send Trainer logs to the given logger."""
 
@@ -110,9 +211,6 @@ class LoggingCallback(TrainerCallback):
         self.total_input_tokens = 0
         self.embedding_similarities = []
         self.token_accuracies = []
-        
-        # Store current step inputs for sharing between methods
-        self.current_step_inputs = None
 
     def _fmt(self, k, v):
         if not isinstance(v, (float, int)):
@@ -174,70 +272,25 @@ class LoggingCallback(TrainerCallback):
             return None
 
     def on_step_begin(self, args, state, control, **kwargs):
-        """Called at the beginning of each training step to capture inputs."""
-        print(f"on_step_begin kwargs: {list(kwargs.keys())}")
-        
-        # Store inputs for use in other callback methods
-        inputs = kwargs.get("inputs")
-        if inputs is not None:
-            self.current_step_inputs = inputs
-            print(f"Found inputs with keys: {list(inputs.keys())}")
-            
-            # Count input tokens when inputs are available
-            if 'input_ids' in inputs:
-                token_count = self._count_tokens(inputs['input_ids'])
-                self.total_input_tokens += token_count
-                print(f"Counted {token_count} tokens, total: {self.total_input_tokens}")
-        else:
-            print("No inputs in on_step_begin")
+        """Called at the beginning of each training step."""
+        # Use built-in token tracking from TrainerState
+        self.total_input_tokens = state.num_input_tokens_seen
 
     def on_step_end(self, args, state, control, **kwargs):
         """Called at the end of each training step to update metrics."""
-        print(f"on_step_end kwargs: {list(kwargs.keys())}")
+        # Update token count from built-in tracking
+        self.total_input_tokens = state.num_input_tokens_seen
         
-        # Get inputs and outputs from kwargs, falling back to stored inputs
-        inputs = kwargs.get("inputs") or self.current_step_inputs
-        outputs = kwargs.get("outputs")
-        
-        print(f"Found inputs: {inputs is not None}, outputs: {outputs is not None}")
-        if inputs is not None:
-            print(f"Input keys: {list(inputs.keys()) if isinstance(inputs, dict) else 'not a dict'}")
-        
-        if outputs is not None and inputs is not None:
-            # Calculate embedding similarity
-            labels = inputs.get('labels') if inputs else None
-            similarity = self._calculate_embedding_similarity(outputs, labels)
-            if similarity is not None:
-                self.embedding_similarities.append(similarity)
-                print(f"Added similarity: {similarity}")
-            
-            # Calculate token accuracy
-            if labels is not None:
-                accuracy = self._calculate_token_accuracy(outputs, labels)
-                if accuracy is not None:
-                    self.token_accuracies.append(accuracy)
-                    print(f"Added accuracy: {accuracy}")
-        
-        # Clear stored inputs after processing
-        self.current_step_inputs = None
 
     def on_substep_end(self, args, state, control, **kwargs):
         """Called at the end of a substep during gradient accumulation."""
-        print(f"on_substep_end kwargs: {list(kwargs.keys())}")
-        
-        # Also try to capture inputs during gradient accumulation steps
-        inputs = kwargs.get("inputs")
-        if inputs is not None and self.current_step_inputs is None:
-            self.current_step_inputs = inputs
-            print(f"Found inputs in substep with keys: {list(inputs.keys())}")
-            
-            # Count tokens for gradient accumulation steps too
-            if 'input_ids' in inputs:
-                token_count = self._count_tokens(inputs['input_ids'])
-                self.total_input_tokens += token_count
-                print(f"Counted {token_count} tokens in substep, total: {self.total_input_tokens}")
-        else:
-            print(f"No new inputs in substep (inputs available: {inputs is not None})")
+        # Update token count from built-in tracking
+        self.total_input_tokens = state.num_input_tokens_seen
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Called after an evaluation phase."""
+        # Update token count - no additional computation needed
+        self.total_input_tokens = state.num_input_tokens_seen
 
     def on_log(self, args, state, control, logs=None, **kwargs):  
         if not logs:

@@ -19,9 +19,9 @@ import numpy as np
 
 # training
 from transformers import Trainer, TrainingArguments
-from Utils import get_logger, LoggingCallback, model_size_breakdown
+from Utils import get_logger, LoggingCallback, model_size_breakdown, create_metrics_functions
 from Model import build_BBOB 
-from Train import load_and_prepare_dataset, clean_tokenizer_config, compute_embedding_similarity
+from Train import load_and_prepare_dataset, clean_tokenizer_config
 
 # img / tensor utilities
 from torchvision.transforms.functional import pil_to_tensor
@@ -212,6 +212,7 @@ def train(
         fp16                        = cuda and not bf16_supported,  
         eval_strategy               = "steps",
         eval_steps                  = max(512 // grad_acc_steps, 1),
+        eval_accumulation_steps     = 4,  # Memory optimization for evaluation
         save_strategy               = "steps",
         save_steps                  = max(steps_per_epoch // 3, 1),
         logging_steps               = max(batch_size // grad_acc_steps, 1),
@@ -243,6 +244,10 @@ def train(
     # custom collator that injects labels based on *target_text*
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
+    # Create metrics functions with shared state (no global variables)
+    # This creates two functions that share closure variables for accumulating metrics
+    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions()
+
     trainer = Trainer(
         model          = model,
         train_dataset  = train_dataset,
@@ -250,7 +255,9 @@ def train(
         data_collator  = collate_fn,
         args           = cfg,
         callbacks      = [LoggingCallback(logger    )] if logger is not None else None,
-        processing_class = tokenizer
+        processing_class = tokenizer,
+        compute_metrics = compute_metrics,
+        preprocess_logits_for_metrics = preprocess_logits_for_metrics
     )   
     
     logger.info("Starting training of projector...")
