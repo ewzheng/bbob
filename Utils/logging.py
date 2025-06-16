@@ -47,20 +47,38 @@ def size_of_module(module):
     return total / (1024 ** 2)  # MB
 
 
-def model_size_breakdown(components):
+def model_size_breakdown(components, root_name="model"):
     """
-    Get the size of a model in MB
+    Get the size of a model or collection of components in MB.
 
     Parameters:
-        - components: a dictionary of components and their sizes
+        - components: Either
+            * a dict mapping names to modules (or lists/tuples of modules), or
+            * a single ``torch.nn.Module`` (or list/tuple of modules).
+        - root_name: Name to use when ``components`` is not a dict. Defaults to ``"model"``.
 
     Returns:
-        - size: the size of the model in MB
+        - A formatted multiline string with the size breakdown in MB.
     """
     lines = ["Model size breakdown (MB):"]
     total = 0.0
 
-    for name, module in components.items():
+    # Detect a BBOB model instance (or other similar wrapper) by attribute names
+    if not isinstance(components, dict):
+        if all(hasattr(components, attr) for attr in ("vision_tower", "projector", "language_model")):
+            # Automatically build a dict with the desired parts
+            items = {
+                "vision_tower": getattr(components, "vision_tower"),
+                "projector"   : getattr(components, "projector"),
+                "base_model"  : getattr(components, "language_model"),
+            }.items()
+        else:
+            # Fallbacks handled above if items already set; if not yet set, make single entry
+            items = [(root_name, components)]
+    else:
+        items = components.items()
+
+    for name, module in items:
         if module is None:
             continue
 
