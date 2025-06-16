@@ -22,14 +22,21 @@ def create_metrics_functions():
     token_accuracies = []
     top3_accuracies = []
     top5_accuracies = []
-    embedding_similarities = []
+    prediction_target_similarities = []
+    projected_text_similarities = []
+    retrieval_accuracies = []
 
     def preprocess_logits_for_metrics_impl(logits, labels):
         """
         Memory-efficient preprocessing to avoid OOM during evaluation.
         Processes logits immediately instead of accumulating them all in GPU memory.
+        
+        Note: To get cross-modal metrics, your model needs to store intermediate
+        values (projected_vision, text_embeddings) as attributes on the logits tensor
+        during forward pass when in evaluation mode.
         """
-        nonlocal token_accuracies, top3_accuracies, top5_accuracies, embedding_similarities
+        nonlocal token_accuracies, top3_accuracies, top5_accuracies
+        nonlocal prediction_target_similarities, projected_text_similarities, retrieval_accuracies
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
@@ -57,35 +64,46 @@ def create_metrics_functions():
                     top5_correct = (top5_preds == labels_expanded).any(dim=-1) & mask
                     top5_acc = top5_correct.sum().float() / mask.sum().float()
                     top5_accuracies.append(top5_acc.item())
-            
-            # Calculate semantic similarity using softmax-normalized probability distributions
-            # This converts logits to meaningful probability distributions over vocabulary
-            if labels is not None and logits.shape[0] > 1:  # Need at least 2 samples
-                try:
-                    batch_size, seq_len, vocab_size = logits.shape
                     
-                    # Apply softmax to get probability distributions
-                    # Shape: [batch_size, seq_len, vocab_size]
-                    probs = F.softmax(logits, dim=-1)
-                    
-                    # Flatten to get sentence-level representations
-                    # Shape: [batch_size, seq_len * vocab_size]
-                    probs_flat = probs.view(batch_size, -1)
-                    
-                    # Calculate pairwise cosine similarity between probability distributions
-                    # This is a principled way to measure semantic similarity between model outputs
-                    probs_norm = F.normalize(probs_flat, p=2, dim=1)
-                    similarity_matrix = torch.mm(probs_norm, probs_norm.t())
-                    
-                    # Take mean of off-diagonal elements (similarity between different samples)
-                    if batch_size > 1:
-                        mask = ~torch.eye(batch_size, dtype=torch.bool, device=similarity_matrix.device)
-                        mean_similarity = similarity_matrix[mask].mean().item()
-                        embedding_similarities.append(mean_similarity)
+                    # NEW: Prediction-target similarity (most important for projector training)
+                    try:
+                        batch_size, seq_len, vocab_size = logits.shape
+                        probs = F.softmax(logits, dim=-1)
                         
-                except Exception as e:
-                    # If similarity calculation fails, continue without it
-                    pass
+                        # Convert target tokens to one-hot distributions
+                        targets_onehot = F.one_hot(labels, num_classes=vocab_size).float()
+                        
+                        # Only measure on non-masked tokens
+                        if mask.sum() > 0:
+                            probs_masked = probs[mask]
+                            targets_masked = targets_onehot[mask]
+                            
+                            # Cosine similarity between predicted probs and target distributions
+                            pred_target_sims = F.cosine_similarity(probs_masked, targets_masked, dim=-1)
+                            mean_pred_target_sim = pred_target_sims.mean().item()
+                            prediction_target_similarities.append(mean_pred_target_sim)
+                    except Exception as e:
+                        print(f"Error calculating prediction-target similarity: {e}")
+            
+            # NEW: Access intermediate values if model stores them during evaluation
+            # Note: This requires your model to store projected_vision and text_embeddings 
+            # as attributes during forward pass when in eval mode
+            try:
+                if hasattr(logits, 'projected_vision') and hasattr(logits, 'text_embeddings'):
+                    # If you modify your model to attach these to the logits tensor
+                    projected_vision = logits.projected_vision
+                    text_embeddings = logits.text_embeddings
+                    
+                    # Compute projected-text similarity
+                    proj_text_sim = compute_projected_text_similarity(projected_vision, text_embeddings)
+                    projected_text_similarities.append(proj_text_sim)
+                    
+                    # Compute retrieval accuracy
+                    retrieval_acc = compute_retrieval_accuracy(projected_vision, text_embeddings)
+                    retrieval_accuracies.append(retrieval_acc)
+                    
+            except Exception as e:
+                print(f"Error computing projector metrics: {e}")
             
             # Return only predictions and labels (much smaller than full logits)
             return pred_ids, labels
@@ -100,7 +118,8 @@ def create_metrics_functions():
         """
         Memory-efficient compute_metrics that works with preprocessed predictions.
         """
-        nonlocal token_accuracies, top3_accuracies, top5_accuracies, embedding_similarities
+        nonlocal token_accuracies, top3_accuracies, top5_accuracies
+        nonlocal prediction_target_similarities, projected_text_similarities, retrieval_accuracies
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
@@ -108,22 +127,86 @@ def create_metrics_functions():
         mean_token_accuracy = sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0
         mean_top3_accuracy = sum(top3_accuracies) / len(top3_accuracies) if top3_accuracies else 0.0
         mean_top5_accuracy = sum(top5_accuracies) / len(top5_accuracies) if top5_accuracies else 0.0
-        mean_embedding_similarity = sum(embedding_similarities) / len(embedding_similarities) if embedding_similarities else 0.0
+        mean_prediction_target_similarity = sum(prediction_target_similarities) / len(prediction_target_similarities) if prediction_target_similarities else 0.0
+        mean_projected_text_similarity = sum(projected_text_similarities) / len(projected_text_similarities) if projected_text_similarities else 0.0
+        mean_retrieval_accuracy = sum(retrieval_accuracies) / len(retrieval_accuracies) if retrieval_accuracies else 0.0
         
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
         top3_accuracies.clear()
         top5_accuracies.clear()
-        embedding_similarities.clear()
+        prediction_target_similarities.clear()
+        projected_text_similarities.clear()
+        retrieval_accuracies.clear()
         
         return {
-            "exact_token_accuracy": mean_token_accuracy,      # Renamed for clarity
-            "top3_token_accuracy": mean_top3_accuracy,        # More forgiving
-            "top5_token_accuracy": mean_top5_accuracy,        # Most forgiving  
-            "mean_embedding_similarity": mean_embedding_similarity,
+            "exact_token_accuracy": mean_token_accuracy,
+            "top3_token_accuracy": mean_top3_accuracy,
+            "top5_token_accuracy": mean_top5_accuracy,
+            "prediction_target_similarity": mean_prediction_target_similarity,  # NEW: Most important
+            "projected_text_similarity": mean_projected_text_similarity,        # NEW: Cross-modal alignment
+            "retrieval_accuracy": mean_retrieval_accuracy,                      # NEW: Retrieval performance
         }
     
     return compute_metrics_impl, preprocess_logits_for_metrics_impl
+
+
+def compute_projected_text_similarity(projected_vision, text_embeddings):
+    """
+    Utility function to compute similarity between projected vision features and text embeddings.
+    Call this in your model's forward pass if you have access to these intermediate representations.
+    
+    Args:
+        projected_vision: Output from your vision projector [batch_size, seq_len, hidden_dim]
+        text_embeddings: Text token embeddings [batch_size, seq_len, hidden_dim]
+    
+    Returns:
+        float: Mean cosine similarity
+    """
+    try:
+        # Pool over sequence dimension to get sentence-level representations
+        proj_pooled = projected_vision.mean(dim=1)  # [batch_size, hidden_dim]
+        text_pooled = text_embeddings.mean(dim=1)   # [batch_size, hidden_dim]
+        
+        # Compute cosine similarity between vision and text representations
+        sims = F.cosine_similarity(proj_pooled, text_pooled, dim=-1)
+        return sims.mean().item()
+    except Exception as e:
+        print(f"Error in projected_text_similarity: {e}")
+        return 0.0
+
+
+def compute_retrieval_accuracy(projected_vision, text_embeddings):
+    """
+    Utility function to compute cross-modal retrieval accuracy.
+    Measures how well vision features can retrieve their corresponding text.
+    
+    Args:
+        projected_vision: Output from your vision projector [batch_size, seq_len, hidden_dim]
+        text_embeddings: Text token embeddings [batch_size, seq_len, hidden_dim]
+    
+    Returns:
+        float: Retrieval accuracy (0-1)
+    """
+    try:
+        batch_size = projected_vision.shape[0]
+        if batch_size < 2:
+            return 0.0  # Need at least 2 samples for retrieval
+        
+        # Pool to sentence-level representations
+        proj_pooled = projected_vision.mean(dim=1)  # [batch_size, hidden_dim]
+        text_pooled = text_embeddings.mean(dim=1)   # [batch_size, hidden_dim]
+        
+        # Compute similarity matrix: vision[i] vs all text[j]
+        similarities = torch.mm(proj_pooled, text_pooled.t())  # [batch_size, batch_size]
+        
+        # For each vision feature, check if its corresponding text has highest similarity
+        correct_retrievals = torch.argmax(similarities, dim=1) == torch.arange(batch_size, device=similarities.device)
+        
+        return correct_retrievals.float().mean().item()
+    except Exception as e:
+        print(f"Error in retrieval_accuracy: {e}")
+        return 0.0
 
 def get_logger(dir, filename="training.log"):   
     '''

@@ -282,7 +282,7 @@ class BBOB(PreTrainedModel):
 
         raise RuntimeError("Cannot locate input embedding layer in base model")
 
-    def forward(self, input_ids=None, input_embeds=None, attention_mask=None, images=None, labels=None, **kwargs):
+    def forward(self, input_ids=None, input_embeds=None, attention_mask=None, images=None, labels=None, output_hidden_states=None, **kwargs):
         '''
         multimodal causal-lm pass.
 
@@ -292,8 +292,9 @@ class BBOB(PreTrainedModel):
             - attention_mask (tensor|None): mask.
             - images (list|tensor|None): raw or processed images.
             - labels (tensor|None): lm labels.
+            - output_hidden_states (bool|None): whether to return embeddings.
 
-        returns: `transformers.CausalLMOutput`.
+        returns: `transformers.CausalLMOutput` with optional embedding storage.
         '''
 
         visual_embeds = self._prepare_visual_inputs(images)
@@ -314,13 +315,45 @@ class BBOB(PreTrainedModel):
                 pad = torch.full((labels.size(0), visual_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
                 labels = torch.cat([pad, labels], dim=1)
 
+        # Save embeddings if requested OR if in evaluation mode (for metrics)
+        should_save_embeddings = output_hidden_states or not self.training
+        
+        if should_save_embeddings:
+            # Store embeddings as class attributes (detached to save memory)
+            self.saved_visual_embeds = visual_embeds.detach() if visual_embeds is not None else None
+            self.saved_text_embeds = text_embeds.detach() if text_embeds is not None else None
+            self.saved_combined_embeds = inputs_embeds.detach() if inputs_embeds is not None else None
+
         # Pass through language model
-        return self.language_model(
+        outputs = self.language_model(
             inputs_embeds=inputs_embeds,   
             attention_mask=combined_mask,
             labels=labels,
+            output_hidden_states=output_hidden_states,
             **kwargs,
         )
+        
+        if should_save_embeddings and hasattr(outputs, 'logits'):
+            # Attach embeddings as attributes to the logits tensor
+            # This allows your metrics function to access them
+            if visual_embeds is not None:
+                outputs.logits.projected_vision = visual_embeds.detach()
+            if text_embeds is not None:
+                outputs.logits.text_embeddings = text_embeds.detach()
+            if inputs_embeds is not None:
+                outputs.logits.combined_embeddings = inputs_embeds.detach()
+        
+        # If output_hidden_states is True, also add to the main output object
+        if output_hidden_states and hasattr(outputs, 'hidden_states'):
+            if not hasattr(outputs, 'visual_embeds'):
+                outputs.visual_embeds = self.saved_visual_embeds
+            if not hasattr(outputs, 'text_embeds'):
+                outputs.text_embeds = self.saved_text_embeds
+            if not hasattr(outputs, 'combined_embeds'):
+                outputs.combined_embeds = self.saved_combined_embeds
+
+        return outputs
+
 
     def save_pretrained(self, output_dir: str, **kwargs):
         """Persist only the **small** pieces we actually fine-tune.
