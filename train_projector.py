@@ -110,7 +110,10 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
             else:
                 text = item.get("text", "")
-                tokens = tokenizer(text, return_tensors="pt")
+                # Leave room for the 64 visual tokens the model will prepend
+                VIS_TOKENS = 64
+                max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+                tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
                 instr_ids = tokens["input_ids"].squeeze(0)
 
             if "target_text" in item:
@@ -130,7 +133,6 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             ids = torch.cat([instr_ids, tgt_ids], dim=0)
 
             # build labels: prepend placeholders for visual tokens (64) and mask instruction
-            VIS_TOKENS = 64
             visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
             lbl = torch.cat([visual_ignore, ids.clone()])
             lbl[: VIS_TOKENS + instr_ids.size(0)] = -100  # ignore vision + instruction

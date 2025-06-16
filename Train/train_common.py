@@ -239,7 +239,21 @@ def preprocess_batch(batch, tokenizer, image_processor: MobileViTImageProcessor,
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    tokenized_text = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True, padding=True)
+    # Reserve room for the visual tokens that will be prepended later in the
+    # model forward pass.  MobileViT-v2 @256 px yields 8×8 = 64 tokens.
+    VIS_TOKENS = 64  # ✱ keep in sync with VisionTower output
+
+    max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+    if max_txt_len <= 0:
+        raise ValueError("Tokenizer max_length is too small to fit visual tokens")
+
+    tokenized_text = tokenizer(
+        text,
+        return_tensors="pt",
+        max_length=max_txt_len,
+        truncation=True,
+        padding=True,
+    )
     
     # Convert tensors to python lists (1-D per sample) – we slice row-wise
     input_id_rows = [row.tolist() for row in tokenized_text["input_ids"]]
