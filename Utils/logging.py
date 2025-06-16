@@ -142,13 +142,13 @@ class LoggingCallback(TrainerCallback):
 
         Runs once per batch inside the evaluation / prediction loops.
         """
-        self.logger.info("fart")
-        inputs  = kwargs.get("inputs")
+        inputs  = kwargs.get("inputs") or kwargs.get("batch")
         model   = kwargs.get("model")
-        # outputs ignored here
 
+        # If either the model or inputs are missing, skip similarity computation silently.
         if model is None or inputs is None:
-            self.logger.info("no fart")
+            # Some events (e.g., training prediction steps) do not provide these fields.
+            # We skip quietly in those cases to avoid log clutter.
             return control
 
         try:

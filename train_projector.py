@@ -224,7 +224,8 @@ def train(
         lr_scheduler_type           = "cosine_with_restarts",   
         warmup_steps                = warmup_steps,
         lr_scheduler_kwargs         = {"num_cycles": 1},
-        torch_empty_cache_steps     = 1024
+        torch_empty_cache_steps     = 1024,
+        include_inputs_for_metrics  = True
     )
 
     # guarantee pad token exists
@@ -250,7 +251,7 @@ def train(
         eval_dataset   = val_dataset,
         data_collator  = collate_fn,
         args           = cfg,
-        callbacks      = [LoggingCallback(logger)] if logger is not None else None,
+        callbacks      = [LoggingCallback(logger    )] if logger is not None else None,
         processing_class = tokenizer
     )
     
