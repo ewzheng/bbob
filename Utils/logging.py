@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from transformers import TrainerCallback
 from Train import compute_embedding_similarity
 
-def create_metrics_functions(model):
+def create_metrics_functions():
     """
     Factory function that creates compute_metrics and preprocess_logits_for_metrics
     with shared state for accumulating metrics across batches.
@@ -25,6 +25,7 @@ def create_metrics_functions(model):
     token_accuracies = []
     top3_accuracies = []
     top5_accuracies = []
+    sequence_accuracies = []
     prediction_target_similarities = []
 
     def preprocess_logits_for_metrics_impl(logits, labels, inputs=None):
@@ -35,7 +36,7 @@ def create_metrics_functions(model):
         Now receives inputs parameter with original forward() inputs.
         """
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
-        nonlocal prediction_target_similarities
+        nonlocal sequence_accuracies, prediction_target_similarities
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
@@ -63,6 +64,14 @@ def create_metrics_functions(model):
                     top5_correct = (top5_preds == labels_expanded).any(dim=-1) & mask
                     top5_acc = top5_correct.sum().float() / mask.sum().float()
                     top5_accuracies.append(top5_acc.item())
+                    
+                    # Sequence-level accuracy - entire sequence must be correct
+                    batch_size, seq_len = pred_ids.shape
+                    for i in range(batch_size):
+                        seq_mask = mask[i]  # [seq_len]
+                        if seq_mask.sum() > 0:  # Only evaluate sequences with valid tokens
+                            seq_correct = ((pred_ids[i] == labels[i]) | ~seq_mask).all()
+                            sequence_accuracies.append(seq_correct.item())
                     
                     # Prediction-target similarity (most important for projector training)
                     try:
@@ -99,7 +108,7 @@ def create_metrics_functions(model):
         Now has access to inputs via eval_pred.inputs if include_for_metrics=["inputs"] is set.
         """
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
-        nonlocal prediction_target_similarities
+        nonlocal sequence_accuracies, prediction_target_similarities
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
@@ -115,18 +124,21 @@ def create_metrics_functions(model):
         mean_token_accuracy = sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0
         mean_top3_accuracy = sum(top3_accuracies) / len(top3_accuracies) if top3_accuracies else 0.0
         mean_top5_accuracy = sum(top5_accuracies) / len(top5_accuracies) if top5_accuracies else 0.0
+        mean_sequence_accuracy = sum(sequence_accuracies) / len(sequence_accuracies) if sequence_accuracies else 0.0
         mean_prediction_target_similarity = sum(prediction_target_similarities) / len(prediction_target_similarities) if prediction_target_similarities else 0.0
      
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
         top3_accuracies.clear()
         top5_accuracies.clear()
+        sequence_accuracies.clear()
         prediction_target_similarities.clear()
         
         return {
             "exact_token_accuracy": mean_token_accuracy,
             "top3_token_accuracy": mean_top3_accuracy,
             "top5_token_accuracy": mean_top5_accuracy,
+            "sequence_accuracy": mean_sequence_accuracy,
             "prediction_target_similarity": mean_prediction_target_similarity,
         }
     
