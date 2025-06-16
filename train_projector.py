@@ -168,7 +168,7 @@ def train(
     lr: float,
     grad_acc_steps: int = 1,
     logger=None,
-    warmup_steps: int = 0,
+    warmup_ratio: float = 0.0,
     num_workers: int = 4,
 ):
     '''
@@ -184,7 +184,7 @@ def train(
         - lr (float): learning rate.
         - grad_acc_steps (int): gradient accumulation.
         - logger (logging.Logger|None): optional logger.
-        - warmup_steps (int): lr warmup steps.
+        - warmup_ratio (float): lr warmup ratio.
     '''
 
     model.freeze_model()                              
@@ -221,9 +221,9 @@ def train(
         dataloader_num_workers      = num_workers,
         dataloader_pin_memory       = True, 
         save_total_limit            = 2,
-        lr_scheduler_type           = "cosine_with_restarts",   
-        warmup_steps                = warmup_steps,
-        lr_scheduler_kwargs         = {"num_cycles": 1},
+        lr_scheduler_type           = "cosine",   
+        warmup_ratio                = warmup_ratio,
+        lr_scheduler_kwargs         = {"num_cycles": 0.25},
         torch_empty_cache_steps     = max(512 // grad_acc_steps, 1) + max(batch_size // grad_acc_steps, 1), # flush cache after eval
         include_num_input_tokens_seen = True,  # Enable token counting for metrics
     )
@@ -277,7 +277,7 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
     parser.add_argument("--bnb_config", type=str, default=None, help="Bits and bytes configuration (default: None)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
-    parser.add_argument("--warmup_steps", type=int, default=16, help="Number of warmup steps for scheduler (default: 16)")
+    parser.add_argument("--warmup_ratio", type=float, default=0.15, help="Warmup ratio for scheduler (default: 0.15)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of CPU workers for DataLoader preprocessing (default: 4)")
     args = parser.parse_args()
@@ -316,7 +316,7 @@ def main():
         grad_acc_steps=args.gradient_accumulation_steps,
         logger=logger,
         num_workers=args.num_workers,
-        warmup_steps=args.warmup_steps
+        warmup_ratio=args.warmup_ratio
     )
 
     logger.info("Projector training is complete, model successfully saved.")

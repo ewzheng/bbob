@@ -146,7 +146,7 @@ def get_logger(dir, filename="training.log"):
     if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
         stream_handler = logging.StreamHandler(sys.stdout)
         stream_handler.setLevel(logging.INFO)
-        stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        stream_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')) 
         logger.addHandler(stream_handler)
 
     return logger
