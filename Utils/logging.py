@@ -35,8 +35,6 @@ def create_metrics_functions():
         """
         Memory-efficient preprocessing to avoid OOM during evaluation.
         Processes logits immediately instead of accumulating them all in GPU memory.
-        
-        Now receives inputs parameter with original forward() inputs.
         """
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
@@ -55,17 +53,14 @@ def create_metrics_functions():
                     accuracy = correct.sum().float() / mask.sum().float()
                     token_accuracies.append(accuracy.item())
                     
-                    # Top-3 accuracy - much more forgiving
-                    top3_preds = torch.topk(logits, k=3, dim=-1).indices  # [batch, seq, 3]
-                    labels_expanded = labels.unsqueeze(-1).expand_as(top3_preds)  # [batch, seq, 3]
-                    top3_correct = (top3_preds == labels_expanded).any(dim=-1) & mask
+                    # Top-k accuracies (k=3 & 5)
+                    top3_preds = torch.topk(logits, k=3, dim=-1).indices   # [B, S, 3]
+                    top3_correct = (top3_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
                     top3_acc = top3_correct.sum().float() / mask.sum().float()
                     top3_accuracies.append(top3_acc.item())
-                    
-                    # Top-5 accuracy - even more forgiving  
-                    top5_preds = torch.topk(logits, k=5, dim=-1).indices  # [batch, seq, 5]
-                    labels_expanded = labels.unsqueeze(-1).expand_as(top5_preds)  # [batch, seq, 5]
-                    top5_correct = (top5_preds == labels_expanded).any(dim=-1) & mask
+
+                    top5_preds = torch.topk(logits, k=5, dim=-1).indices   # [B, S, 5]
+                    top5_correct = (top5_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
                     top5_acc = top5_correct.sum().float() / mask.sum().float()
                     top5_accuracies.append(top5_acc.item())
                     
