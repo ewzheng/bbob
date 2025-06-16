@@ -115,18 +115,21 @@ class Projector(nn.Module):
         if H > self.row_embedding.size(0) or W > self.col_embedding.size(0):
             raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self.row_embedding.size(0), self.col_embedding.size(0))}")
 
-        pos = (
-            self.row_embedding[:H].unsqueeze(1) +  # (H, 1, C)
-            self.col_embedding[:W].unsqueeze(0)    # (1, W, C)
-        )  # (H, W, C)
-        pos = pos.reshape(H * W, C).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, C)
-
+        # Flatten for projection: (B, C, H, W) > (B, H*W, C)
         vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
 
-        # add spatial features
-        vision_in = vision_in + pos
+        # Project to text space first
+        projected = self.net(vision_in)  # (B, H*W, outdim)
 
-        return self.net(vision_in)
+        # Add spatial embeddings back after projection to restore spatial information
+        pos = (
+            self.row_embedding[:H].unsqueeze(1) +  # (H, 1, outdim)
+            self.col_embedding[:W].unsqueeze(0)    # (1, W, outdim)
+        )  # (H, W, outdim)
+        pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, outdim)
+
+        # add spatial features after projection
+        return projected + pos
     
     ''' Saving methods, here if needed '''
 

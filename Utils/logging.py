@@ -28,7 +28,7 @@ def create_metrics_functions():
     sequence_accuracies = []
     prediction_target_similarities = []
 
-    def preprocess_logits_for_metrics_impl(logits, labels, inputs=None):
+    def preprocess_logits_for_metrics_impl(logits, labels):
         """
         Memory-efficient preprocessing to avoid OOM during evaluation.
         Processes logits immediately instead of accumulating them all in GPU memory.

@@ -113,7 +113,6 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 tokens = tokenizer(text, return_tensors="pt")
                 instr_ids = tokens["input_ids"].squeeze(0)
 
-            # --- target tokens (may be absent in on-the-fly mode) ---
             if "target_text" in item:
                 tgt_ids = torch.as_tensor(item["target_text"], dtype=torch.long)
             else:
