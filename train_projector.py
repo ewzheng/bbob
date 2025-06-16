@@ -224,7 +224,7 @@ def train(
         dataset_kwargs              = {"skip_prepare_dataset": True},
         lr_scheduler_type           = "cosine_with_restarts",   
         warmup_steps                = warmup_steps,
-        lr_scheduler_kwargs         = {"num_cycles": epochs}
+        lr_scheduler_kwargs         = {"num_cycles": 1}
     )
 
     # guarantee pad token exists (some LLM tokenizers lack one by default)
