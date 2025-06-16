@@ -277,7 +277,7 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for projector training (default: 2e-5)")
     parser.add_argument("--bnb_config", type=str, default=None, help="Bits and bytes configuration (default: None)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training (default: 32)")
-    parser.add_argument("--warmup_ratio", type=float, default=0.15, help="Warmup ratio for scheduler (default: 0.15)")
+    parser.add_argument("--warmup_ratio", type=float, default=0.2, help="Warmup ratio for scheduler (default: 0.2)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of CPU workers for DataLoader preprocessing (default: 4)")
     args = parser.parse_args()
