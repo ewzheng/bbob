@@ -2,9 +2,7 @@ import logging
 import os
 import sys
 
-import torch
 from transformers import TrainerCallback
-from Train import compute_embedding_similarity
 
 def get_logger(dir, filename="training.log"):   
     '''
@@ -108,7 +106,6 @@ class LoggingCallback(TrainerCallback):
     def __init__(self, logger: logging.Logger | None = None):
         super().__init__()
         self.logger = logger or logging.getLogger(__name__)
-        self._reset_eval_sim()
 
     def on_log(self, args, state, control, logs=None, **kwargs):  
         if not logs:
@@ -131,75 +128,3 @@ class LoggingCallback(TrainerCallback):
 
         joined = ", ".join(_fmt(k, v) for k, v in logs.items())
         self.logger.info("%s %s", prefix, joined)
-
-    def _reset_eval_sim(self):
-        """Internal helper to zero the running similarity counters."""
-        self._sim_sum   = 0.0
-        self._sim_count = 0
-
-    def on_prediction_step(self, args, state, control, **kwargs):
-        """Accumulate cosine similarity for *evaluation* steps.
-
-        Runs once per batch inside the evaluation / prediction loops.
-        """
-        inputs  = kwargs.get("inputs")
-        model   = kwargs.get("model")
-
-        # If either the model or inputs are missing, skip similarity computation silently.
-        if model is None or inputs is None:
-            # Some events (e.g., training prediction steps) do not provide these fields.
-            # We skip quietly in those cases to avoid log clutter.
-            return control
-
-        try:
-            images    = inputs.get("pixel_values", inputs.get("images"))
-            input_ids = inputs.get("input_ids")
-            labels     = inputs.get("labels")
-            if images is None or input_ids is None:
-                return control 
-
-            with torch.no_grad():
-                if hasattr(model, "_prepare_visual_inputs"):
-                    vision_feats = model._prepare_visual_inputs(images)
-                else:
-                    return control
-
-                if hasattr(model, "_embed_tokens"):
-                    text_embeds = model._embed_tokens(input_ids.to(model.device))
-                else:
-                    return control
-
-                sim = compute_embedding_similarity(vision_feats, text_embeds)
-
-                # ---------------- token-level accuracy ----------------
-                # Forward pass to get logits only when labels available
-                token_acc = None
-                if labels is not None:
-                    outputs = kwargs.get("outputs")
-                    if outputs is not None and hasattr(outputs, "logits"):
-                        logits = outputs.logits  # (B, T, V)
-                        preds  = logits.argmax(dim=-1)  # (B, T)
-                        # mask out ignored positions (-100)
-                        mask = labels != -100
-                        if mask.any():
-                            correct = (preds == labels) & mask
-                            token_acc = correct.sum().item() / mask.sum().item()
-
-            # Aggregate similarity for later averaging
-            self._sim_sum += float(sim)
-            self._sim_count += 1
-
-            # Log per-step statistics
-            if token_acc is not None:
-                self.logger.info("[eval step %d] embedding_similarity=%.6f, token_accuracy=%.4f", state.global_step, sim, token_acc)
-            else:
-                self.logger.info("[eval step %d] embedding_similarity=%.6f", state.global_step, sim)
-        except Exception as e:
-            self.logger.debug("Eval similarity computation failed: %s", e)
-
-        return control
-
-    
-
-
-

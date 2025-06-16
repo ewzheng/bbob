@@ -15,18 +15,18 @@ import sys
 import os
 import multiprocess as mp
 import math
+import numpy as np
 
 # training
 from transformers import Trainer, TrainingArguments
 from Utils import get_logger, LoggingCallback, model_size_breakdown
 from Model import build_BBOB 
-from Train import load_and_prepare_dataset, clean_tokenizer_config
+from Train import load_and_prepare_dataset, clean_tokenizer_config, compute_embedding_similarity
 
 # img / tensor utilities
 from torchvision.transforms.functional import pil_to_tensor
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
-import numpy as np
 
 # Prevent "tokenizers parallelism" fork warnings inside multiprocess map
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")    
@@ -157,6 +157,51 @@ def make_collate_fn(pad_token_id: int, tokenizer):
 
     return _collate
 
+def _compute_metrics(eval_pred, logger, model):
+        """Return dict with mean token-level accuracy and vision-text similarity.
+
+        This function receives an `EvalPrediction` object with attributes:
+            • predictions – NumPy array of logits (B, T, V)
+            • label_ids    – NumPy array of labels (B, T)
+            • inputs       – dict with the original batch
+        """
+
+        logits_np, labels_np, inputs = eval_pred.predictions, eval_pred.label_ids, eval_pred.inputs
+
+        # -------------- token accuracy --------------
+        logits = torch.from_numpy(logits_np)
+        labels = torch.from_numpy(labels_np)
+        preds  = logits.argmax(dim=-1)
+        mask   = labels != -100
+        token_acc = float(((preds == labels) & mask).sum().item() / max(mask.sum().item(), 1))
+
+        metrics = {"token_accuracy": token_acc}
+
+        # -------------- embedding similarity --------------
+        try:
+            if isinstance(inputs, dict):
+                images    = inputs.get("pixel_values", inputs.get("images"))
+                input_ids = inputs.get("input_ids")
+                if images is not None and input_ids is not None:
+                    device = model.device  # same device as model
+
+                    # Convert to torch tensors (may already be tensors)
+                    if not torch.is_tensor(images):
+                        images = torch.as_tensor(images, device=device)
+                    if not torch.is_tensor(input_ids):
+                        input_ids = torch.as_tensor(input_ids, device=device)
+
+                    with torch.no_grad():
+                        vision_feats = model._prepare_visual_inputs(images)
+                        text_embeds  = model._embed_tokens(input_ids.to(device))
+                        sim = compute_embedding_similarity(vision_feats, text_embeds)
+                        metrics["embedding_similarity"] = sim
+        except Exception as _e:
+            # Do not fail evaluation because of metric errors – just log once.
+            if logger is not None:
+                logger.debug("compute_metrics failed to compute similarity: %s", _e)
+
+        return metrics
 
 def train(
     model,
@@ -225,7 +270,7 @@ def train(
         warmup_steps                = warmup_steps,
         lr_scheduler_kwargs         = {"num_cycles": 1},
         torch_empty_cache_steps     = 1024,
-        include_for_metrics         = ["loss", "inputs"]
+        include_for_metrics         = ["inputs"]
     )
 
     # guarantee pad token exists
@@ -252,6 +297,7 @@ def train(
         data_collator  = collate_fn,
         args           = cfg,
         callbacks      = [LoggingCallback(logger    )] if logger is not None else None,
+        compute_metrics = lambda eval_pred: _compute_metrics(eval_pred, logger, model),
         processing_class = tokenizer
     )
     
