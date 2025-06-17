@@ -20,161 +20,7 @@ import numpy as np
 from transformers import Trainer, TrainingArguments
 from Utils import get_logger, LoggingCallback, model_size_breakdown, create_metrics_functions   
 from Model import build_BBOB 
-from Train import load_and_prepare_dataset, clean_tokenizer_config
-
-# img / tensor utilities
-from torchvision.transforms.functional import pil_to_tensor
-import torch.nn.functional as F
-from torch.nn.utils.rnn import pad_sequence
-
-# Prevent "tokenizers parallelism" fork warnings inside multiprocess map
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")    
-
-def make_collate_fn(pad_token_id: int, tokenizer):
-    '''
-    factory that builds a custom collate_fn for sfttrainer.
-
-    parameters:
-        - pad_token_id (int): tokenizer pad id.
-
-    returns: callable(list[dict]) -> batch dict.
-    '''
-
-    def _collate(batch):
-        # find image key dynamically
-        img_key = None
-        for cand in ("images", "image", "pixel_values"):
-            if cand in batch[0]:
-                img_key = cand
-                break
-        if img_key is None:
-            raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
-
-        target_size = (256, 256)
-        # Stay on CPU inside worker; main process/Accelerate will move to GPU
-        device = "cpu"
-
-        processed = []
-        for img in [item[img_key] for item in batch]:
-            # Case-1: pre-normalised numpy array (3,H,W) or tensor
-            if isinstance(img, torch.Tensor):
-                t = img.to(dtype=torch.float32)
-            elif isinstance(img, np.ndarray):
-                t = torch.as_tensor(img, dtype=torch.float32)
-            else:
-                # Fallback: PIL → tensor path (rare after preprocessing refactor)
-                t = pil_to_tensor(img).float().div_(255.0).to(device)
-
-            # Ensure channel-first shape (3, H, W)
-            if t.dim() == 2:  # grayscale H×W
-                t = t.unsqueeze(0).expand(3, -1, -1)  # repeat channels
-            elif t.dim() == 3:
-                if t.shape[0] == 3:  # C,H,W RGB
-                    pass
-                elif t.shape[0] == 1:  # C=1, H, W  -> replicate channel
-                    t = t.expand(3, -1, -1)
-                elif t.shape[2] == 3:  # H,W,C RGB
-                    t = t.permute(2, 0, 1)
-                elif t.shape[2] == 1:  # H,W,1 grayscale
-                    t = t.permute(2, 0, 1).expand(3, -1, -1)
-                else:
-                    raise RuntimeError(f"Unexpected image shape {t.shape}; cannot determine channel dimension")
-            else:
-                raise RuntimeError(f"Unsupported tensor dim {t.dim()} for image input")
-
-            _, H, W = t.shape
-            if (H, W) != target_size:
-                scale = min(target_size[1] / H, target_size[0] / W)
-                # Clamp to at least 1 px to avoid zero-dimension resize errors
-                nh = max(1, int(H * scale))
-                nw = max(1, int(W * scale))
-                t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
-
-                canvas = 0.5 * torch.ones(3, *target_size)
-                dh = (target_size[1] - nh) // 2
-                dw = (target_size[0] - nw) // 2
-                canvas[:, dh:dh+nh, dw:dw+nw] = t
-                t = canvas
-
-            processed.append(t)
-
-        pixel_values = torch.stack(processed, 0)
-
-        merged_input_ids = []
-        merged_labels = []
-
-        for item in batch:
-            # --- instruction tokens ---
-            if "input_ids" in item:
-                instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
-            else:
-                text = item.get("text", "")
-                # Leave room for the 64 visual tokens the model will prepend
-                VIS_TOKENS = 64
-                max_txt_len = tokenizer.model_max_length - VIS_TOKENS
-                tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
-                instr_ids = tokens["input_ids"].squeeze(0)
-
-            if "target_text" in item:
-                tgt_ids = torch.as_tensor(item["target_text"], dtype=torch.long)
-            else:
-                tgt_ids = torch.tensor([], dtype=torch.long)
-
-            # ensure both are 1-D
-            instr_ids = instr_ids.flatten()
-            tgt_ids   = tgt_ids.flatten()
-
-            # drop padding tokens that were added during preprocessing
-            instr_ids = instr_ids[instr_ids != pad_token_id]
-            tgt_ids   = tgt_ids[tgt_ids   != pad_token_id]
-
-            # -------------------------------------------------------------
-            # Ensure combined text length stays within positional budget
-            # -------------------------------------------------------------
-            max_txt_len = tokenizer.model_max_length - VIS_TOKENS
-
-            if instr_ids.size(0) > max_txt_len:
-                # Extremely long instruction – keep the *last* segment so that
-                # targets remain aligned to the end.
-                instr_ids = instr_ids[-max_txt_len:]
-                tgt_ids = torch.tensor([], dtype=torch.long)
-            else:
-                remaining = max_txt_len - instr_ids.size(0)
-                if tgt_ids.size(0) > remaining:
-                    tgt_ids = tgt_ids[:remaining]
-
-            # concatenate instruction + (possibly truncated) target ⇒ model input (text only)
-            ids = torch.cat([instr_ids, tgt_ids], dim=0)
-
-            # build labels: prepend placeholders for visual tokens (64) and mask instruction
-            visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
-            lbl = torch.cat([visual_ignore, ids.clone()])
-            lbl[: VIS_TOKENS + instr_ids.size(0)] = -100  # ignore vision + instruction
-
-            merged_input_ids.append(ids)
-            merged_labels.append(lbl)
-
-        # pad to max length first
-        input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
-        labels_padded    = pad_sequence(merged_labels,    batch_first=True, padding_value=-100)
-
-        # build attention mask AFTER padding – **visual tokens should be *visible***
-        # The language model receives the visual embeddings prepended internally
-        # by `BBOB._merge_multimodal_inputs`, which itself creates a 1-filled
-        # attention mask for those tokens.  Hence we only need to pass the text
-        # mask here.  Setting the visual part to 0 would make the model ignore
-        # the image information entirely.
-
-        attention_mask = (input_ids_padded != pad_token_id).long()
-
-        return {
-            "images": pixel_values,
-            "input_ids": input_ids_padded,
-            "attention_mask": attention_mask,
-            "labels": labels_padded,
-        }
-
-    return _collate
+from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn
 
 def train(
     model,
@@ -348,6 +194,9 @@ def main():
     return
 
 if __name__ == "__main__":
+    # Prevent "tokenizers parallelism" fork warnings inside multiprocess map
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")    
+
     try:
         mp.set_start_method('spawn', force=True)
     except RuntimeError:

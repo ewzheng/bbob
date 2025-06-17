@@ -8,8 +8,11 @@ from .train_common import (
     load_and_prepare_dataset,
     calculate_optimal_batch_size,
     load_labels_from_yaml,
-    clean_tokenizer_config
+    clean_tokenizer_config,
+    make_collate_fn
 )
+
+from train_augments import apply_weather_augmentations, apply_camera_augmentations
 
 __all__ = [
     "jitter_bboxes",
@@ -21,5 +24,8 @@ __all__ = [
     "load_and_prepare_dataset",
     "calculate_optimal_batch_size",
     "load_labels_from_yaml",
-    "clean_tokenizer_config"
+    "clean_tokenizer_config",
+    "make_collate_fn",
+    "apply_weather_augmentations",
+    "apply_camera_augmentations"
 ]
