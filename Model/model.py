@@ -390,9 +390,13 @@ class BBOB(PreTrainedModel):
         config = BBOBConfig.from_pretrained(ckpt_dir)
         
         # 2) Check if we have a full model checkpoint or just projector
+        language_model_subdir = getattr(config, 'language_model_path', 'language_model')
+        language_model_full_path = os.path.join(ckpt_dir, language_model_subdir)
+
         has_full_model = (
             hasattr(config, 'language_model_path') and 
-            os.path.isdir(os.path.join(ckpt_dir, getattr(config, 'language_model_path', 'language_model')))
+            os.path.exists(language_model_full_path) and
+            os.path.isdir(language_model_full_path)
         )
         
         if has_full_model:
