@@ -86,6 +86,7 @@ def train(
         dataloader_num_workers      = num_workers,
         dataloader_pin_memory       = True, 
         save_total_limit            = 2,
+        save_safetensors            = True,
         lr_scheduler_type           = "cosine",   
         warmup_ratio                = warmup_ratio,
         lr_scheduler_kwargs         = {"num_cycles": 0.2},

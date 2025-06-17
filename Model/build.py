@@ -5,20 +5,18 @@ import os
 import sys
 
 # import modules
-from Model.model import BBOB
+from Model.model import BBOB, BBOBConfig
 
-def build_BBOB(model_path, bnb_config=None, load=False):
-    '''
-    construct or load a bbob model instance.
-
-    parameters:
-        - model_path (str): hf repo or local ckpt dir of the base llm.
-        - bnb_config (str|None): quantisation mode – {"8bit","4bit","bf16","fp16"}.
-        - load (bool): when true, load from `model_path` via
-          `BBOB.from_pretrained`; otherwise initialise new weights.
-
-    returns: BBOB model ready for training/inference.
-    '''
+def build_BBOB(model_path, bnb_config=None, max_memory=None, load=False):
+    """
+    Build or load a BBOB model.
+    
+    Args:
+        model_path: Path to base model or checkpoint directory
+        bnb_config: BitsAndBytes configuration
+        max_memory: Memory configuration for device mapping
+        load: Whether to load from pretrained checkpoint
+    """
 
     # informational print, initialize gpu
     print("Loading BBOB with " + model_path + "...\n") 
@@ -36,10 +34,20 @@ def build_BBOB(model_path, bnb_config=None, load=False):
     print(f"Using max_memory: {max_memory}")
 
     if load:
-        return BBOB.from_pretrained(model_path, max_memory, bnb_config)
-    
-    return BBOB(model_path, max_memory, bnb_config)
-
+        # Loading from checkpoint - override config if needed
+        return BBOB.from_pretrained(
+            model_path, 
+            max_memory=max_memory, 
+            bnb_config=bnb_config
+        )
+    else:
+        # Creating new model
+        config = BBOBConfig(
+            base_model_name=model_path,
+            max_memory=max_memory,
+            bnb_config=bnb_config
+        )
+        return BBOB(config=config)
 
 
 

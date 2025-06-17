@@ -33,6 +33,8 @@ class BBOBConfig(PretrainedConfig):
         vision_hidden_size: int | None = None,
         text_hidden_size: int | None = None,
         base_model_name: str | None = None,
+        max_memory: dict | None = None,
+        bnb_config: str | dict | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -44,9 +46,13 @@ class BBOBConfig(PretrainedConfig):
         self.vision_hidden_size = vision_hidden_size if vision_hidden_size is not None else 1
         self.text_hidden_size   = text_hidden_size   if text_hidden_size   is not None else 1
         self.base_model_name    = base_model_name    if base_model_name    is not None else "unknown"
+        self.max_memory         = max_memory
+        self.bnb_config         = bnb_config
+        
         # paths for extra components (filled during save_pretrained)
         self.projector_path: str | None = kwargs.get("projector_path")
         self.vision_tower_path: str | None = kwargs.get("vision_tower_path")
+        self.language_model_path: str | None = kwargs.get("language_model_path")
 
 class BBOB(PreTrainedModel):
     """
@@ -58,26 +64,26 @@ class BBOB(PreTrainedModel):
 
     config_class = BBOBConfig
 
-    def __init__(self, model_path=None, max_memory=None, bnb_config=None, config: BBOBConfig | None = None, **kwargs):
+    def __init__(self, config: BBOBConfig | None = None, **kwargs):
         '''
         constructor.
 
         parameters:
-            - model_path (str|Path|None): base llm repo or ckpt dir.
-            - max_memory (dict|None): per-gpu memory map for hf `device_map`.
-            - bnb_config (str|BitsAndBytesConfig|None): "8bit"/"4bit"/"bf16"/"fp16".
-            - config (BBOBConfig|None): pre-built config when loading.
+            - config (BBOBConfig|None): model configuration containing all parameters
         '''
 
-        if config is not None:
-            self.config = config
-            if model_path is None:
-                model_path = config.base_model_name
-        else:
-            self.config = None
+        if config is None:
+            # Create default config if none provided
+            config = BBOBConfig(**kwargs)
+        
+        super().__init__(config)
+        
+        # Extract configuration values
+        model_path = config.base_model_name
+        max_memory = config.max_memory
+        bnb_config = config.bnb_config
 
-        super().__init__(self.config if self.config is not None else BBOBConfig(vision_hidden_size=1, text_hidden_size=1, base_model_name=str(model_path)))
-
+        # Process bnb_config
         if bnb_config == "8bit":
             bnb_config = BitsAndBytesConfig(load_in_8bit=True)
         elif bnb_config == "4bit":
@@ -86,6 +92,8 @@ class BBOB(PreTrainedModel):
             bnb_config = BitsAndBytesConfig(load_in_bf16=True)
         elif bnb_config == "fp16":
             bnb_config = BitsAndBytesConfig(load_in_fp16=True)
+        elif isinstance(bnb_config, dict):
+            bnb_config = BitsAndBytesConfig(**bnb_config)
         else:
             bnb_config = None
 
@@ -127,12 +135,9 @@ class BBOB(PreTrainedModel):
         print(f"Vision Tower device: {self.vision_tower.device}, dtype: {self.vision_tower.dtype}")
         print(f"Projector device: {next(self.projector.parameters()).device}, dtype: {next(self.projector.parameters()).dtype}")
 
-        if self.config is None:
-            self.config = BBOBConfig(
-                vision_hidden_size=vision_hidden_size,
-                text_hidden_size=text_hidden_size,
-                base_model_name=str(model_path),
-            )
+        # Update config with actual values
+        self.config.vision_hidden_size = vision_hidden_size
+        self.config.text_hidden_size = text_hidden_size
             
 
     ''' Helpers for interacting with internal components'''
@@ -324,68 +329,180 @@ class BBOB(PreTrainedModel):
         )
 
 
-    def save_pretrained(self, output_dir: str, **kwargs):
-        """Persist only the **small** pieces we actually fine-tune.
+    def save_pretrained(self, output_dir: str, save_full_model: bool = True, **kwargs):
+        """Save the complete model for end-to-end training.
 
-        We do **not** store the full language-model weights ─ they are unchanged
-        from the public checkpoint referenced by ``config.base_model_name`` and
-        would massively bloat every projector checkpoint.  Instead we save:
-
-        1. ``config.json`` – updated so it knows where to find the base model
-           and the projector file.
-        2. ``projector.safetensors`` – a few-MB state-dict with the learned
-           projection layer.
-        3. (optional) a fine-tuned vision-tower dir if the user ever unfreezes
-           those parameters.
+        Args:
+            output_dir: Directory to save the model
+            save_full_model: If True, saves all model components. If False, saves only trainable parts.
         """
 
         os.makedirs(output_dir, exist_ok=True)
 
-        # --- 1) config -----------------------------------------------------------------
+        # --- 1) Config -----------------------------------------------------------------
         self.config.projector_path = "projector.safetensors"
+        if save_full_model:
+            self.config.language_model_path = "language_model"
+            self.config.vision_tower_path = "vision_tower"
         self.config.save_pretrained(output_dir)
 
-        # --- 2) projector --------------------------------------------------------------
+        # --- 2) Projector (always save) ------------------------------------------------
         proj_path = os.path.join(output_dir, self.config.projector_path)
         st.save_file(self.projector.state_dict(), proj_path)
 
-        # --- 3) vision tower (rarely trainable) ---------------------------------------
-        if any(p.requires_grad for p in self.vision_tower.model.parameters()):
-            vt_dir = os.path.join(output_dir, "vision_tower")
-            os.makedirs(vt_dir, exist_ok=True)
-            self.vision_tower.model.save_pretrained(vt_dir)
+        if save_full_model:
+            # --- 3) Language Model -----------------------------------------------------
+            lm_dir = os.path.join(output_dir, "language_model")
+            os.makedirs(lm_dir, exist_ok=True)
+            
+            # Handle both regular models and PEFT models
+            if hasattr(self.language_model, 'save_pretrained'):
+                self.language_model.save_pretrained(lm_dir, **kwargs)
+            else:
+                # Fallback for models without save_pretrained
+                torch.save(self.language_model.state_dict(), os.path.join(lm_dir, "pytorch_model.bin"))
+            
+            # Save tokenizer alongside language model
+            if hasattr(self, 'base_tokenizer'):
+                self.base_tokenizer.save_pretrained(lm_dir)
+
+          # --- 3) vision tower (rarely trainable) ---------------------------------------
+            if any(p.requires_grad for p in self.vision_tower.model.parameters()):
+                vt_dir = os.path.join(output_dir, "vision_tower")
+                os.makedirs(vt_dir, exist_ok=True)
+                self.vision_tower.model.save_pretrained(vt_dir)
+            
+                # Save image processor
+                if hasattr(self.vision_tower, 'image_processor'):
+                    self.vision_tower.image_processor.save_pretrained(vt_dir)
+        else:
+            # Legacy mode: only save trainable components
+            if any(p.requires_grad for p in self.vision_tower.model.parameters()):
+                vt_dir = os.path.join(output_dir, "vision_tower")
+                os.makedirs(vt_dir, exist_ok=True)
+                self.vision_tower.model.save_pretrained(vt_dir)
 
     @classmethod
-    def from_pretrained(cls, ckpt_dir: str, *model_args, **kwargs):
-        """Rebuild a BBOB instance from a lightweight checkpoint saved above."""
+    def from_pretrained(cls, ckpt_dir: str, **kwargs):
+        """Rebuild a BBOB instance from a checkpoint."""
 
         # 1) Load BBOBConfig first
-        cfg = BBOBConfig.from_pretrained(ckpt_dir)
-
-        # 2) Remove model_path from kwargs if it exists to avoid conflict
-        kwargs.pop('model_path', None)
+        config = BBOBConfig.from_pretrained(ckpt_dir)
         
-        # 3) Re-instantiate the full model; the heavy base LM comes from HF Hub
-        obj: "BBOB" = cls(model_path=cfg.base_model_name, config=cfg, *model_args, **kwargs)
+        # 2) Check if we have a full model checkpoint or just projector
+        has_full_model = (
+            hasattr(config, 'language_model_path') and 
+            os.path.isdir(os.path.join(ckpt_dir, getattr(config, 'language_model_path', 'language_model')))
+        )
+        
+        if has_full_model:
+            # Loading full model from checkpoint
+            # Override config values with any provided kwargs
+            for key, value in kwargs.items():
+                if hasattr(config, key):
+                    setattr(config, key, value)
+            
+            # Create model with original base_model_name for component initialization
+            obj: "BBOB" = cls.__new__(cls)
+            obj.config = config
+            PreTrainedModel.__init__(obj, config)
+            
+            # Initialize components manually
+            obj._init_from_checkpoint(ckpt_dir, config)
+            
+        else:
+            # Legacy loading: projector-only, reconstruct from HF Hub
+            for key, value in kwargs.items():
+                if hasattr(config, key):
+                    setattr(config, key, value)
+            
+            obj: "BBOB" = cls(config=config)
+            
+            # Load projector weights
+            proj_rel = getattr(config, "projector_path", "projector.safetensors")
+            proj_path = os.path.join(ckpt_dir, proj_rel)
+            if os.path.isfile(proj_path):
+                obj.projector.load_state_dict(st.load_file(proj_path, device=obj.projector.device))
 
-        # 4) Projector weights
-        proj_rel = getattr(cfg, "projector_path", "projector.safetensors")
-        proj_path = os.path.join(ckpt_dir, proj_rel)
-        if os.path.isfile(proj_path):
-            obj.projector.load_state_dict(st.load_file(proj_path, device=obj.projector.device))
-
-        # 5) Vision tower (optional)
-        vt_dir = os.path.join(ckpt_dir, "vision_tower")
-        if os.path.isdir(vt_dir):
-            try:
-                obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
-            except Exception:
-                sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj.vision_tower.device)
-                obj.vision_tower.model.load_state_dict(sd)
+            # Load vision tower if available
+            vt_dir = os.path.join(ckpt_dir, "vision_tower")
+            if os.path.isdir(vt_dir):
+                try:
+                    obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
+                except Exception:
+                    sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj.vision_tower.device)
+                    obj.vision_tower.model.load_state_dict(sd)
 
         return obj
+    
+    def _init_from_checkpoint(self, ckpt_dir: str, config: BBOBConfig):
+        """Initialize model components from a full checkpoint."""
         
-        
-        
-        
-        
+        # Process bnb_config
+        bnb_config = config.bnb_config
+        if bnb_config == "8bit":
+            bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+        elif bnb_config == "4bit":
+            bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
+        elif bnb_config == "bf16":
+            bnb_config = BitsAndBytesConfig(load_in_bf16=True)
+        elif bnb_config == "fp16":
+            bnb_config = BitsAndBytesConfig(load_in_fp16=True)
+        elif isinstance(bnb_config, dict):
+            bnb_config = BitsAndBytesConfig(**bnb_config)
+        else:
+            bnb_config = None
+
+        # Load language model from checkpoint
+        lm_dir = os.path.join(ckpt_dir, getattr(config, 'language_model_path', 'language_model'))
+        self.language_model = transformers.AutoModelForCausalLM.from_pretrained(
+            lm_dir,
+            max_memory=config.max_memory,
+            quantization_config=bnb_config,
+            device_map="auto" if config.max_memory is not None else None,
+            torch_dtype="auto",
+        )
+
+        base_model_dtype = next(self.language_model.parameters()).dtype
+        base_model_device = next(self.language_model.parameters()).device
+        self._dtype = base_model_dtype
+        self._device = base_model_device
+
+        # Load tokenizer
+        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(lm_dir, torch_dtype=base_model_dtype)
+        emb_layer = self._find_input_embedding(self.language_model)
+        self._embedding_layer = emb_layer
+
+        # Load vision tower
+        vt_dir = os.path.join(ckpt_dir, getattr(config, 'vision_tower_path', 'vision_tower'))
+        if os.path.isdir(vt_dir):
+            # Load from checkpoint
+            from transformers import AutoModel, AutoImageProcessor
+            try:
+                vision_model = AutoModel.from_pretrained(vt_dir, torch_dtype=base_model_dtype)
+                image_processor = AutoImageProcessor.from_pretrained(vt_dir)
+                self.vision_tower = VisionTower(model=vision_model, image_processor=image_processor, dtype=self._dtype, device=self._device)
+            except Exception:
+                # Fallback: initialize new and load state dict
+                self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
+                sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=self._device)
+                self.vision_tower.model.load_state_dict(sd)
+        else:
+            # Initialize new vision tower
+            self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
+
+        self.image_processor = self.vision_tower.image_processor
+        self.vision_encoder = self.vision_tower.model
+
+        # Initialize projector
+        vision_hidden_size = self.vision_tower.hidden_size
+        text_hidden_size = emb_layer.weight.shape[1]
+        self.projector = Projector(vision_hidden_size, text_hidden_size, dtype=base_model_dtype, device=base_model_device)
+
+        # Load projector weights
+        proj_path = os.path.join(ckpt_dir, getattr(config, "projector_path", "projector.safetensors"))
+        if os.path.isfile(proj_path):
+            self.projector.load_state_dict(st.load_file(proj_path, device=self.projector.device))
+
+        # Set base model prefix
+        self.base_model_prefix = "language_model"
