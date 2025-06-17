@@ -356,31 +356,34 @@ class BBOB(PreTrainedModel):
             self.vision_tower.model.save_pretrained(vt_dir)
 
     @classmethod
-    def from_pretrained(cls, ckpt_dir: str, *model_args, **kwargs):
-        """Rebuild a BBOB instance from a lightweight checkpoint saved above."""
+def from_pretrained(cls, ckpt_dir: str, *model_args, **kwargs):
+    """Rebuild a BBOB instance from a lightweight checkpoint saved above."""
 
-        # 1) Load BBOBConfig first
-        cfg = BBOBConfig.from_pretrained(ckpt_dir)
+    # 1) Load BBOBConfig first
+    cfg = BBOBConfig.from_pretrained(ckpt_dir)
 
-        # 2) Re-instantiate the full model; the heavy base LM comes from HF Hub
-        obj: "BBOB" = cls(model_path=cfg.base_model_name, config=cfg, *model_args, **kwargs)
+    # 2) Remove model_path from kwargs if it exists to avoid conflict
+    kwargs.pop('model_path', None)
+    
+    # 3) Re-instantiate the full model; the heavy base LM comes from HF Hub
+    obj: "BBOB" = cls(model_path=cfg.base_model_name, config=cfg, *model_args, **kwargs)
 
-        # 3) Projector weights
-        proj_rel = getattr(cfg, "projector_path", "projector.safetensors")
-        proj_path = os.path.join(ckpt_dir, proj_rel)
-        if os.path.isfile(proj_path):
-            obj.projector.load_state_dict(st.load_file(proj_path, device=obj.projector.device))
+    # 4) Projector weights
+    proj_rel = getattr(cfg, "projector_path", "projector.safetensors")
+    proj_path = os.path.join(ckpt_dir, proj_rel)
+    if os.path.isfile(proj_path):
+        obj.projector.load_state_dict(st.load_file(proj_path, device=obj.projector.device))
 
-        # 4) Vision tower (optional)
-        vt_dir = os.path.join(ckpt_dir, "vision_tower")
-        if os.path.isdir(vt_dir):
-            try:
-                obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
-            except Exception:
-                sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj.vision_tower.device)
-                obj.vision_tower.model.load_state_dict(sd)
+    # 5) Vision tower (optional)
+    vt_dir = os.path.join(ckpt_dir, "vision_tower")
+    if os.path.isdir(vt_dir):
+        try:
+            obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
+        except Exception:
+            sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj.vision_tower.device)
+            obj.vision_tower.model.load_state_dict(sd)
 
-        return obj
+    return obj
         
         
         
