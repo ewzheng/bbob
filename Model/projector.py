@@ -163,6 +163,7 @@ class Projector(nn.Module):
     
     ''' Saving methods, here if needed '''
 
+    @classmethod
     def from_pretrained(cls, model_path, indim, outdim, dtype, device):
         """Load projector weights from a *.safetensors* or legacy *.pt* file.
 
@@ -181,12 +182,15 @@ class Projector(nn.Module):
 
         try:
             if model_path.endswith(".safetensors"):
-                state_dict = load_file(model_path, device=device)
+                # Always load safetensors to CPU first for compatibility
+                state_dict = load_file(model_path)
             else:
                 # Fallback – legacy checkpoints saved with torch.save
-                state_dict = torch.load(model_path, map_location=device)
-
+                state_dict = torch.load(model_path, map_location="cpu")
+            
+            # Load state dict and let PyTorch handle device placement
             projector.load_state_dict(state_dict)
+            
         except Exception as e:
             raise RuntimeError(f"Failed to load projector weights from '{model_path}': {e}")
 
