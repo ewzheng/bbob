@@ -32,7 +32,7 @@ def train(
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
 ):
-    """End-to-end fine-tuning of the whole BBOB model with composite loss."""
+    """End-to-end training of the whole BBOB model with composite loss."""
 
     # Unfreeze everything
     try:
@@ -81,7 +81,23 @@ def train(
         tokenizer.pad_token = tokenizer.eos_token
     clean_tokenizer_config(tokenizer)
 
-    logger.info(model_size_breakdown(model))
+    # ------------------------------------------------------------------
+    # Add <detection> tokens so the language model can emit them
+    # ------------------------------------------------------------------
+
+    special = {
+        "additional_special_tokens": ["<detection>", "</detection>"]
+    }
+    num_added = tokenizer.add_special_tokens(special)
+    if num_added > 0:
+        logger.info(f"Added {num_added} special tokens to tokenizer – resizing model embeddings")
+        try:
+            model.base_model.resize_token_embeddings(len(tokenizer))
+        except AttributeError:
+            # Fallback for different attribute names
+            model.resize_token_embeddings(len(tokenizer))
+
+    logger.info("Preparing dataset …")
 
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
 
@@ -133,7 +149,7 @@ def main():
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
         dtype=model.dtype,
-        on_the_fly=True,
+        on_the_fly=False,
     )
 
     train(
