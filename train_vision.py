@@ -140,7 +140,7 @@ def main():
     logger = get_logger(args.output_dir, "vision_training.log")
 
     logger.info(f"Loading model from {args.model}")
-    model = build_BBOB(args.model, args.bnb_config)
+    model = build_BBOB(args.model, args.bnb_config, load=True)
 
     logger.info("Preparing dataset …")
     train_ds, val_ds = load_and_prepare_dataset(
