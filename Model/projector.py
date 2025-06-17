@@ -35,7 +35,7 @@ class Projector(nn.Module):
         '''
         super().__init__()
         # two layer MLP: visiondim > textdim, GELU activation
-        self._hidden_dim = max(indim, outdim*2)
+        self._hiddendim = max(indim, outdim*2)
         self.net = nn.Sequential(
             nn.Linear(indim, self._hiddendim, dtype=dtype),
             nn.GELU(),
@@ -89,7 +89,7 @@ class Projector(nn.Module):
     
     @property
     def hiddendim(self):
-        return self._hidden_dim
+        return self._hiddendim
 
     def freeze(self):
         """
