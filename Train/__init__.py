@@ -12,7 +12,7 @@ from .train_common import (
     make_collate_fn
 )
 
-from train_augments import apply_weather_augmentations, apply_camera_augmentations
+from .train_augments import apply_weather_augmentations, apply_camera_augmentations
 
 __all__ = [
     "jitter_bboxes",
