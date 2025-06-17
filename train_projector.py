@@ -1,8 +1,7 @@
 '''
 File: train_projector.py
 Author: Elias Zheng and Claude
-Description: Train only the **projector** of the refactored BBOB model. The
-vision tower is instantiated internally, so no external path is required.
+Description: Train only the projector. Everything else is frozen.
 Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs> -i <instruction_text>
 '''
 
@@ -300,11 +299,16 @@ def main():
     parser.add_argument("--warmup_ratio", type=float, default=0.2, help="Warmup ratio for scheduler (default: 0.2)")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step (default: 1)")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of CPU workers for DataLoader preprocessing (default: 4)")
+    parser.add_argument("--output_dir", type=str, default=None, help="Name of output directory")
     args = parser.parse_args()
     
     # create output directory 
-    current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    output_dir = f"Output/{current_datetime}"
+    if args.output_dir is None:
+        current_datetime = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        output_dir = f"Output/{current_datetime}"
+    else:
+        output_dir = args.output_dir
+        
     os.makedirs(output_dir, exist_ok=True)
 
     # logging
