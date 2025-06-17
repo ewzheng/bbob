@@ -4,9 +4,9 @@ Author: Elias Zheng and Claude
 Description: This script contains the projector class.
 '''
 
-import torch 
+import torch
 import torch.nn as nn
-from safetensors.torch import save_file
+from safetensors.torch import save_file, load_file
 
 class Projector(nn.Module):
     '''
@@ -35,11 +35,21 @@ class Projector(nn.Module):
         '''
         super().__init__()
         # two layer MLP: visiondim > textdim, GELU activation
+        self._hidden_dim = max(indim, outdim*2)
         self.net = nn.Sequential(
-            nn.Linear(indim, outdim, dtype=dtype),
+            nn.Linear(indim, self._hidden_dim, dtype=dtype),
             nn.GELU(),
-            nn.Linear(outdim, outdim, dtype=dtype)
+            nn.Linear(self._hidden_dim, outdim, dtype=dtype),
+            nn.GELU(),
+            nn.Linear(outdim, outdim, dtype=dtype),
+            nn.LayerNorm(outdim, dtype=dtype),  # internal LN keeps deep path stable
         )
+
+        # skip connection (1×1 projection) – bias not needed due to subsequent LN
+        self.skip = nn.Linear(indim, outdim, bias=False, dtype=dtype)
+
+        # final normalisation applied *after* deep+skip fusion
+        self.norm_out = nn.LayerNorm(outdim, eps=1e-5, dtype=dtype)
 
         # learnable row and column embeddings
         max_h = 32  # maximum grid height supported
@@ -54,7 +64,10 @@ class Projector(nn.Module):
         self._dtype = dtype
         self._device = torch.device(device)
 
+        # move sub-modules to target device
         self.net.to(self._device)
+        self.skip.to(self._device)
+        self.norm_out.to(self._device)
 
     '''
     Utils, getters, and setters
@@ -118,8 +131,14 @@ class Projector(nn.Module):
         # Flatten for projection: (B, C, H, W) > (B, H*W, C)
         vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
 
-        # Project to text space first
-        projected = self.net(vision_in)  # (B, H*W, outdim)
+        # Project to text space first (deep path)
+        projected = self.net(vision_in)              # (B, N, D)
+
+        # Residual skip path
+        skip_out = self.skip(vision_in)              # (B, N, D)
+
+        # Fuse and re-normalise to align statistics
+        fused = self.norm_out(projected + skip_out)  # (B, N, D)
 
         # Add spatial embeddings back after projection to restore spatial information
         pos = (
@@ -129,18 +148,37 @@ class Projector(nn.Module):
         pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, outdim)
 
         # add spatial features after projection
-        return projected + pos
+        return fused + pos
     
     ''' Saving methods, here if needed '''
 
-    @classmethod
     def from_pretrained(cls, model_path, indim, outdim, dtype, device):
-        '''
-        load weights from a saved safetensor / pt file.
-        '''
+        """Load projector weights from a *.safetensors* or legacy *.pt* file.
+
+        Parameters
+        ----------
+        model_path : str
+            Path to the checkpoint file.
+        indim, outdim : int
+            Dimension parameters (must match those used during training).
+        dtype : torch.dtype
+        device : str | torch.device
+            Target device for the loaded projector.
+        """
+
         projector = cls(indim, outdim, dtype, device)
-        projector.load_state_dict(torch.load(model_path, map_location=device))
-    
+
+        try:
+            if model_path.endswith(".safetensors"):
+                state_dict = load_file(model_path, device=device)
+            else:
+                # Fallback – legacy checkpoints saved with torch.save
+                state_dict = torch.load(model_path, map_location=device)
+
+            projector.load_state_dict(state_dict)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load projector weights from '{model_path}': {e}")
+
         return projector
     
     def save_pretrained(self, path):
