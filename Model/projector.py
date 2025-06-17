@@ -37,12 +37,11 @@ class Projector(nn.Module):
         # two layer MLP: visiondim > textdim, GELU activation
         self._hidden_dim = max(indim, outdim*2)
         self.net = nn.Sequential(
-            nn.Linear(indim, self._hidden_dim, dtype=dtype),
+            nn.Linear(indim, self._hiddendim, dtype=dtype),
             nn.GELU(),
-            nn.Linear(self._hidden_dim, outdim, dtype=dtype),
+            nn.Linear(self._hiddendim, outdim, dtype=dtype),
             nn.GELU(),
             nn.Linear(outdim, outdim, dtype=dtype),
-            nn.LayerNorm(outdim, dtype=dtype),  # internal LN keeps deep path stable
         )
 
         # skip connection (1×1 projection) – bias not needed due to subsequent LN
@@ -87,12 +86,20 @@ class Projector(nn.Module):
     @property
     def outdim(self):
         return self._outdim
+    
+    @property
+    def hiddendim(self):
+        return self._hidden_dim
 
     def freeze(self):
         """
         Freeze all projector parameters to prevent training
         """
         for p in self.net.parameters():
+            p.requires_grad = False
+        for p in self.skip.parameters():
+            p.requires_grad = False
+        for p in self.norm_out.parameters():
             p.requires_grad = False
         self.row_embedding.requires_grad = False
         self.col_embedding.requires_grad = False
@@ -102,6 +109,10 @@ class Projector(nn.Module):
         Unfreeze all projector parameters to enable training
         """
         for p in self.net.parameters():
+            p.requires_grad = True
+        for p in self.skip.parameters():
+            p.requires_grad = True
+        for p in self.norm_out.parameters():
             p.requires_grad = True
         self.row_embedding.requires_grad = True
         self.col_embedding.requires_grad = True
@@ -137,7 +148,7 @@ class Projector(nn.Module):
         # Residual skip path
         skip_out = self.skip(vision_in)              # (B, N, D)
 
-        # Fuse and re-normalise to align statistics
+        # Fuse
         fused = self.norm_out(projected + skip_out)  # (B, N, D)
 
         # Add spatial embeddings back after projection to restore spatial information
