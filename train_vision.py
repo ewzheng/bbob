@@ -111,7 +111,7 @@ def train(
         data_collator=collate_fn,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
-        compute_loss=compute_loss_fn,
+        compute_loss_func=compute_loss_fn,
     )
 
     logger.info("Starting end-to-end training …")
