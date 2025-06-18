@@ -37,9 +37,9 @@ class Augments:
     def _compile_transforms(self):
         """Pre-compile all transform combinations for different intensities."""
         intensity_params = {
-            "light": {"prob": 0.3, "strength": 1},
-            "medium": {"prob": 0.5, "strength": 1.25}, 
-            "heavy": {"prob": 0.7, "strength": 2}
+            "light": {"prob": 0.3, "strength": 0.3},
+            "medium": {"prob": 0.5, "strength": 0.5}, 
+            "heavy": {"prob": 0.7, "strength": 0.7}
         }
         
         for intensity, params in intensity_params.items():
