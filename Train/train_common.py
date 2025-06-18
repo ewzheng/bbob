@@ -55,7 +55,7 @@ def jitter_bboxes(bboxes, img_width, img_height, dtype, jitter_ratio=DEFAULT_BBO
         Jittered bboxes (same shape/type as input, COCO format)
     """
     if isinstance(bboxes, torch.Tensor):
-        bboxes = bboxes.clone().detach().cpu().numpy()
+        bboxes = bboxes.clone().detach().float().cpu().numpy()
     bboxes_jittered = []
     
     for box in bboxes:
@@ -97,7 +97,7 @@ def normalize_coco_bboxes(bboxes, img_width, img_height, dtype):
         Normalized bboxes (same shape/type as input)
     """
     if isinstance(bboxes, torch.Tensor):
-        bboxes = bboxes.clone().detach().cpu().numpy()
+        bboxes = bboxes.clone().detach().float().cpu().numpy()
     bboxes_norm = []
     for box in bboxes:
         x, y, w, h = box
@@ -157,7 +157,7 @@ def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.flo
     """
 
     if isinstance(bboxes, torch.Tensor):
-        bboxes = bboxes.clone().detach().cpu().numpy()
+        bboxes = bboxes.clone().detach().float().cpu().numpy()
 
     ratio = target / min(orig_w, orig_h)
     resized_w, resized_h = orig_w * ratio, orig_h * ratio

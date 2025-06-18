@@ -90,7 +90,8 @@ def _match_boxes_hungarian(pred, gt):
         gt.unsqueeze(0).expand(pred.shape[0], -1, 4).reshape(-1, 4),
     ).view(pred.shape[0], gt.shape[0])
 
-    cost = (1.0 - iou_mat).cpu().numpy()
+    # numpy does not understand torch.bfloat16.  Cast to float32 on CPU first.
+    cost = (1.0 - iou_mat).float().cpu().numpy()
     row_ind, col_ind = linear_sum_assignment(cost)
     return [(int(r), int(c)) for r, c in zip(row_ind, col_ind) if iou_mat[r, c] > 0]
 
