@@ -381,7 +381,7 @@ class CompositeLoss:
                     "loss_count": count_loss.item(),
                     "det_weight": adaptive_lambda_detection.item(),
                     "gt_match_rate": match_rate,
-                }
+                }, 'CURRICULUM STATUS:', self.get_curriculum_status()
             )
 
         return total_loss

@@ -310,7 +310,13 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
         result["target_labels"] = []
         for aug_idx, orig_idx in enumerate(sample_replication):
             sample = batch["objects"][orig_idx]
-            bboxes = sample["bbox"]
+
+            # Fetch a *fresh* copy of the ground-truth boxes so that each
+            # augmented view starts from the same coordinates before its own
+            # random jitter.  This prevents the accumulated displacement that
+            # would occur if we re-used already-jittered boxes.
+
+            bboxes = torch.as_tensor(sample["bbox"], dtype=dtype).clone()
 
             # 1) optional jitter in *original* image space
             if training:
