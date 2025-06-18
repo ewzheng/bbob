@@ -5,26 +5,28 @@ import torch
 import torch.nn.functional as F
 
 from transformers import TrainerCallback
+from Train.loss_common import _parse_boxes, _iou_xywh
 
-def create_metrics_functions():
+def create_metrics_functions(tokenizer):
     """
-    Factory function that creates compute_metrics and preprocess_logits_for_metrics
-    with shared state for accumulating metrics across batches.
-    
-    This uses closures to avoid global variables while still allowing the two functions
-    to share state. Call this once in your train() function to get both functions.
-    
-    Args:
-        model: The model instance to access stored embeddings
-    
-    Returns:
-        tuple: (compute_metrics_func, preprocess_logits_for_metrics_func)
+    Factory that returns `(compute_metrics, preprocess_logits_for_metrics)` with **shared**
+    state.  Added basic detection metrics (parse-rate, mean IoU) on top of the existing
+    language-model metrics.
+
+    Parameters
+    ----------
+    tokenizer : transformers.PreTrainedTokenizerBase
+        Needed to decode label sequences for GT box extraction and to feed `_parse_boxes`.
     """
     # Local lists to accumulate metrics (avoiding global variables)
     token_accuracies = []
     top3_accuracies = []
     top5_accuracies = []
-    # -- new scalar accumulators -------------------------------------------------
+    # -- detection accumulators --------------------------------------------------
+    det_parse_rates = []   # fraction of boxes that can be parsed per batch
+    det_iou_vals    = []   # IoU of matched boxes per batch
+
+    # -- existing scalar accumulators -------------------------------------------
     seq_correct_total = 0      # number of sequences predicted fully-correct
     seq_total         = 0      # total number of sequences evaluated
 
@@ -39,6 +41,7 @@ def create_metrics_functions():
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
         nonlocal pred_target_sim_sum, pred_target_sim_count
+        nonlocal det_parse_rates, det_iou_vals
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
@@ -91,6 +94,53 @@ def create_metrics_functions():
                     except Exception as e:
                         print(f"Error calculating prediction-target similarity: {e}")                        
             
+            # ------------------------------------------------------------------
+            # Detection metrics (parsing rate + IoU)
+            # ------------------------------------------------------------------
+
+            try:
+                # Predicted strings -> boxes
+                pred_boxes_batch = _parse_boxes(logits, tokenizer)
+
+                # Ground-truth boxes from label text
+                gt_texts = []
+                for row in labels:
+                    valid_ids = row[row != -100].tolist()
+                    gt_texts.append(tokenizer.decode(valid_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True))
+
+                import re, torch
+                gt_boxes_batch = []
+                for txt in gt_texts:
+                    boxes = []
+                    for det in re.findall(r"<bbob>(.*?)</bbob>", txt):
+                        parts = det.split(":")
+                        if len(parts) == 2:
+                            try:
+                                nums = [float(x) for x in parts[1].strip().split()][:4]
+                                if len(nums) == 4:
+                                    boxes.append(nums)
+                            except ValueError:
+                                pass
+                    gt_boxes_batch.append(torch.tensor(boxes))
+
+                # compute parse rate and IoU
+                total_preds = sum(len(b) for b in pred_boxes_batch)
+                valid_preds = sum(len(b) for b in pred_boxes_batch)  # already filtered by _parse_boxes
+                parse_rate = valid_preds / total_preds if total_preds else 0.0
+                det_parse_rates.append(parse_rate)
+
+                # simple IoU over first-K matching (same as loss)
+                ious = []
+                for p, g in zip(pred_boxes_batch, gt_boxes_batch):
+                    if p.numel() == 0 or g.numel() == 0:
+                        continue
+                    K = min(p.shape[0], g.shape[0])
+                    ious.append(_iou_xywh(p[:K], g[:K]).mean().item())
+                if ious:
+                    det_iou_vals.append(sum(ious) / len(ious))
+            except Exception as e:
+                print(f"Detection metric error: {e}")
+
             # Return only predictions and labels (much smaller than full logits)
             return pred_ids, labels
             
@@ -108,6 +158,7 @@ def create_metrics_functions():
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
         nonlocal pred_target_sim_sum, pred_target_sim_count
+        nonlocal det_parse_rates, det_iou_vals
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
@@ -125,6 +176,8 @@ def create_metrics_functions():
         mean_top5_accuracy = sum(top5_accuracies) / len(top5_accuracies) if top5_accuracies else 0.0
         mean_sequence_accuracy = seq_correct_total / seq_total if seq_total else 0.0
         mean_prediction_target_similarity = pred_target_sim_sum / pred_target_sim_count if pred_target_sim_count else 0.0
+        mean_det_parse_rate = sum(det_parse_rates) / len(det_parse_rates) if det_parse_rates else 0.0
+        mean_det_iou        = sum(det_iou_vals)   / len(det_iou_vals)   if det_iou_vals   else 0.0
      
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
@@ -134,6 +187,8 @@ def create_metrics_functions():
         seq_total         = 0
         pred_target_sim_sum   = 0.0
         pred_target_sim_count = 0
+        det_parse_rates.clear()
+        det_iou_vals.clear()
         
         return {
             "exact_token_accuracy": mean_token_accuracy,
@@ -141,6 +196,8 @@ def create_metrics_functions():
             "top5_token_accuracy": mean_top5_accuracy,
             "sequence_accuracy": mean_sequence_accuracy,
             "prediction_target_similarity": mean_prediction_target_similarity,
+            "detection_parse_rate": mean_det_parse_rate,
+            "detection_mean_iou":   mean_det_iou,
         }
     
     return compute_metrics_impl, preprocess_logits_for_metrics_impl
