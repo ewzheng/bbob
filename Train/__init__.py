@@ -9,8 +9,9 @@ from .train_common import (
     calculate_optimal_batch_size,
     load_labels_from_yaml,
     clean_tokenizer_config,
-    make_collate_fn
 )
+
+from .train_collate import make_collate_fn
 
 from .train_augments import apply_batch_augmentations, apply_weather_augmentations, apply_camera_augmentations
 
