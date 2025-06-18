@@ -58,18 +58,15 @@ class Augments:
                 "snow": A.Compose([
                     A.RandomSnow(
                         brightness_coeff=2.5,
-                        snow_point_lower=0.1,
-                        snow_point_upper=0.3 * strength,
+                        snow_point_range=(0.1, 0.3 * strength),
                         p=1.0,
                     )
                 ]),
                 "sunflare": A.Compose([
                     A.RandomSunFlare(
                         flare_roi=(0, 0, 1, 0.5),
-                        angle_lower=0,
-                        angle_upper=1,
-                        num_flare_circles_lower=6,
-                        num_flare_circles_upper=10,
+                        angle_range=(0.0, 1.0),
+                        num_flare_circles_range=(6, 10),
                         src_radius=160,
                         src_color=(255, 255, 255),
                         p=1.0,
@@ -77,8 +74,7 @@ class Augments:
                 ]),
                 "fog": A.Compose([
                     A.RandomFog(
-                        fog_coef_lower=0.3 * strength,
-                        fog_coef_upper=0.7 * strength,
+                        fog_coef_range=(0.3 * strength, 0.7 * strength),
                         alpha_coef=0.08,
                         p=1.0,
                     )
@@ -86,8 +82,7 @@ class Augments:
                 "shadow": A.Compose([
                     A.RandomShadow(
                         shadow_roi=(0, 0, 1, 1),
-                        num_shadows_lower=2,
-                        num_shadows_upper=int(4 * strength) + 2,
+                        num_shadows_limit=(2, int(4 * strength) + 2),
                         shadow_dimension=int(6 * strength) + 4,
                         p=1.0,
                     )
@@ -102,14 +97,27 @@ class Augments:
             }[intensity]
             
             self._camera_transforms[intensity] = {
-                "motion_blur": A.Compose([A.MotionBlur(blur_limit=blur_limit, allow_shifted=True, p=1.0)]),
-                "blur": A.Compose([A.Blur(blur_limit=int(blur_limit * 0.7), p=1.0)]),
-                "defocus": A.Compose([A.Defocus(radius=(1, int(blur_limit * 0.8)), alias_blur=(0.1, 0.3), p=1.0)]),
+                "motion_blur": A.Compose([
+                    A.MotionBlur(blur_limit=(3, blur_limit), p=1.0)
+                ]),
+                "blur": A.Compose([
+                    A.Blur(blur_limit=(3, blur_limit), p=1.0)
+                ]),
+                "defocus": A.Compose([
+                    A.Defocus(radius=(1, max(1, int(blur_limit * 0.8))), alias_blur=(0.1, 0.3), p=1.0)
+                ]),
                 "optical_distortion": A.Compose([
-                    A.OpticalDistortion(distort_limit=0.05 * strength, shift_limit=0.02 * strength, p=1.0)
+                    A.OpticalDistortion(distort_limit=0.05 * strength, p=1.0)
                 ]),
                 "grid_distortion": A.Compose([A.GridDistortion(num_steps=5, distort_limit=0.1 * strength, p=1.0)]),
-                "gauss_noise": A.Compose([A.GaussNoise(var_limit=(2, int(8 * strength)), mean=0, per_channel=True, p=1.0)]),
+                "gauss_noise": A.Compose([
+                    A.GaussNoise(
+                        std_range=(0.02 * strength, 0.08 * strength),
+                        mean_range=(0.0, 0.0),
+                        per_channel=True,
+                        p=1.0,
+                    )
+                ]),
                 "iso_noise": A.Compose([
                     A.ISONoise(
                         color_shift=(0.01 * strength, 0.03 * strength),
