@@ -683,7 +683,7 @@ def calculate_optimal_batch_size(
     print(f"  Total RAM:        {total_ram/1024**3:.1f} GB")
     print(f"  Available RAM:    {available_ram/1024**3:.1f} GB")
 
-    cpu_bs_mem = int(available_ram * (1 - safety_margin) / CPU_MEMORY_PER_SAMPLE) // workers // 2
+    cpu_bs_mem = int(available_ram * (1 - safety_margin) / CPU_MEMORY_PER_SAMPLE) // workers // 4
 
     cpu_batch_size = min(cpu_bs_mem, max_batch_size)
     if cpu_batch_size >= 2:
