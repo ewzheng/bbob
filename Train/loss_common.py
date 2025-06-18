@@ -369,6 +369,7 @@ class CompositeLoss:
                 "loss_lm": _val(lm_loss),
                 "loss_l1": _val(l1_loss),
                 "loss_iou": _val(iou_loss),
+                "mean_iou": 1.0 - _val(iou_loss) if _val(iou_loss) > 0 else 0.0,
                 "loss_count": _val(count_loss),
                 "det_weight": _val(adaptive_lambda_detection),
                 "gt_match_rate": match_rate,

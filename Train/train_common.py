@@ -852,6 +852,7 @@ def make_collate_fn(pad_token_id: int, tokenizer):
             # -------------------------------------------------------------
             # Ensure combined text length stays within positional budget
             # -------------------------------------------------------------
+
             max_txt_len = tokenizer.model_max_length - VIS_TOKENS
 
             if instr_ids.size(0) > max_txt_len:
@@ -864,12 +865,39 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 if tgt_ids.size(0) > remaining:
                     tgt_ids = tgt_ids[:remaining]
 
-            # concatenate instruction + (possibly truncated) target ⇒ model input (text only)
-            ids = torch.cat([instr_ids, tgt_ids], dim=0)
+            # -------------------------------------------------------------
+            # HIDE TARGET TEXT FROM THE MODEL INPUTS
+            # -------------------------------------------------------------
+            # We replace every target token with a *placeholder* so that the
+            # model cannot peek at the ground-truth detection/caption text.
+            # The labels, however, still contain the original target ids so
+            # that the LM loss can be computed in the usual causal manner.
+            #
+            #  * We pick a placeholder that is DIFFERENT from the pad token
+            #    otherwise the simple mask `(input_ids != pad_id)` would mask
+            #    out these positions entirely.  Prefer <eos>, fall back to
+            #    <unk>, finally to `pad_id` if nothing else is available.
+            # -------------------------------------------------------------
 
-            # build labels: prepend placeholders for visual tokens (64) and mask instruction
+            placeholder_id = (
+                tokenizer.eos_token_id
+                if (hasattr(tokenizer, "eos_token_id") and tokenizer.eos_token_id is not None and tokenizer.eos_token_id != pad_token_id)
+                else (
+                    tokenizer.unk_token_id
+                    if (hasattr(tokenizer, "unk_token_id") and tokenizer.unk_token_id is not None and tokenizer.unk_token_id != pad_token_id)
+                    else pad_token_id
+                )
+            )
+
+            placeholder_ids = torch.full((tgt_ids.size(0),), placeholder_id, dtype=torch.long)
+
+            # Model INPUT = instruction + placeholders (no ground-truth text)
+            ids = torch.cat([instr_ids, placeholder_ids], dim=0)
+
+            # LABELS  = visual-ignore + (instruction masked) + real targets
             visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
-            lbl = torch.cat([visual_ignore, ids.clone()])
+            lbl_text = torch.cat([instr_ids.clone(), tgt_ids.clone()], dim=0)
+            lbl = torch.cat([visual_ignore, lbl_text])
             lbl[: VIS_TOKENS + instr_ids.size(0)] = -100  # ignore vision + instruction
 
             merged_input_ids.append(ids)
