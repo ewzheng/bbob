@@ -246,7 +246,12 @@ def apply_camera_augmentations(
                 ),
                 (
                     "gauss_noise",
-                    A.GaussNoise(std_range=(2, int(8 * strength)), mean_range=(0, 0), per_channel=True, p=1.0),
+                    A.GaussNoise(
+                        std_range=(0.02 * strength, 0.08 * strength),  # Albumentations 2.x expects 0..1 floats
+                        mean_range=(0.0, 0.0),
+                        per_channel=True,
+                        p=1.0,
+                    ),
                 ),
                 (
                     "iso_noise",
