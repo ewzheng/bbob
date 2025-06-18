@@ -424,7 +424,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
     dataset = dataset.map(lambda x: x.update({"text": instruction}) or x)
     
     if max_workers is None:
-        max_workers = min(mp.cpu_count() - 1, 8)
+        max_workers = min(mp.cpu_count() - 1, 4)
     
     # determine optimal batch sizes ----------------------------------------------------
     gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=MEMORY_SAFETY_MARGIN)
