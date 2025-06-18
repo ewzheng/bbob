@@ -364,20 +364,17 @@ class CompositeLoss:
         # ------------------------------------------------------------------
 
         if self.logger is not None and (self.step_count % self._log_interval == 0):
-            self.logger.info(
-                "LOSS STATUS:",
-                {
-                    "loss_total": _val(total_loss),
-                    "loss_lm": _val(lm_loss),
-                    "loss_l1": _val(l1_loss),
-                    "loss_iou": _val(iou_loss),
-                    "loss_count": _val(count_loss),
-                    "det_weight": _val(adaptive_lambda_detection),
-                    "gt_match_rate": match_rate,
-                },
-                "CURRICULUM STATUS:",
-                self.get_curriculum_status(),
-            )
+            loss_dict = {
+                "loss_total": _val(total_loss),
+                "loss_lm": _val(lm_loss),
+                "loss_l1": _val(l1_loss),
+                "loss_iou": _val(iou_loss),
+                "loss_count": _val(count_loss),
+                "det_weight": _val(adaptive_lambda_detection),
+                "gt_match_rate": match_rate,
+            }
+            cur_dict = self.get_curriculum_status()
+            self.logger.info(f"LOSS STATUS: {loss_dict} | CURRICULUM STATUS: {cur_dict}")
 
         return total_loss
 
