@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import transformers
-from transformers import BitsAndBytesConfig
+from transformers import BitsAndBytesConfig, AutoModel, AutoImageProcessor
 import bitsandbytes as bnb
 import os
 from .projector import Projector
@@ -39,10 +39,7 @@ class BBOBConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
 
-        # Use placeholder values when none are provided – this allows
-        # `BBOBConfig()` to be instantiated with zero args, which
-        # Hugging-Face does internally when it compares against a default
-        # config during `save_pretrained()`.
+        # Default placeholder values when none provided (HF needs non-None)
         self.vision_hidden_size = vision_hidden_size if vision_hidden_size is not None else 1
         self.text_hidden_size   = text_hidden_size   if text_hidden_size   is not None else 1
         self.base_model_name    = base_model_name    if base_model_name    is not None else "unknown"
@@ -65,12 +62,7 @@ class BBOB(PreTrainedModel):
     config_class = BBOBConfig
 
     def __init__(self, config: BBOBConfig | None = None, **kwargs):
-        '''
-        constructor.
-
-        parameters:
-            - config (BBOBConfig|None): model configuration containing all parameters
-        '''
+        """Initialize model."""
 
         if config is None:
             # Create default config if none provided
@@ -103,8 +95,8 @@ class BBOB(PreTrainedModel):
         self._dtype = base_model_dtype
         self._device = base_model_device
 
-        # store tokenizer
-        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path, torch_dtype=base_model_dtype)
+        # store tokenizer (AutoTokenizer does not accept torch_dtype)
+        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(model_path)
         emb_layer = self._find_input_embedding(self.language_model)
         self._embedding_layer = emb_layer  # cache for forward()
         text_hidden_size = emb_layer.weight.shape[1]
@@ -248,12 +240,12 @@ class BBOB(PreTrainedModel):
         return visual_embeds
 
     def _embed_tokens(self, input_ids):
-        """Return input embeddings even if get_input_embeddings is not implemented."""
+        """Return embeddings for `input_ids`."""
         return self._embedding_layer(input_ids)
 
     @staticmethod
     def _find_input_embedding(model):
-        """Locate the token embedding layer without calling forward."""
+        """Locate token-embedding layer in the language model."""
         # 1) Official accessor
         if hasattr(model, "get_input_embeddings"):
             try:
@@ -373,7 +365,7 @@ class BBOB(PreTrainedModel):
 
     @classmethod
     def from_pretrained(cls, ckpt_dir: str, **kwargs):
-        """Rebuild a BBOB instance from a checkpoint."""
+        """Load model from `ckpt_dir`."""
 
         # 1) Load BBOBConfig first
         config = BBOBConfig.from_pretrained(ckpt_dir)
@@ -417,7 +409,7 @@ class BBOB(PreTrainedModel):
                 obj.projector = Projector.from_pretrained(
                     proj_path,
                     indim=obj.vision_tower.hidden_size,
-                    outdim=emb_layer.weight.shape[1] if hasattr(obj, '_embedding_layer') else obj.projector.outdim,
+                    outdim=obj._embedding_layer.weight.shape[1] if hasattr(obj, '_embedding_layer') else obj.projector.outdim,
                     dtype=obj._dtype,
                     device=obj._device,
                 )
@@ -426,15 +418,38 @@ class BBOB(PreTrainedModel):
             vt_dir = os.path.join(ckpt_dir, "vision_tower")
             if os.path.isdir(vt_dir):
                 try:
-                    obj.vision_tower.model = obj.vision_tower.model.from_pretrained(vt_dir, torch_dtype=obj.vision_tower.dtype)
-                except Exception:
-                    sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj.vision_tower.device)
-                    obj.vision_tower.model.load_state_dict(sd)
+                    vision_model = AutoModel.from_pretrained(vt_dir, torch_dtype=obj._dtype)
+                    image_processor = AutoImageProcessor.from_pretrained(vt_dir)
 
+                    # Initialise a fresh VisionTower then swap in loaded components
+                    obj.vision_tower = VisionTower(dtype=obj._dtype, device=obj._device)
+                    obj.vision_tower.model = vision_model
+                    obj.vision_tower.image_processor = image_processor
+
+                    # Recompute hidden size from the loaded model config
+                    cfg = vision_model.config
+                    if hasattr(cfg, "hidden_size") and cfg.hidden_size is not None:
+                        obj.vision_tower._hidden_size = cfg.hidden_size
+                    elif hasattr(cfg, "hidden_sizes") and len(cfg.hidden_sizes) > 0:
+                        obj.vision_tower._hidden_size = cfg.hidden_sizes[-1]
+                    elif hasattr(cfg, "neck_hidden_sizes") and len(cfg.neck_hidden_sizes) > 0:
+                        obj.vision_tower._hidden_size = cfg.neck_hidden_sizes[-1]
+
+                    # Refresh cached helper attributes to point to the new tower
+                    obj.image_processor = image_processor
+                    obj.vision_encoder = vision_model
+                except Exception:
+                    # Fallback: initialize new and load state dict
+                    obj.vision_tower = VisionTower(dtype=obj._dtype, device=obj._device)
+                    sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=obj._device)
+                    obj.vision_tower.model.load_state_dict(sd)
+                    # Refresh cached attributes in fallback path as well
+                    obj.image_processor = obj.vision_tower.image_processor
+                    obj.vision_encoder = obj.vision_tower.model
         return obj
     
     def _init_from_checkpoint(self, ckpt_dir: str, config: BBOBConfig):
-        """Initialize model components from a full checkpoint."""
+        """Internal helper to restore all components."""
         
         # Process bnb_config
         bnb_config = self._resolve_bnb_config(config.bnb_config)
@@ -454,25 +469,43 @@ class BBOB(PreTrainedModel):
         self._dtype = base_model_dtype
         self._device = base_model_device
 
-        # Load tokenizer
-        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(lm_dir, torch_dtype=base_model_dtype)
+        # Load tokenizer (torch_dtype not supported for tokenizer)
+        self.base_tokenizer = transformers.AutoTokenizer.from_pretrained(lm_dir)
         emb_layer = self._find_input_embedding(self.language_model)
         self._embedding_layer = emb_layer
 
         # Load vision tower
         vt_dir = os.path.join(ckpt_dir, getattr(config, 'vision_tower_path', 'vision_tower'))
         if os.path.isdir(vt_dir):
-            # Load from checkpoint
-            from transformers import AutoModel, AutoImageProcessor
             try:
-                vision_model = AutoModel.from_pretrained(vt_dir, torch_dtype=base_model_dtype)
+                vision_model = AutoModel.from_pretrained(vt_dir, torch_dtype=self._dtype)
                 image_processor = AutoImageProcessor.from_pretrained(vt_dir)
-                self.vision_tower = VisionTower(model=vision_model, image_processor=image_processor, dtype=self._dtype, device=self._device)
+
+                # Initialise a fresh VisionTower then swap in loaded components
+                self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
+                self.vision_tower.model = vision_model
+                self.vision_tower.image_processor = image_processor
+
+                # Recompute hidden size from the loaded model config
+                cfg = vision_model.config
+                if hasattr(cfg, "hidden_size") and cfg.hidden_size is not None:
+                    self.vision_tower._hidden_size = cfg.hidden_size
+                elif hasattr(cfg, "hidden_sizes") and len(cfg.hidden_sizes) > 0:
+                    self.vision_tower._hidden_size = cfg.hidden_sizes[-1]
+                elif hasattr(cfg, "neck_hidden_sizes") and len(cfg.neck_hidden_sizes) > 0:
+                    self.vision_tower._hidden_size = cfg.neck_hidden_sizes[-1]
+
+                # Refresh cached helper attributes to point to the new tower
+                self.image_processor = image_processor
+                self.vision_encoder = vision_model
             except Exception:
                 # Fallback: initialize new and load state dict
                 self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
                 sd = torch.load(os.path.join(vt_dir, "pytorch_model.bin"), map_location=self._device)
                 self.vision_tower.model.load_state_dict(sd)
+                # Refresh cached attributes in fallback path as well
+                self.image_processor = self.vision_tower.image_processor
+                self.vision_encoder = self.vision_tower.model
         else:
             # Initialize new vision tower
             self.vision_tower = VisionTower(dtype=self._dtype, device=self._device)
