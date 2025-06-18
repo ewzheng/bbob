@@ -30,7 +30,7 @@ import torch.nn.functional as F
 import psutil
 
 # Image augmentations
-from .train_augments import apply_weather_augmentations, apply_camera_augmentations, apply_batch_augmentations
+from .train_augments import apply_batch_augmentations
 
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
