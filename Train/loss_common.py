@@ -106,9 +106,19 @@ class CompositeLoss:
     to first K GT boxes).
     """
 
-    def __init__(self, tokenizer, lambda_l1=0.35, lambda_iou=0.5, lambda_count=0.1, lambda_detection=0.15,
-                 lm_target=1.5,
-                 smoothing_factor=0.9):
+    def __init__(
+        self,
+        tokenizer,
+        *,
+        lambda_l1=0.35,
+        lambda_iou=0.5,
+        lambda_count=0.1,
+        lambda_detection=0.15,
+        lm_target=1.5,
+        smoothing_factor=0.9,
+        logger=None,
+        log_interval: int = 100,
+    ):
         self.tokenizer = tokenizer
         self.lambda_l1 = lambda_l1
         self.lambda_iou = lambda_iou
@@ -118,12 +128,16 @@ class CompositeLoss:
         # Curriculum parameters
         self.lm_target = lm_target
         self.min_detection_weight = lambda_detection/64
-        self.max_detection_weight = lambda_detection*8
+        self.max_detection_weight = lambda_detection*64
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
         self.lm_loss_ema = None  # Exponential moving average of LM loss
         self.step_count = 0
+
+        # Optional external logger
+        self.logger = logger
+        self._log_interval = max(1, log_interval)
 
     def _parse_detection_string(self, det_str):
         """Parse a detection string like 'cat:0.1 0.2 0.3 0.4' into box coordinates."""
@@ -192,9 +206,10 @@ class CompositeLoss:
         return self.min_detection_weight + progress * (self.max_detection_weight - self.min_detection_weight)
 
     def compute_detection_loss(self, lm_logits, target_boxes):
-        """Compute detection losses (L1 + IoU + count penalty) from parsed model outputs."""
+        """Compute detection losses (L1 + IoU + count penalty) and GT-match rate."""
         if target_boxes is None:
-            return torch.tensor(0.0, device=lm_logits.device), torch.tensor(0.0, device=lm_logits.device), torch.tensor(0.0, device=lm_logits.device)
+            zeros = torch.tensor(0.0, device=lm_logits.device)
+            return zeros, zeros, zeros, 0.0
 
         # Parse predicted boxes from language model output
         parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
@@ -216,6 +231,8 @@ class CompositeLoss:
         l1_vals = []
         iou_vals = []
         count_vals = []
+        
+        matched_gt, total_gt = 0, 0
         
         for pred, gt in zip(batch_preds, target_boxes):
             # Convert gt to tensor if it's a list
@@ -252,12 +269,19 @@ class CompositeLoss:
             l1_vals.append(F.l1_loss(p_matched, g_matched, reduction="mean"))
             iou_vals.append(1.0 - _iou_xywh(p_matched, g_matched).mean())
 
+            # -------------------------------------------------------------
+            # GT match rate statistics
+            # -------------------------------------------------------------
+            matched_gt += len({j for _, j in pairs})
+            total_gt   += gt_count
+
         # Aggregate losses
         l1_loss = torch.stack(l1_vals).mean() if l1_vals else torch.tensor(0.0, device=lm_logits.device)
         iou_loss = torch.stack(iou_vals).mean() if iou_vals else torch.tensor(0.0, device=lm_logits.device)
         count_loss = torch.tensor(count_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if count_vals else torch.tensor(0.0, device=lm_logits.device)
         
-        return l1_loss, iou_loss, count_loss
+        match_rate = (matched_gt / total_gt) if total_gt else 0.0
+        return l1_loss, iou_loss, count_loss, match_rate
 
     def __call__(self, outputs, labels, **kwargs):
         """
@@ -321,7 +345,7 @@ class CompositeLoss:
                 target_boxes.append(boxes)
 
         # Compute detection losses
-        l1_loss, iou_loss, count_loss = self.compute_detection_loss(lm_logits, target_boxes)
+        l1_loss, iou_loss, count_loss, match_rate = self.compute_detection_loss(lm_logits, target_boxes)
         
         # Apply adaptive weights to detection losses
         adaptive_lambda_detection = self.lambda_detection * weight_multiplier
@@ -344,6 +368,22 @@ class CompositeLoss:
         outputs.detection_weight_multiplier = weight_multiplier
         outputs.adaptive_lambda_detection = adaptive_lambda_detection
         
+        # ------------------------------------------------------------------
+        # Optional inline logging every `log_interval` calls
+        # ------------------------------------------------------------------
+        if self.logger is not None and (self.step_count % self._log_interval == 0):
+            self.logger.info('LOSS STATUS:',
+                {
+                    "loss_total": total_loss.item(),
+                    "loss_lm": lm_loss.item(),
+                    "loss_l1": l1_loss.item(),
+                    "loss_iou": iou_loss.item(),
+                    "loss_count": count_loss.item(),
+                    "det_weight": adaptive_lambda_detection.item(),
+                    "gt_match_rate": match_rate,
+                }
+            )
+
         return total_loss
 
     def get_curriculum_status(self):
@@ -358,20 +398,25 @@ class CompositeLoss:
 
 def create_compute_loss_func(
     tokenizer,
+    *,
     lambda_l1=0.35,
     lambda_iou=0.5,
     lambda_count=0.1,
     lambda_detection=0.15,
     lm_target=2.0,
+    logger=None,
+    log_interval: int = 100,
 ):
     """Return a CompositeLoss instance with the given weight settings.
     """
     loss_computer = CompositeLoss(
         tokenizer=tokenizer,
-        lambda_l1=lambda_l1, 
-        lambda_iou=lambda_iou, 
+        lambda_l1=lambda_l1,
+        lambda_iou=lambda_iou,
         lambda_count=lambda_count,
         lambda_detection=lambda_detection,
         lm_target=lm_target,
+        logger=logger,
+        log_interval=log_interval,
     )
     return loss_computer
