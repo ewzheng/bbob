@@ -12,7 +12,9 @@ from .train_common import (
     make_collate_fn
 )
 
-from .train_augments import apply_weather_augmentations, apply_camera_augmentations
+from .train_augments import apply_batch_augmentations, apply_weather_augmentations, apply_camera_augmentations
+
+from .loss_common import create_compute_loss_func
 
 __all__ = [
     "jitter_bboxes",
@@ -26,6 +28,8 @@ __all__ = [
     "load_labels_from_yaml",
     "clean_tokenizer_config",
     "make_collate_fn",
+    "apply_batch_augmentations",
     "apply_weather_augmentations",
-    "apply_camera_augmentations"
+    "apply_camera_augmentations",
+    "create_compute_loss_func"
 ]

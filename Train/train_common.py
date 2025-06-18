@@ -30,7 +30,7 @@ import torch.nn.functional as F
 import psutil
 
 # Image augmentations
-from .train_augments import apply_weather_augmentations, apply_camera_augmentations
+from .train_augments import apply_weather_augmentations, apply_camera_augmentations, apply_batch_augmentations
 
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
@@ -233,14 +233,17 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
 
         if training:
             try:
-                weather_augs = apply_weather_augmentations(base_rgb)
-                if weather_augs:
-                    img_versions.extend(weather_augs)
-                    
-                camera_augs = apply_camera_augmentations(base_rgb)
-                if camera_augs:
-                    img_versions.extend(camera_augs)
-            except (ImportError, AttributeError, ValueError) as e:
+                aug_versions = apply_batch_augmentations(
+                    [base_rgb],
+                    weather_intensity="medium",
+                    camera_intensity="medium",
+                    weather_enabled=True,
+                    camera_enabled=True,
+                    max_augmentations_per_type=2,
+                )
+                if aug_versions:
+                    img_versions.extend(aug_versions)
+            except Exception as e:
                 print(f"Augmentation error (continuing with original image): {e}")
 
         for rgb in img_versions:

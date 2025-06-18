@@ -15,7 +15,7 @@ from transformers import Trainer, TrainingArguments
 from Utils import get_logger, LoggingCallback, model_size_breakdown
 from Model import build_BBOB
 from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn
-from Train.loss_common import create_compute_loss_func
+from Train import create_compute_loss_func
 
 
 def train(
