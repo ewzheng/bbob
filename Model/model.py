@@ -83,19 +83,8 @@ class BBOB(PreTrainedModel):
         max_memory = config.max_memory
         bnb_config = config.bnb_config
 
-        # Process bnb_config
-        if bnb_config == "8bit":
-            bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-        elif bnb_config == "4bit":
-            bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
-        elif bnb_config == "bf16":
-            bnb_config = BitsAndBytesConfig(load_in_bf16=True)
-        elif bnb_config == "fp16":
-            bnb_config = BitsAndBytesConfig(load_in_fp16=True)
-        elif isinstance(bnb_config, dict):
-            bnb_config = BitsAndBytesConfig(**bnb_config)
-        else:
-            bnb_config = None
+        # Process quantisation config once via helper
+        bnb_config = self._resolve_bnb_config(bnb_config)
 
         # ensure we don't clash with PreTrainedModel.base_model property
         self.base_model_prefix = "language_model"
@@ -425,7 +414,13 @@ class BBOB(PreTrainedModel):
             proj_rel = getattr(config, "projector_path", "projector.safetensors")
             proj_path = os.path.join(ckpt_dir, proj_rel)
             if os.path.isfile(proj_path):
-                obj.projector.load_state_dict(st.load_file(proj_path, device=obj.projector.device))
+                obj.projector = Projector.from_pretrained(
+                    proj_path,
+                    indim=obj.vision_tower.hidden_size,
+                    outdim=emb_layer.weight.shape[1] if hasattr(obj, '_embedding_layer') else obj.projector.outdim,
+                    dtype=obj._dtype,
+                    device=obj._device,
+                )
 
             # Load vision tower if available
             vt_dir = os.path.join(ckpt_dir, "vision_tower")
@@ -442,19 +437,7 @@ class BBOB(PreTrainedModel):
         """Initialize model components from a full checkpoint."""
         
         # Process bnb_config
-        bnb_config = config.bnb_config
-        if bnb_config == "8bit":
-            bnb_config = BitsAndBytesConfig(load_in_8bit=True)
-        elif bnb_config == "4bit":
-            bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
-        elif bnb_config == "bf16":
-            bnb_config = BitsAndBytesConfig(load_in_bf16=True)
-        elif bnb_config == "fp16":
-            bnb_config = BitsAndBytesConfig(load_in_fp16=True)
-        elif isinstance(bnb_config, dict):
-            bnb_config = BitsAndBytesConfig(**bnb_config)
-        else:
-            bnb_config = None
+        bnb_config = self._resolve_bnb_config(config.bnb_config)
 
         # Load language model from checkpoint
         lm_dir = os.path.join(ckpt_dir, getattr(config, 'language_model_path', 'language_model'))
@@ -505,7 +488,28 @@ class BBOB(PreTrainedModel):
         # Load projector weights
         proj_path = os.path.join(ckpt_dir, getattr(config, "projector_path", "projector.safetensors"))
         if os.path.isfile(proj_path):
-            self.projector.load_state_dict(st.load_file(proj_path, device=self.projector.device))
+            self.projector = Projector.from_pretrained(
+                proj_path,
+                indim=vision_hidden_size,
+                outdim=text_hidden_size,
+                dtype=base_model_dtype,
+                device=base_model_device,
+            )
 
         # Set base model prefix
         self.base_model_prefix = "language_model"
+
+    @staticmethod
+    def _resolve_bnb_config(cfg):
+        """Convert user-friendly bnb_config spec into BitsAndBytesConfig or None."""
+        if cfg == "8bit":
+            return BitsAndBytesConfig(load_in_8bit=True)
+        if cfg == "4bit":
+            return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True, bnb_4bit_compute_dtype=torch.bfloat16)
+        if cfg == "bf16":
+            return BitsAndBytesConfig(load_in_bf16=True)
+        if cfg == "fp16":
+            return BitsAndBytesConfig(load_in_fp16=True)
+        if isinstance(cfg, dict):
+            return BitsAndBytesConfig(**cfg)
+        return None
