@@ -250,13 +250,12 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
             # --- MobileViT image processor ---
             try:
                 px = image_processor(rgb, return_tensors="np")["pixel_values"][0]
-                processed_images.append(px)
+                processed_images.append((px * 255).astype(np.uint8))
             except Exception as e:
                 print(f"Image processing error: {e}")
                 # Fallback to basic processing
                 rgb_resized = rgb.resize(target_size, Image.BICUBIC)
-                px = np.array(rgb_resized, dtype=np.float32) / 255.0
-                px = px.transpose(2, 0, 1)  # HWC to CHW
+                px = np.array(rgb_resized, dtype=np.uint8).transpose(2, 0, 1)  # HWC to CHW uint8
                 processed_images.append(px)
 
             image_sizes.append(rgb.size)
@@ -766,9 +765,9 @@ def make_collate_fn(pad_token_id: int, tokenizer):
         for img in [item[img_key] for item in batch]:
             # Case-1: pre-normalised numpy array (3,H,W) or tensor
             if isinstance(img, torch.Tensor):
-                t = img.to(dtype=torch.float32)
+                t = img.to(dtype=torch.float32).div_(255.0)
             elif isinstance(img, np.ndarray):
-                t = torch.as_tensor(img, dtype=torch.float32)
+                t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
             else:
                 # Fallback: PIL → tensor path
                 t = pil_to_tensor(img).float().div_(255.0).to(device)
