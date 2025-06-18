@@ -111,7 +111,11 @@ class Augments:
                 "grid_distortion": A.Compose([A.GridDistortion(num_steps=5, distort_limit=0.1 * strength, p=1.0)]),
                 "gauss_noise": A.Compose([A.GaussNoise(var_limit=(2, int(8 * strength)), mean=0, per_channel=True, p=1.0)]),
                 "iso_noise": A.Compose([
-                    A.ISONoise(color_shift=(0.01, 0.03 * strength), intensity=(0.1, 0.3 * strength), p=1.0)
+                    A.ISONoise(
+                        color_shift=(0.01 * strength, 0.03 * strength),
+                        intensity=(0.1 * strength, 0.3 * strength),
+                        p=1.0,
+                    )
                 ]),
                 "chromatic_aberration": A.Compose([
                     A.ChromaticAberration(
