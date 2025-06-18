@@ -761,6 +761,13 @@ def make_collate_fn(pad_token_id: int, tokenizer):
         # Stay on CPU inside worker; main process/Accelerate will move to GPU
         device = "cpu"
 
+        # -----------------------------------------------------------------
+        # Number of visual tokens that the vision-tower prepends to the text
+        # sequence inside the model's forward pass.  Keep this in sync with
+        # `BBOB._merge_multimodal_inputs`.
+        # -----------------------------------------------------------------
+        VIS_TOKENS = 64
+
         processed = []
         for img in [item[img_key] for item in batch]:
             # Case-1: pre-normalised numpy array (3,H,W) or tensor
@@ -818,8 +825,7 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
             else:
                 text = item.get("text", "")
-                # Leave room for the 64 visual tokens the model will prepend
-                VIS_TOKENS = 64
+                # Leave room for the visual tokens the model will prepend
                 max_txt_len = tokenizer.model_max_length - VIS_TOKENS
                 tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
                 instr_ids = tokens["input_ids"].squeeze(0)
