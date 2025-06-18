@@ -72,7 +72,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
         *,
         tf_start_p: float = 1.0,
         tf_end_p: float = 0.0,
-        total_steps: int = 20_000,
+        total_steps: int = 1000,
         schedule: str = "linear",
         seed: int | None = None,
     ):
@@ -249,7 +249,7 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int, hid
 # ----------------------------------------------------------------------
 
 
-def make_collate_fn(pad_token_id: int, tokenizer):  # type: ignore[override]
+def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0):  # type: ignore[override]
     """Return a `BBOBCollator` instance with default linear decay."""
 
     return BBOBCollator(
@@ -257,6 +257,6 @@ def make_collate_fn(pad_token_id: int, tokenizer):  # type: ignore[override]
         tokenizer,
         tf_start_p=0.0,  # start with no teacher forcing unless user overrides
         tf_end_p=0.0,
-        total_steps=1,
+        total_steps=total_steps,
         schedule="linear",
     ) 
