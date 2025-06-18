@@ -106,7 +106,7 @@ class CompositeLoss:
     to first K GT boxes).
     """
 
-    def __init__(self, tokenizer, lambda_l1=0.35, lambda_iou=0.5, lambda_count=0.1, lambda_detection=0.3,
+    def __init__(self, tokenizer, lambda_l1=0.35, lambda_iou=0.5, lambda_count=0.1, lambda_detection=0.15,
                  lm_target=1.5,
                  smoothing_factor=0.9):
         self.tokenizer = tokenizer
@@ -117,8 +117,8 @@ class CompositeLoss:
         
         # Curriculum parameters
         self.lm_target = lm_target
-        self.min_detection_weight = lambda_detection/16
-        self.max_detection_weight = lambda_detection*3
+        self.min_detection_weight = lambda_detection/64
+        self.max_detection_weight = lambda_detection*8
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
@@ -159,33 +159,37 @@ class CompositeLoss:
         if self.lm_loss_ema is None:
             return self.min_detection_weight
         
-        # Check language modeling readiness
-        lm_ready = self.lm_loss_ema <= self.lm_target
-        
-        # Check format compliance if predictions are provided
-        format_ready = True  # Default to True if no predictions to check
+        # ------------------------------------------------------------------
+        # Continuous curriculum:
+        #   • `progress_lm`   ∈ [0,1]   – how close the EMA loss is to the target.
+        #     0 when loss ≥ 2× target,   1 when loss ≤ target.
+        #   • `progress_fmt`  ∈ [0,1]   – fraction of boxes that can be parsed,
+        #     scaled so that 0.8 compliance → 1.0 (cap at 1).
+        #   • Overall progress = progress_lm × progress_fmt.
+        #   • Weight  = min + progress × (max − min).
+        # ------------------------------------------------------------------
+
+        # --- language-model progress ---------------------------------------
+        lm_ratio = self.lm_target / (self.lm_loss_ema + 1e-8)
+        progress_lm = max(0.0, min(1.0, 2.0 * lm_ratio - 1.0))  # linear ramp: 0 when ratio≤0.5, 1 when ratio≥1
+
+        # --- format progress ----------------------------------------------
+        progress_fmt = 1.0  # default when we have no predictions info
         if parsed_predictions is not None:
-            total_predictions = sum(len(pred_list) for pred_list in parsed_predictions)
-            if total_predictions > 0:
-                valid_predictions = sum(
-                    len([p for p in pred_list if self._parse_detection_string(p) is not None]) 
-                    for pred_list in parsed_predictions
+            total_preds = sum(len(p) for p in parsed_predictions)
+            if total_preds > 0:
+                valid_preds = sum(
+                    len([p for p in plist if self._parse_detection_string(p) is not None])
+                    for plist in parsed_predictions
                 )
-                format_success_rate = valid_predictions / total_predictions
-                format_ready = format_success_rate >= 0.8  # 80% of boxes must be parseable
+                fmt_rate = valid_preds / total_preds
+                progress_fmt = max(0.0, min(1.0, fmt_rate / 0.8))  # 0.8 compliance ⇒ 1.0
             else:
-                format_ready = False  # No predictions at all
-        
-        # Two-stage curriculum logic
-        if lm_ready and format_ready:
-            # Stage 2: Both LM and format are good - focus on detection accuracy
-            return self.max_detection_weight
-        elif lm_ready and not format_ready:
-            # Stage 1.5: LM is good but format still learning - minimal detection weight
-            return self.min_detection_weight
-        else:
-            # Stage 1: Still learning basic language - very low detection weight
-            return self.min_detection_weight
+                progress_fmt = 0.0  # no predictions yet
+
+        progress = progress_lm * progress_fmt
+
+        return self.min_detection_weight + progress * (self.max_detection_weight - self.min_detection_weight)
 
     def compute_detection_loss(self, lm_logits, target_boxes):
         """Compute detection losses (L1 + IoU + count penalty) from parsed model outputs."""
@@ -357,7 +361,7 @@ def create_compute_loss_func(
     lambda_l1=0.35,
     lambda_iou=0.5,
     lambda_count=0.1,
-    lambda_detection=0.3,
+    lambda_detection=0.15,
     lm_target=2.0,
 ):
     """Return a CompositeLoss instance with the given weight settings.
