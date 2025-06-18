@@ -768,6 +768,8 @@ def make_collate_fn(pad_token_id: int, tokenizer):
                 t = img.to(dtype=torch.float32).div_(255.0)
             elif isinstance(img, np.ndarray):
                 t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
+            elif isinstance(img, list):  # Arrow list -> convert to numpy
+                t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32).div_(255.0)
             else:
                 # Fallback: PIL → tensor path
                 t = pil_to_tensor(img).float().div_(255.0).to(device)
