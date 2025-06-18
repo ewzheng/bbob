@@ -16,6 +16,7 @@ from Utils import get_logger, LoggingCallback, model_size_breakdown
 from Model import build_BBOB
 from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn
 from Train import create_compute_loss_func
+from Utils import create_metrics_functions
 
 
 def train(
@@ -58,7 +59,7 @@ def train(
         fp16=cuda and not bf16_supported,
         eval_strategy="steps",
         eval_steps=max(steps_per_epoch // 4, 1),
-        save_strategy="epoch",
+        save_strategy="epoch",  
         logging_steps=max(batch_size // grad_acc_steps, 1),
         report_to="none",
         remove_unused_columns=False,
@@ -100,6 +101,10 @@ def train(
     # Composite loss callable
     compute_loss_fn = create_compute_loss_func(tokenizer)
 
+    # Create metrics functions with shared state (no global variables)
+    # This creates two functions that share closure variables for accumulating metrics
+    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions()
+
     trainer = Trainer(
         model=model,
         train_dataset=train_dataset,
@@ -108,6 +113,8 @@ def train(
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
 
     logger.info("Starting end-to-end training …")
