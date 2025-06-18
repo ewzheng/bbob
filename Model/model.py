@@ -138,12 +138,14 @@ class BBOB(PreTrainedModel):
         """
         Freeze projector parameters to prevent training
         """
+        self.projector.eval()
         self.projector.freeze()
     
     def unfreeze_projector(self):
         """
         Unfreeze projector parameters to enable training
         """
+        self.projector.train()
         self.projector.unfreeze()
 
     def freeze_model(self):

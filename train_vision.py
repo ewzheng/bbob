@@ -34,13 +34,9 @@ def train(
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
-    # Unfreeze everything
-    try:
-        model.unfreeze_model()
-    except AttributeError:
-        # Fallback: ensure requires_grad True for all parameters
-        for p in model.parameters():
-            p.requires_grad = True
+
+    model.unfreeze_model()
+    model.unfreeze_projector()
 
     cuda = torch.cuda.is_available()
     bf16_supported = cuda and torch.cuda.is_bf16_supported()
@@ -70,9 +66,9 @@ def train(
         dataloader_pin_memory=True,
         save_total_limit=2,
         save_safetensors=True,
-        lr_scheduler_type="cosine",
+        lr_scheduler_type="cosine_with_restarts",
         warmup_ratio=warmup_ratio,
-        lr_scheduler_kwargs={"num_cycles": 0.2},
+        lr_scheduler_kwargs={"num_cycles": epochs},
         include_num_input_tokens_seen=True,
     )
 
