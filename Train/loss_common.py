@@ -255,7 +255,7 @@ class CompositeLoss:
         
         return l1_loss, iou_loss, count_loss
 
-    def __call__(self, model, inputs, return_outputs=False):
+    def __call__(self, model, inputs, return_outputs=False, **kwargs):
         """
         Loss function with adaptive curriculum learning.
         
