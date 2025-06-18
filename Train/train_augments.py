@@ -101,8 +101,7 @@ def apply_weather_augmentations(
             "snow",
             A.RandomSnow(
                 brightness_coeff=2.5,
-                snow_point_lower=0.1,
-                snow_point_upper=0.3 * strength,
+                snow_point_range=(0.1, 0.3 * strength),
                 p=1.0,
             ),
         ),
@@ -110,10 +109,7 @@ def apply_weather_augmentations(
             "sunflare",
             A.RandomSunFlare(
                 flare_roi=(0, 0, 1, 0.5),
-                angle_lower=0,
-                angle_upper=1,
-                num_flare_circles_lower=6,
-                num_flare_circles_upper=10,
+                num_flare_circles_range=(6, 10),
                 src_radius=160,
                 src_color=(255, 255, 255),
                 p=1.0,
@@ -122,8 +118,7 @@ def apply_weather_augmentations(
         (
             "fog",
             A.RandomFog(
-                fog_coef_lower=0.3 * strength,
-                fog_coef_upper=0.7 * strength,
+                fog_coef_range=(0.3 * strength, 0.7 * strength),
                 alpha_coef=0.08,
                 p=1.0,
             ),
@@ -136,8 +131,7 @@ def apply_weather_augmentations(
                 "shadow",
                 A.RandomShadow(
                     shadow_roi=(0, 0, 1, 1),
-                    num_shadows_lower=2,
-                    num_shadows_upper=int(4 * strength) + 2,
+                    num_shadows_limit=(2, int(4 * strength) + 2),
                     shadow_dimension=int(6 * strength) + 4,
                     p=1.0,
                 ),
@@ -243,7 +237,7 @@ def apply_camera_augmentations(
                 (
                     "optical_distortion",
                     A.OpticalDistortion(
-                        distort_limit=0.05 * strength, shift_limit=0.02 * strength, p=1.0
+                        distort_limit=0.05 * strength, p=1.0
                     ),
                 ),
                 (
@@ -252,7 +246,7 @@ def apply_camera_augmentations(
                 ),
                 (
                     "gauss_noise",
-                    A.GaussNoise(var_limit=(2, int(8 * strength)), mean=0, per_channel=True, p=1.0),
+                    A.GaussNoise(std_range=(2, int(8 * strength)), mean_range=(0, 0), per_channel=True, p=1.0),
                 ),
                 (
                     "iso_noise",
