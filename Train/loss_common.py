@@ -356,18 +356,6 @@ class CompositeLoss:
         # Total loss with adaptive weighting
         total_loss = lm_loss + adaptive_lambda_detection * detection_loss
         
-        # Store loss components and curriculum info in outputs for logging
-        outputs.lm_loss = lm_loss.detach()
-        outputs.l1_loss = l1_loss.detach()
-        outputs.iou_loss = iou_loss.detach()
-        outputs.count_loss = count_loss.detach()
-        outputs.loss = total_loss
-        
-        # Store curriculum information for monitoring
-        outputs.lm_loss_ema = self.lm_loss_ema
-        outputs.detection_weight_multiplier = weight_multiplier
-        outputs.adaptive_lambda_detection = adaptive_lambda_detection
-        
         # ------------------------------------------------------------------
         # Optional inline logging every `log_interval` calls
         # ------------------------------------------------------------------
