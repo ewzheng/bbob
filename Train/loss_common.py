@@ -3,6 +3,9 @@ import torch.nn.functional as F
 import re
 from scipy.optimize import linear_sum_assignment
 
+def _val(x):
+    return x.item() if isinstance(x, torch.Tensor) else float(x)
+
 def _parse_boxes(logits, tokenizer):
     """Decode logits and extract detection strings.
 
@@ -359,17 +362,21 @@ class CompositeLoss:
         # ------------------------------------------------------------------
         # Optional inline logging every `log_interval` calls
         # ------------------------------------------------------------------
+
         if self.logger is not None and (self.step_count % self._log_interval == 0):
-            self.logger.info('LOSS STATUS:',
+            self.logger.info(
+                "LOSS STATUS:",
                 {
-                    "loss_total": total_loss.item(),
-                    "loss_lm": lm_loss.item(),
-                    "loss_l1": l1_loss.item(),
-                    "loss_iou": iou_loss.item(),
-                    "loss_count": count_loss.item(),
-                    "det_weight": adaptive_lambda_detection.item(),
+                    "loss_total": _val(total_loss),
+                    "loss_lm": _val(lm_loss),
+                    "loss_l1": _val(l1_loss),
+                    "loss_iou": _val(iou_loss),
+                    "loss_count": _val(count_loss),
+                    "det_weight": _val(adaptive_lambda_detection),
                     "gt_match_rate": match_rate,
-                }, 'CURRICULUM STATUS:', self.get_curriculum_status()
+                },
+                "CURRICULUM STATUS:",
+                self.get_curriculum_status(),
             )
 
         return total_loss
