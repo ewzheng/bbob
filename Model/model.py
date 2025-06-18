@@ -270,7 +270,15 @@ class BBOB(PreTrainedModel):
 
         raise RuntimeError("Cannot locate input embedding layer in base model")
 
-    def forward(self, input_ids=None, input_embeds=None, attention_mask=None, images=None, labels=None, **kwargs):
+    def forward(
+        self,
+        input_ids=None,
+        input_embeds=None,
+        attention_mask=None,
+        images=None,
+        labels=None,
+        **kwargs,
+    ):
         '''
         multimodal causal-lm pass.
 
@@ -303,13 +311,14 @@ class BBOB(PreTrainedModel):
                 pad = torch.full((labels.size(0), visual_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
                 labels = torch.cat([pad, labels], dim=1)
 
-        # Pass through language model
-        return self.language_model(
-            inputs_embeds=inputs_embeds,   
+        lm_outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
             attention_mask=combined_mask,
             labels=labels,
             **kwargs,
         )
+
+        return lm_outputs
 
 
     def save_pretrained(self, output_dir: str, save_full_model: bool = True, **kwargs):

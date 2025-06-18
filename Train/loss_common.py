@@ -255,27 +255,24 @@ class CompositeLoss:
         
         return l1_loss, iou_loss, count_loss
 
-    def __call__(self, model, inputs, return_outputs=False, **kwargs):
+    def __call__(self, outputs, labels, **kwargs):
         """
         Loss function with adaptive curriculum learning.
         
         Args:
-            model: The model being trained
-            inputs: Dictionary containing input_ids, attention_mask, labels, and optionally target_boxes
-            return_outputs: Whether to return model outputs along with loss
+            outputs: The model outputs
+            labels: The ground-truth labels
+            **kwargs: Additional keyword arguments
             
         Returns:
-            loss (torch.Tensor) or tuple of (loss, outputs) if return_outputs=True
+            loss (torch.Tensor)
         """
-        # Extract target boxes from inputs if available
-        target_boxes = inputs.pop("target_boxes", None)
-        
-        # Forward pass
-        outputs = model(**inputs)
-        
-        # Get logits and labels
+        # Optional: accept ground-truth boxes via keyword or as attribute on outputs
+        target_boxes = kwargs.get("target_boxes", getattr(outputs, "target_boxes", None))
+
+        # Extract logits and labels
         lm_logits = outputs.logits
-        lm_labels = inputs.get("labels")
+        lm_labels = labels
         
         if lm_labels is None:
             raise ValueError("Labels must be provided in inputs for loss computation")
@@ -296,7 +293,29 @@ class CompositeLoss:
         
         # Compute adaptive weights based on LM performance AND format compliance
         weight_multiplier = self._compute_adaptive_weights(parsed_strs)
-        
+
+        # ------------------------------------------------------------------
+        # Derive ground-truth boxes from labels when they were not provided
+        # separately.  We decode the label IDs (ignoring -100 paddings) back to
+        # text and extract <bbob> … </bbob> fragments using the same regex that
+        # is applied to the predictions.
+        # ------------------------------------------------------------------
+        if target_boxes is None and lm_labels is not None:
+            gt_texts = []
+            for row in lm_labels:
+                # Remove ignore_index tokens to avoid bogus ids in decoding
+                valid_ids = row[row != -100].tolist()
+                gt_texts.append(self.tokenizer.decode(valid_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True))
+
+            target_boxes = []
+            for txt in gt_texts:
+                boxes = []
+                for det in re.findall(r"<bbob>(.*?)</bbob>", txt):
+                    parsed = self._parse_detection_string(det)
+                    if parsed is not None:
+                        boxes.append(parsed)
+                target_boxes.append(boxes)
+
         # Compute detection losses
         l1_loss, iou_loss, count_loss = self.compute_detection_loss(lm_logits, target_boxes)
         
@@ -321,8 +340,6 @@ class CompositeLoss:
         outputs.detection_weight_multiplier = weight_multiplier
         outputs.adaptive_lambda_detection = adaptive_lambda_detection
         
-        if return_outputs:
-            return total_loss, outputs
         return total_loss
 
     def get_curriculum_status(self):
