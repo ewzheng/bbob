@@ -12,7 +12,7 @@ def _parse_boxes(logits, tokenizer):
 
     Returns:
         List[List[str]]: A list with one entry per batch element, containing all detection strings
-        (the raw content found between <detect> and </detect> tokens).
+        (the raw content found between <bbob> and </bbob> tokens).
     """
 
     # Safety check: ensure we have the expected tensor dimensionality
@@ -39,9 +39,9 @@ def _parse_boxes(logits, tokenizer):
             detections_batch.append([])
             continue
 
-        # Use regex to find every substring wrapped by <detect> ... </detect>
+        # Use regex to find every substring wrapped by <bbob> ... </bbob>
         # The non-greedy qualifier (.*?) ensures we catch individual detections.
-        matches = re.findall(r"<detect>(.*?)</detect>", decoded_text)
+        matches = re.findall(r"<bbob>(.*?)</bbob>", decoded_text)
 
         # Strip surrounding whitespace from each detection
         detections = [m.strip() for m in matches]
@@ -335,9 +335,16 @@ class CompositeLoss:
         }
 
 
-def create_compute_loss_func(tokenizer, lambda_l1=0.35, lambda_iou=0.5, lambda_count=0.1, lambda_detection=0.3,
-                           lm_target=2.0, min_detection_weight=0.1, max_detection_weight=2.0):
-    """Factory function to create a loss computer"""
+def create_compute_loss_func(
+    tokenizer,
+    lambda_l1=0.35,
+    lambda_iou=0.5,
+    lambda_count=0.1,
+    lambda_detection=0.3,
+    lm_target=2.0,
+):
+    """Return a CompositeLoss instance with the given weight settings.
+    """
     loss_computer = CompositeLoss(
         tokenizer=tokenizer,
         lambda_l1=lambda_l1, 
@@ -345,7 +352,5 @@ def create_compute_loss_func(tokenizer, lambda_l1=0.35, lambda_iou=0.5, lambda_c
         lambda_count=lambda_count,
         lambda_detection=lambda_detection,
         lm_target=lm_target,
-        min_detection_weight=min_detection_weight,
-        max_detection_weight=max_detection_weight
     )
     return loss_computer

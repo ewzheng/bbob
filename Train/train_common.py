@@ -344,7 +344,7 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
             result["target_labels"].append(sample_labels)
 
             # -------------------------------------------------------------
-            # Build detection target string: <detection>class:bbox</detection>
+            # Build detection target string: <bbob>class:bbox</bbob>
             # -------------------------------------------------------------
             if label_lookup is None:
                 label_lookup = {}
@@ -356,7 +356,7 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
 
                 # bbox components already 0-1 normalised; format with 3 decimals
                 bbox_txt = " ".join(f"{v:.3f}" for v in bbox)
-                detection_fragments.append(f"<detection>{label}:{bbox_txt}</detection>")
+                detection_fragments.append(f"<bbob>{label}:{bbox_txt}</bbob>")
 
             detection_text = " ".join(detection_fragments)
 

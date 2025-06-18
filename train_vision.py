@@ -82,11 +82,11 @@ def train(
     clean_tokenizer_config(tokenizer)
 
     # ------------------------------------------------------------------
-    # Add <detection> tokens so the language model can emit them
+    # Add <bbob> tokens so the language model can emit them
     # ------------------------------------------------------------------
 
     special = {
-        "additional_special_tokens": ["<detection>", "</detection>"]
+        "additional_special_tokens": ["<bbob>", "</bbob>"]
     }
     num_added = tokenizer.add_special_tokens(special)
     if num_added > 0:
