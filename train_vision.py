@@ -134,7 +134,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
-    parser.add_argument("--lm_target", type=float, default=2.0)
+    parser.add_argument("--lm_target", type=float, default=2.75)
     
     args = parser.parse_args()
 
