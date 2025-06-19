@@ -30,6 +30,7 @@ def train(
     logger=None,
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
+    lm_target: float = 2.0,
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
@@ -98,7 +99,7 @@ def train(
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch, tf_start_p=1, tf_end_p=0, schedule="cosine", logger=logger, log_interval=max(batch_size // grad_acc_steps, 1))
 
     # Composite loss callable
-    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=2)
+    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=lm_target)
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
@@ -133,6 +134,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
+    parser.add_argument("--lm_target", type=float, default=2.0)
     
     args = parser.parse_args()
 
@@ -167,6 +169,7 @@ def main():
         logger=logger,
         num_workers=args.num_workers,
         warmup_ratio=args.warmup_ratio,
+        lm_target=args.lm_target,
     )
 
     logger.info("Vision training complete. Model saved.")
