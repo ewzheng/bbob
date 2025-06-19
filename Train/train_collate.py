@@ -124,16 +124,22 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
             p_tf = self._current_p()
             self.step += 1
             use_tf = random.random() < p_tf
-        else:
-            use_tf = False
 
-        batch_dict = _make_batch( 
-            batch,
-            pad_token_id=self.pad_id,
-            tokenizer=self.tokenizer,
-            placeholder_id=self.placeholder_id,
-            hide_targets=not use_tf,
-        )
+            batch_dict = _make_batch( 
+                batch,
+                pad_token_id=self.pad_id,
+                tokenizer=self.tokenizer,
+                placeholder_id=self.placeholder_id,
+                hide_targets=not use_tf,
+            )
+        else: 
+            batch_dict = _make_batch( 
+                batch,
+                pad_token_id=self.pad_id,
+                tokenizer=self.tokenizer,
+                placeholder_id=self.placeholder_id,
+                hide_targets=True,
+            )
 
         if self.logger is not None and self.step < self.total and self.step % self.log_interval == 0:
             self.logger.info(f"CURRICULUM: Teacher forcing probability: {p_tf}")
