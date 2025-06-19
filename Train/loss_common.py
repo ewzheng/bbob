@@ -118,7 +118,7 @@ class CompositeLoss:
         lambda_count=0.1,
         lambda_detection=0.15,
         lm_target=1.5,
-        smoothing_factor=0.9,
+        smoothing_factor=0.8,
         logger=None,
         log_interval: int = 100,
     ):
@@ -130,7 +130,7 @@ class CompositeLoss:
         
         # Curriculum parameters
         self.lm_target = lm_target
-        self.min_detection_weight = lambda_detection/64
+        self.min_detection_weight = lambda_detection/128
         self.max_detection_weight = lambda_detection*64
         self.smoothing_factor = smoothing_factor
         
