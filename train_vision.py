@@ -127,7 +127,7 @@ def main():
     parser.add_argument("-d", "--dataset", required=True, help="Dataset path or HF name")
     parser.add_argument("-i", "--instruction", required=True, help="Instruction to prepend in dataset")
     parser.add_argument("-e", "--epochs", type=int, default=1)
-    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
