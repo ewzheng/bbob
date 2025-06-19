@@ -12,11 +12,9 @@ import os, math, multiprocess as mp
 
 from transformers import Trainer, TrainingArguments
 
-from Utils import get_logger, LoggingCallback, model_size_breakdown
+from Utils import get_logger, LoggingCallback, create_metrics_functions
 from Model import build_BBOB
-from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn
-from Train import create_compute_loss_func
-from Utils import create_metrics_functions
+from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn, create_compute_loss_func
 
 
 def train(
@@ -96,7 +94,8 @@ def train(
 
     logger.info("Preparing dataset …")
 
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch)
+    # collat efunction with teacher forcing during warmup
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch, tf_start_p=1, tf_end_p=0, schedule="linear")
 
     # Composite loss callable
     compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=3)

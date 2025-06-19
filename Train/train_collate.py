@@ -75,9 +75,11 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
         total_steps: int = 1000,
         schedule: str = "linear",
         seed: int | None = None,
+        logger=None,
     ):
         self.pad_id = pad_token_id
         self.tokenizer = tokenizer
+        self.logger = logger
 
         self.p0 = float(tf_start_p)
         self.p1 = float(tf_end_p)
@@ -116,12 +118,14 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
-        p_tf = self._current_p()
-        self.step += 1
+        if self.step < self.total:
+            p_tf = self._current_p()
+            self.step += 1
+            use_tf = random.random() < p_tf
+        else:
+            use_tf = False
 
-        use_tf = random.random() < p_tf
-
-        batch_dict = _make_batch(  # reuse internal helper below
+        batch_dict = _make_batch( 
             batch,
             pad_token_id=self.pad_id,
             tokenizer=self.tokenizer,
@@ -129,9 +133,8 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
             hide_targets=not use_tf,
         )
 
-        # flag needed by loss/metrics if they want to know
-        batch_dict["used_teacher_forcing"] = torch.tensor([1.0 if use_tf else 0.0])
-        batch_dict["teacher_forcing_p"] = torch.tensor([p_tf])
+        if self.logger is not None and self.step < self.total and self.step % 128 == 0:
+            self.logger.info(f"CURRICULUM: Teacher forcing probability: {p_tf}")
 
         return batch_dict
 
@@ -143,7 +146,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
 
 
 def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int, hide_targets: bool):
-    """Core functional routine – lifted from previous implementation."""
+    """Core functional routine"""
 
     # 1) locate image field
     img_key = None
@@ -249,14 +252,15 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int, hid
 # ----------------------------------------------------------------------
 
 
-def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0):  # type: ignore[override]
+def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0, tf_end_p=0.0, schedule="linear", logger=None): 
     """Return a `BBOBCollator` instance with default linear decay."""
 
     return BBOBCollator(
         pad_token_id,
         tokenizer,
-        tf_start_p=0.0,  # start with no teacher forcing unless user overrides
-        tf_end_p=0.0,
+        tf_start_p=tf_start_p,  
+        tf_end_p=tf_end_p,
         total_steps=total_steps,
-        schedule="linear",
+        schedule=schedule,
+        logger=logger,
     ) 
