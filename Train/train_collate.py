@@ -76,6 +76,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
         schedule: str = "linear",
         seed: int | None = None,
         logger=None,
+        log_interval=128,
     ):
         self.pad_id = pad_token_id
         self.tokenizer = tokenizer
@@ -87,6 +88,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
         self.schedule = schedule
 
         self.step = 0  # increments every __call__
+        self.log_interval = log_interval
 
         if seed is not None:
             random.seed(seed)
@@ -133,7 +135,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
             hide_targets=not use_tf,
         )
 
-        if self.logger is not None and self.step < self.total and self.step % 128 == 0:
+        if self.logger is not None and self.step < self.total and self.step % self.log_interval == 0:
             self.logger.info(f"CURRICULUM: Teacher forcing probability: {p_tf}")
 
         return batch_dict
@@ -252,7 +254,7 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int, hid
 # ----------------------------------------------------------------------
 
 
-def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0, tf_end_p=0.0, schedule="linear", logger=None): 
+def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0, tf_end_p=0.0, schedule="linear", logger=None, log_interval=0): 
     """Return a `BBOBCollator` instance with default linear decay."""
 
     return BBOBCollator(
@@ -263,4 +265,5 @@ def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0,
         total_steps=total_steps,
         schedule=schedule,
         logger=logger,
+        log_interval=log_interval,
     ) 

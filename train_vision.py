@@ -94,8 +94,8 @@ def train(
 
     logger.info("Preparing dataset …")
 
-    # collat efunction with teacher forcing during warmup
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch, tf_start_p=1, tf_end_p=0, schedule="linear")
+    # collate function with teacher forcing during warmup
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch, tf_start_p=1, tf_end_p=0, schedule="linear", logger=logger, logger_steps= max(batch_size // grad_acc_steps, 1))
 
     # Composite loss callable
     compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=3)
@@ -133,6 +133,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
+    
     args = parser.parse_args()
 
     if args.output_dir is None:
