@@ -99,7 +99,7 @@ def train(
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch)
 
     # Composite loss callable
-    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1))
+    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=3)
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
