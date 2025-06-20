@@ -114,7 +114,7 @@ class BBOBTrainer(Trainer):
 
     def prepare_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
         inputs = super().prepare_inputs(inputs)
-        if self.model.training:
+        if self.model.training and self.state.global_step < self._tf_total:
             p = self._tf_prob(self.state.global_step)
             if random.random() < p:
                 if "input_ids" in inputs and "labels" in inputs:
