@@ -113,9 +113,9 @@ class CompositeLoss:
         self,
         tokenizer,
         *,
-        lambda_l1=0.35,
+        lambda_l1=0.3,
         lambda_iou=0.5,
-        lambda_count=0.2,
+        lambda_count=0.25,
         lambda_detection=0.15,
         lm_target=1.5,
         smoothing_factor=0.95,
@@ -131,7 +131,7 @@ class CompositeLoss:
         # Curriculum parameters
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
-        self.min_detection_weight = 0.001
+        self.min_detection_weight = 0.002
         self.max_detection_weight = 32
         self.smoothing_factor = smoothing_factor
         
