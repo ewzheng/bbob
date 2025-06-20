@@ -376,7 +376,7 @@ class CompositeLoss:
                 "gt_match_rate": match_rate,
                 "parsed_boxes_avg": round(sum(len(p) for p in parsed_strs) / max(1, len(parsed_strs)), 3),
             }
-            cur_dict = self.get_curriculum_status(weight_multiplier)
+            cur_dict = self._get_curriculum_status(weight_multiplier)
             self.logger.info(f"LOSS STATUS: {loss_dict} | CURRICULUM STATUS: {cur_dict}")
 
         return total_loss
