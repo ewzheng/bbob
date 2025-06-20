@@ -118,7 +118,7 @@ class CompositeLoss:
         lambda_count=0.2,
         lambda_detection=0.15,
         lm_target=1.5,
-        smoothing_factor=0.8,
+        smoothing_factor=0.95,
         logger=None,
         log_interval: int = 100,
     ):
@@ -132,7 +132,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 0.001
-        self.max_detection_weight = 16
+        self.max_detection_weight = 32
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables

@@ -10,11 +10,11 @@ import argparse
 from datetime import datetime
 import os, math, multiprocess as mp
 
-from transformers import Trainer, TrainingArguments
+from transformers import TrainingArguments
 
 from Utils import get_logger, LoggingCallback, create_metrics_functions
 from Model import build_BBOB
-from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn, create_compute_loss_func
+from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn, create_compute_loss_func, BBOBTrainer
 
 
 def train(
@@ -96,21 +96,26 @@ def train(
 
     logger.info("Preparing dataset …")
 
-    # collate function with teacher forcing during warmup
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, total_steps=warmup_ratio*epochs*steps_per_epoch, tf_start_p=1, tf_end_p=0, schedule="cosine", logger=logger, log_interval=max(batch_size // grad_acc_steps, 1))
-
+    # Collator always hides targets; TF decision moved to BBOBTrainer
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, tf_start_p=0.0, tf_end_p=0.0, schedule="linear", logger=logger, log_interval=max(batch_size // grad_acc_steps, 1))
     # Composite loss callable
-    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=lm_target)
+    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=lm_target)  
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
     compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer)
 
-    trainer = Trainer(
+    total_tf_steps = int(warmup_ratio * epochs * steps_per_epoch)
+    trainer = BBOBTrainer(
         model=model,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        data_collator=collate_fn,
+        train_collator=collate_fn,
+        eval_collator=collate_fn,  # same collator works for eval
+        tf_start_p=1.0,
+        tf_end_p=0.0,
+        total_tf_steps=total_tf_steps,
+        tf_schedule="cosine",
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,

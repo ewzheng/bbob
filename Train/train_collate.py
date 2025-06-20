@@ -21,6 +21,7 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from torchvision.transforms.functional import pil_to_tensor
+from transformers import TrainerCallback
 
 # Constants (kept in sync with Train.train_common)
 VIS_TOKENS: int = 64           # number of visual tokens the model prepends
@@ -89,6 +90,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
 
         self.step = 0  # increments every __call__
         self.log_interval = log_interval
+        self.is_eval = False
 
         if seed is not None:
             random.seed(seed)
@@ -102,49 +104,23 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
         else:
             self.placeholder_id = pad_token_id
 
-    # ---------------- internal helpers ---------------------------------
-
-    def _current_p(self):
-        """Probability of teacher forcing at *current* step."""
-        t = min(self.step, self.total) / self.total
-        if self.schedule == "linear":
-            return self.p0 + t * (self.p1 - self.p0)
-        if self.schedule == "cosine":
-            return self.p1 + 0.5 * (self.p0 - self.p1) * (1 + math.cos(math.pi * t))
-        if self.schedule == "exp":
-            k = 5.0  # larger = faster decay
-            return self.p1 + (self.p0 - self.p1) * math.exp(-k * t)
-        # fallback: linear
-        return self.p0 + t * (self.p1 - self.p0)
-
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
-        if self.step < self.total:
-            p_tf = self._current_p()
-            self.step += 1
-            use_tf = random.random() < p_tf
-
-            batch_dict = _make_batch( 
-                batch,
-                pad_token_id=self.pad_id,
-                tokenizer=self.tokenizer,
-                placeholder_id=self.placeholder_id,
-                hide_targets=not use_tf,
-            )
-        else: 
-            batch_dict = _make_batch( 
-                batch,
-                pad_token_id=self.pad_id,
-                tokenizer=self.tokenizer,
-                placeholder_id=self.placeholder_id,
-                hide_targets=True,
-            )
-
-        if self.logger is not None and self.step < self.total and self.step % self.log_interval == 0:
-            self.logger.info(f"CURRICULUM: Teacher forcing probability: {p_tf}")
-
+        # Always hide targets; trainer will reveal them according to schedule
+        batch_dict = _make_batch(
+            batch,
+            pad_token_id=self.pad_id,
+            tokenizer=self.tokenizer,
+            placeholder_id=self.placeholder_id,
+        )
         return batch_dict
+    
+    def eval(self):
+        self.is_eval = True
+
+    def train(self):
+        self.is_eval = False
 
 
 # ----------------------------------------------------------------------
@@ -153,7 +129,7 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
 # ----------------------------------------------------------------------
 
 
-def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int, hide_targets: bool):
+def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
     """Core functional routine"""
 
     # 1) locate image field
@@ -229,11 +205,8 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int, hid
             if tgt_ids.size(0) > remaining:
                 tgt_ids = tgt_ids[:remaining]
 
-        if hide_targets:
-            placeholder_ids = torch.full((tgt_ids.size(0),), placeholder_id, dtype=torch.long)
-            input_ids = torch.cat([instr_ids, placeholder_ids], dim=0)
-        else:
-            input_ids = torch.cat([instr_ids, tgt_ids.clone()], dim=0)
+        placeholder_ids = torch.full((tgt_ids.size(0),), placeholder_id, dtype=torch.long)
+        input_ids = torch.cat([instr_ids, placeholder_ids], dim=0)
 
         visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
         lbl_text = torch.cat([instr_ids.clone(), tgt_ids.clone()], dim=0)
@@ -273,3 +246,25 @@ def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0,
         logger=logger,
         log_interval=log_interval,
     ) 
+
+class CollatorCallback(TrainerCallback):
+    """Keep a single collator instance in the correct mode.
+
+    • Before every *evaluation* loop we switch it to `.eval()` so teacher forcing
+      is disabled.
+    • Right before training resumes we switch it back to `.train()` – the
+      earliest callback that fires in the training loop is `on_train_begin`.
+    """
+
+    def __init__(self, collator):
+        self.collator = collator
+
+    # --- evaluation lifecycle -------------------------------------------------
+
+    def on_evaluate(self, args, state, control, **kwargs):  # called *before* eval starts in HF ≥4.37
+        self.collator.eval()
+
+    # --- training lifecycle ---------------------------------------------------
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self.collator.train()

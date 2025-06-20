@@ -122,7 +122,7 @@ def train(
         eval_dataset   = val_dataset,
         data_collator  = collate_fn,
         args           = cfg,
-        callbacks      = [LoggingCallback(logger    )] if logger is not None else None,
+        callbacks      = [LoggingCallback(logger)] if logger is not None else None,
         processing_class = tokenizer,
         compute_metrics = compute_metrics,
         preprocess_logits_for_metrics = preprocess_logits_for_metrics

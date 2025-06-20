@@ -12,6 +12,7 @@ from .train_common import (
 )
 
 from .train_collate import make_collate_fn
+from .trainer import BBOBTrainer
 
 from .train_augments import apply_batch_augmentations, apply_weather_augmentations, apply_camera_augmentations
 
@@ -32,5 +33,6 @@ __all__ = [
     "apply_batch_augmentations",
     "apply_weather_augmentations",
     "apply_camera_augmentations",
-    "create_compute_loss_func"
+    "create_compute_loss_func", 
+    "BBOBTrainer"
 ]
