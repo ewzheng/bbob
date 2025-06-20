@@ -12,7 +12,7 @@ from .train_common import (
 )
 
 from .train_collate import make_collate_fn
-from .trainer import BBOBTrainer
+from .trainer import BBOBTrainer    
 
 from .train_augments import apply_batch_augmentations, apply_weather_augmentations, apply_camera_augmentations
 

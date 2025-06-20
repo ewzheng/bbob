@@ -21,7 +21,6 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from torchvision.transforms.functional import pil_to_tensor
-from transformers import TrainerCallback
 
 # Constants (kept in sync with Train.train_common)
 VIS_TOKENS: int = 64           # number of visual tokens the model prepends
@@ -107,7 +106,6 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
-        # Always hide targets; trainer will reveal them according to schedule
         batch_dict = _make_batch(
             batch,
             pad_token_id=self.pad_id,
@@ -246,25 +244,3 @@ def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0,
         logger=logger,
         log_interval=log_interval,
     ) 
-
-class CollatorCallback(TrainerCallback):
-    """Keep a single collator instance in the correct mode.
-
-    • Before every *evaluation* loop we switch it to `.eval()` so teacher forcing
-      is disabled.
-    • Right before training resumes we switch it back to `.train()` – the
-      earliest callback that fires in the training loop is `on_train_begin`.
-    """
-
-    def __init__(self, collator):
-        self.collator = collator
-
-    # --- evaluation lifecycle -------------------------------------------------
-
-    def on_evaluate(self, args, state, control, **kwargs):  # called *before* eval starts in HF ≥4.37
-        self.collator.eval()
-
-    # --- training lifecycle ---------------------------------------------------
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        self.collator.train()
