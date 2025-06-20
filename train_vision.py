@@ -63,6 +63,7 @@ def train(
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
+        dataloader_prefetch_factor=2,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=True,
         save_total_limit=2,
@@ -137,7 +138,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
     parser.add_argument("--lm_target", type=float, default=2.75)
@@ -147,6 +148,11 @@ def main():
     if args.output_dir is None:
         args.output_dir = f"Output/vision_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     os.makedirs(args.output_dir, exist_ok=True)
+
+    if args.num_workers == -1:
+        num_workers = mp.cpu_count() - 4
+    else:
+        num_workers = args.num_workers
 
     logger = get_logger(args.output_dir, "vision_training.log")
 
@@ -173,7 +179,7 @@ def main():
         lr=args.lr,
         grad_acc_steps=args.gradient_accumulation_steps,
         logger=logger,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         warmup_ratio=args.warmup_ratio,
         lm_target=args.lm_target,
     )
