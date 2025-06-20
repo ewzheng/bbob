@@ -115,7 +115,7 @@ class CompositeLoss:
         *,
         lambda_l1=0.35,
         lambda_iou=0.5,
-        lambda_count=0.1,
+        lambda_count=0.2,
         lambda_detection=0.15,
         lm_target=1.5,
         smoothing_factor=0.8,
@@ -130,8 +130,9 @@ class CompositeLoss:
         
         # Curriculum parameters
         self.lm_target = lm_target
-        self.min_detection_weight = lambda_detection/128
-        self.max_detection_weight = lambda_detection*128
+        # scalars for adaptive detection loss weight
+        self.min_detection_weight = 0.001
+        self.max_detection_weight = 16
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
@@ -373,18 +374,19 @@ class CompositeLoss:
                 "loss_count": _val(count_loss),
                 "det_weight": _val(adaptive_lambda_detection),
                 "gt_match_rate": match_rate,
+                "parsed_boxes_avg": round(sum(len(p) for p in parsed_strs) / max(1, len(parsed_strs)), 3),
             }
-            cur_dict = self.get_curriculum_status()
+            cur_dict = self.get_curriculum_status(weight_multiplier)
             self.logger.info(f"LOSS STATUS: {loss_dict} | CURRICULUM STATUS: {cur_dict}")
 
         return total_loss
 
-    def get_curriculum_status(self):
+    def _get_curriculum_status(self, weight_multiplier):
         """Get current curriculum learning status for logging/debugging."""
         return {
             'lm_loss_ema': self.lm_loss_ema,
             'lm_target': self.lm_target,
-            'current_weight_multiplier': self._compute_adaptive_weights() if self.lm_loss_ema else None,
+            'current_weight_multiplier': weight_multiplier,
             'step_count': self.step_count
         }
 
@@ -394,7 +396,7 @@ def create_compute_loss_func(
     *,
     lambda_l1=0.35,
     lambda_iou=0.5,
-    lambda_count=0.1,
+    lambda_count=0.2,
     lambda_detection=0.15,
     lm_target=2.0,
     logger=None,
