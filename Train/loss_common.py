@@ -117,6 +117,7 @@ class CompositeLoss:
         lambda_iou=0.5,
         lambda_count=0.25,
         lambda_detection=0.15,
+        lambda_format=0.1,
         lm_target=1.5,
         smoothing_factor=0.95,
         logger=None,
@@ -127,6 +128,7 @@ class CompositeLoss:
         self.lambda_iou = lambda_iou
         self.lambda_count = lambda_count
         self.lambda_detection = lambda_detection
+        self.lambda_format = lambda_format
         
         # Curriculum parameters
         self.lm_target = lm_target
@@ -144,21 +146,66 @@ class CompositeLoss:
         self._log_interval = max(1, log_interval)
 
     def _parse_detection_string(self, det_str):
-        """Parse a detection string like 'cat:0.1 0.2 0.3 0.4' into box coordinates."""
-        parts = det_str.split(":")
+        """Robustly parse a detection string in the canonical form
+
+            ``<label>: [x, y, w, h]``
+
+        Brackets, commas, and variable whitespace are tolerated; the parser
+        extracts up to four floating-point numbers *in order*.  Any missing
+        coordinates are imputed with ``0.5`` so that downstream code always
+        receives a complete box.
+
+        Returns
+        -------
+        coords : list[float]
+            Always four values, each clamped to the \[0,1] range so the rest
+            of the loss pipeline can operate without crashing.
+        fmt_err : float
+            *Format error* in \[0,1] – 0 for a perfectly formatted box, 1 for a
+            completely malformed one.  We combine two signals:
+
+            1. **Missing components** – +¼ for each of the four numbers that
+               could not be parsed;
+            2. **Out-of-range values** – the absolute amount of clipping
+               required, averaged over the four coordinates.
+        """
+
+        parts = det_str.split(":", 1)
         if len(parts) != 2:
-            return None
-        
-        try:
-            # Extract numerical values and take first 4
-            nums = [float(x) for x in parts[1].strip().split()][:4]
-            if len(nums) == 4:
-                # Clamp values to [0, 1] range for safety
-                return [max(0.0, min(1.0, n)) for n in nums]
-        except (ValueError, IndexError):
-            pass
-        
-        return None
+            # Cannot even find the ':' separator → full error, default box.
+            return [0, 0, 0, 0], 1.0
+
+        # ------------------------------------------------------------------
+        # 1) extract numeric substrings (robust to commas, multiple spaces…)
+        # ------------------------------------------------------------------
+        num_strs = re.findall(r"[-+]?\d*\.?\d+", parts[1])
+
+        nums = []
+        for s in num_strs[:4]:  # take at most 4 numbers
+            try:
+                nums.append(float(s))
+            except ValueError:
+                continue
+
+        missing = 4 - len(nums)
+        # Fill the rest with a neutral prior (centre-ish square)
+        nums.extend([0.5] * missing)
+
+        # ------------------------------------------------------------------
+        # 2) clamp to [0,1] and accumulate formatting error
+        # ------------------------------------------------------------------
+        clip_diffs = []
+        clamped = []
+        for v in nums:
+            v_clamped = max(0.0, min(1.0, v))
+            clamped.append(v_clamped)
+            clip_diffs.append(abs(v - v_clamped))
+
+        # Missing components add fixed penalty; out-of-range adds proportional
+        fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0)
+        fmt_err = max(0.0, min(1.0, fmt_err))
+
+        return clamped, fmt_err
 
     def _update_lm_loss_tracking(self, current_lm_loss):
         """Update the exponential moving average of LM loss."""
@@ -213,18 +260,19 @@ class CompositeLoss:
         """Compute detection losses (L1 + IoU + count penalty) and GT-match rate."""
         if target_boxes is None:
             zeros = torch.tensor(0.0, device=lm_logits.device)
-            return zeros, zeros, zeros, 0.0
+            return zeros, zeros, zeros, zeros, 0.0
 
         # Parse predicted boxes from language model output
         parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
 
         batch_preds = []
+        fmt_vals = []  # collect format-error scores across batch
         for det_list in parsed_strs:
             boxes = []
             for det in det_list:
-                parsed_box = self._parse_detection_string(det)
-                if parsed_box is not None:
-                    boxes.append(parsed_box)
+                coords, fmt_err = self._parse_detection_string(det)
+                boxes.append(coords)
+                fmt_vals.append(fmt_err)
             
             if boxes:
                 batch_preds.append(torch.tensor(boxes, device=lm_logits.device, dtype=lm_logits.dtype))
@@ -283,9 +331,10 @@ class CompositeLoss:
         l1_loss = torch.stack(l1_vals).mean() if l1_vals else torch.tensor(0.0, device=lm_logits.device)
         iou_loss = torch.stack(iou_vals).mean() if iou_vals else torch.tensor(0.0, device=lm_logits.device)
         count_loss = torch.tensor(count_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if count_vals else torch.tensor(0.0, device=lm_logits.device)
+        format_loss = torch.tensor(fmt_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if fmt_vals else torch.tensor(0.0, device=lm_logits.device)
         
         match_rate = (matched_gt / total_gt) if total_gt else 0.0
-        return l1_loss, iou_loss, count_loss, match_rate
+        return l1_loss, iou_loss, count_loss, format_loss, match_rate
 
     def __call__(self, outputs, labels, **kwargs):
         """
@@ -354,19 +403,22 @@ class CompositeLoss:
             for txt in gt_texts:
                 boxes = []
                 for det in re.findall(r"<bbob>(.*?)</bbob>", txt):
-                    parsed = self._parse_detection_string(det)
-                    if parsed is not None:
-                        boxes.append(parsed)
+                    coords, fmt_err = self._parse_detection_string(det)
+                    if coords is not None:
+                        boxes.append(coords)
                 target_boxes.append(boxes)
 
         # Compute detection losses
-        l1_loss, iou_loss, count_loss, match_rate = self.compute_detection_loss(lm_logits, target_boxes)
+        l1_loss, iou_loss, count_loss, format_loss, match_rate = self.compute_detection_loss(lm_logits, target_boxes)
         
         # Apply adaptive weights to detection losses
         adaptive_lambda_detection = self.lambda_detection * weight_multiplier
-        detection_loss = (self.lambda_l1 * l1_loss + 
-                            self.lambda_iou * iou_loss + 
-                            self.lambda_count * count_loss)
+        detection_loss = (
+            self.lambda_l1 * l1_loss
+            + self.lambda_iou * iou_loss
+            + self.lambda_count * count_loss
+            + self.lambda_format * format_loss
+        )
         
         # Total loss with adaptive weighting
         total_loss = lm_loss + adaptive_lambda_detection * detection_loss
@@ -383,6 +435,7 @@ class CompositeLoss:
                 "loss_iou": _val(iou_loss),
                 "mean_iou": 1.0 - _val(iou_loss) if _val(iou_loss) > 0 else 0.0,
                 "loss_count": _val(count_loss),
+                "loss_fmt": _val(format_loss),
                 "det_weight": _val(adaptive_lambda_detection),
                 "gt_match_rate": match_rate,
                 "parsed_boxes_avg": round(sum(len(p) for p in parsed_strs) / max(1, len(parsed_strs)), 3),
@@ -409,6 +462,7 @@ def create_compute_loss_func(
     lambda_iou=0.5,
     lambda_count=0.2,
     lambda_detection=0.15,
+    lambda_format=0.1,
     lm_target=2.0,
     logger=None,
     log_interval: int = 100,
@@ -421,6 +475,7 @@ def create_compute_loss_func(
         lambda_iou=lambda_iou,
         lambda_count=lambda_count,
         lambda_detection=lambda_detection,
+        lambda_format=lambda_format,
         lm_target=lm_target,
         logger=logger,
         log_interval=log_interval,
