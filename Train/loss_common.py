@@ -16,49 +16,58 @@ def _val(x):
     return x.item() if isinstance(x, torch.Tensor) else float(x)
 
 def _parse_boxes(logits, tokenizer):
-    """Decode logits and extract detection strings.
+    """Extract detection strings without decoding whole sequences.
 
-    Args:
-        logits (torch.Tensor): Model output logits with shape (batch_size, seq_len, vocab_size).
-        tokenizer: Tokenizer that provides a `decode(ids, **kwargs)` method.
+    Strategy
+    --------
+    1. Arg-max over vocab → token-id matrix (B, S).
+    2. Locate indices of the special tokens "<bbob>" and "</bbob>".
+    3. Slice *only* the sub-sequences between those tag IDs.
+    4. Batch-decode that much shorter list of snippets.
 
-    Returns:
-        List[List[str]]: A list with one entry per batch element, containing all detection strings
-        (the raw content found between <bbob> and </bbob> tokens).
+    The rest of the sequence (instruction, filler tokens) is never
+    converted back to text, eliminating most of the Python/string cost.
     """
 
-    # Safety check: ensure we have the expected tensor dimensionality
     if logits.dim() != 3:
         raise ValueError(
-            f"Expected `logits` to have shape (batch, seq_len, vocab_size) but got tensor with shape {logits.shape}"
+            f"Expected logits with shape (batch, seq_len, vocab) but got {logits.shape}"
         )
 
-    # Greedy decoding – take the most probable token at each position
-    token_ids = logits.argmax(dim=-1)  # (batch_size, seq_len)
+    token_ids = logits.argmax(dim=-1)  # (B, S)
 
-    # ------------------------------------------------------------------
-    # Vectorised batch decoding: move to CPU once, decode all sequences in
-    # one call (10× faster than per-sample decode loops).
-    # ------------------------------------------------------------------
+    # Get tag IDs once
+    id_open, id_close = tokenizer.convert_tokens_to_ids(["<bbob>", "</bbob>"])
 
-    ids_list_batch = token_ids.cpu().tolist()  # list[list[int]]
+    all_snippets: list[list[int]] = []
+    snippet_owner: list[int] = []  # which batch index produced each snippet
 
-    try:
-        decoded_texts = tokenizer.batch_decode(
-            ids_list_batch,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=True,
-        )
-    except Exception as e:
-        print(f"Warning: Tokenizer batch_decode error: {e}")
-        decoded_texts = ["" for _ in ids_list_batch]
+    ids_cpu = token_ids.cpu()  # single transfer
 
-    detections_batch = []
-    pattern = re.compile(r"<bbob>(.*?)</bbob>")
+    for b, row in enumerate(ids_cpu.tolist()):
+        i = 0
+        while True:
+            try:
+                start = row.index(id_open, i)
+                end   = row.index(id_close, start + 1)
+            except ValueError:
+                break  # no more tags in this sequence
 
-    for txt in decoded_texts:
-        matches = pattern.findall(txt)
-        detections_batch.append([m.strip() for m in matches])
+            if end - start > 1:
+                snippet = row[start + 1 : end]
+                all_snippets.append(snippet)
+                snippet_owner.append(b)
+            i = end + 1
+
+    # Decode only the snippets (they are short → negligible cost)
+    if all_snippets:
+        decoded = tokenizer.batch_decode(all_snippets, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    else:
+        decoded = []
+
+    detections_batch: list[list[str]] = [[] for _ in range(token_ids.size(0))]
+    for owner, txt in zip(snippet_owner, decoded):
+        detections_batch[owner].append(txt.strip())
 
     return detections_batch
 
@@ -114,6 +123,8 @@ def _match_boxes_hungarian(pred, gt):
         return []
 
     iou_mat = _iou_matrix_xywh(pred, gt)
+    # Replace possible NaNs (can arise from zero-area boxes) with zeros
+    iou_mat = torch.nan_to_num(iou_mat, nan=0.0, posinf=0.0, neginf=0.0)
 
     # numpy does not understand torch.bfloat16.  Cast to float32 on CPU first.
     cost = (1.0 - iou_mat + EPSILON)
