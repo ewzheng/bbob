@@ -12,7 +12,7 @@ import os, math, multiprocess as mp
 
 from transformers import TrainingArguments
 
-from Utils import get_logger, LoggingCallback, create_metrics_functions
+from Utils import get_logger, LoggingCallback, create_metrics_functions, model_size_breakdown
 from Model import build_BBOB
 from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn, create_compute_loss_func, BBOBTrainer
 
@@ -94,6 +94,8 @@ def train(
         except AttributeError:
             # Fallback for different attribute names
             model.resize_token_embeddings(len(tokenizer))
+
+    logger.info(model_size_breakdown(model))
 
     logger.info("Preparing dataset …")
 
