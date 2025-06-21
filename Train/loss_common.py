@@ -185,6 +185,10 @@ class CompositeLoss:
         self.logger = logger
         self._log_interval = max(1, log_interval)
 
+        # Store latest curriculum progress for logging
+        self.progress_lm: float | None = None
+        self.progress_fmt: float | None = None
+
     def _parse_detection_string(self, det_str):
         """Robustly parse a detection string in the canonical form
 
@@ -296,6 +300,10 @@ class CompositeLoss:
                 progress_fmt = 0.0  # no predictions yet
 
         progress = progress_lm * progress_fmt
+
+        # Store for later logging
+        self.progress_lm  = progress_lm
+        self.progress_fmt = progress_fmt
 
         return self.min_detection_weight + progress * (self.max_detection_weight - self.min_detection_weight)
 
@@ -507,6 +515,12 @@ class CompositeLoss:
         # ------------------------------------------------------------------
 
         if self.logger is not None and (self.step_count % self._log_interval == 0):
+            # Average number of GT boxes in this batch
+            if target_boxes is not None:
+                avg_gt = round(sum(len(tb) if isinstance(tb, list) else (tb.shape[0] if tb is not None else 0) for tb in target_boxes) / max(1, len(target_boxes)), 3)
+            else:
+                avg_gt = 0.0
+
             loss_dict = {
                 "loss_total": _val(total_loss),
                 "loss_lm": _val(lm_loss),
@@ -518,20 +532,18 @@ class CompositeLoss:
                 "det_weight": _val(adaptive_lambda_detection),
                 "gt_match_rate": match_rate,
                 "parsed_boxes_avg": round(sum(len(p) for p in parsed_strs) / max(1, len(parsed_strs)), 3),
+                "gt_boxes_avg": avg_gt,
+                "progress_lm": _val(self.progress_lm) if self.progress_lm is not None else None,
+                "progress_fmt": _val(self.progress_fmt) if self.progress_fmt is not None else None,
+                'lm_loss_ema': self.lm_loss_ema,
+                'lm_target': self.lm_target,
+                'current_weight_multiplier': weight_multiplier,
+                'step_count': self.step_count
             }
-            cur_dict = self._get_curriculum_status(weight_multiplier)
-            self.logger.info(f"LOSS STATUS: {loss_dict} | CURRICULUM STATUS: {cur_dict}")
+            
+            self.logger.info(f"LOSS STATUS: {loss_dict}")
 
         return total_loss
-
-    def _get_curriculum_status(self, weight_multiplier):
-        """Get current curriculum learning status for logging/debugging."""
-        return {
-            'lm_loss_ema': self.lm_loss_ema,
-            'lm_target': self.lm_target,
-            'current_weight_multiplier': weight_multiplier,
-            'step_count': self.step_count
-        }
 
 
 def create_compute_loss_func(

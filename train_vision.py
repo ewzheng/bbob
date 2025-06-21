@@ -100,7 +100,7 @@ def train(
     logger.info("Preparing dataset …")
 
     # Collator always hides targets; TF decision moved to BBOBTrainer
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, tf_start_p=0.0, tf_end_p=0.0, schedule="linear", logger=logger, log_interval=max(batch_size // grad_acc_steps, 1))
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
     # Composite loss callable
     compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=lm_target)  
 
@@ -116,9 +116,9 @@ def train(
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
         tf_start_p=1.0,
-        tf_end_p=0.0,
+        tf_end_p=0.3,
         total_tf_steps=total_tf_steps,
-        tf_schedule="cosine",
+        tf_schedule="linear",
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,
@@ -143,7 +143,7 @@ def main():
     parser.add_argument("--num_workers", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
-    parser.add_argument("--lm_target", type=float, default=2.75)
+    parser.add_argument("--lm_target", type=float, default=2)
     
     args = parser.parse_args()
 

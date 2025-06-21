@@ -46,54 +46,25 @@ import math
 import random
 
 
-class BBOBCollator:  # noqa: N801 (keep exact name as requested)
-    """Callable collator implementing scheduled teacher forcing.
-
-    Parameters
-    ----------
-    pad_token_id : int
-        Tokeniser pad id.
-    tokenizer : transformers.PreTrainedTokenizer
-    tf_start_p : float, optional
-        Teacher-forcing probability at step 0.
-    tf_end_p : float, optional
-        Probability after `total_steps`.
-    total_steps : int, optional
-        Steps across which to decay the probability.
-    schedule : str, optional {"linear", "cosine", "exp"}
-    seed : int, optional
-        RNG seed for reproducibility.
-    """
+class BBOBCollator:  # noqa: N801
+    """Minimal collator for BBOB – no teacher-forcing logic."""
 
     def __init__(
         self,
         pad_token_id: int,
         tokenizer,
         *,
-        tf_start_p: float = 1.0,
-        tf_end_p: float = 0.0,
-        total_steps: int = 1000,
-        schedule: str = "linear",
-        seed: int | None = None,
         logger=None,
         log_interval=128,
+        **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
         self.pad_id = pad_token_id
         self.tokenizer = tokenizer
         self.logger = logger
 
-        self.p0 = float(tf_start_p)
-        self.p1 = float(tf_end_p)
-        self.total = max(int(total_steps), 1)
-        self.schedule = schedule
-
-        self.step = 0  # increments every __call__
+        # teacher-forcing parameters removed – keep placeholders for API compat
         self.log_interval = log_interval
         self.is_eval = False
-
-        if seed is not None:
-            random.seed(seed)
-            torch.manual_seed(seed)
 
         # Pre-compute placeholder id differing from pad id.
         if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != pad_token_id:
@@ -106,14 +77,14 @@ class BBOBCollator:  # noqa: N801 (keep exact name as requested)
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
-        batch_dict = _make_batch(
+        return _make_batch(
             batch,
             pad_token_id=self.pad_id,
             tokenizer=self.tokenizer,
             placeholder_id=self.placeholder_id,
         )
-        return batch_dict
-    
+
+    # BBOBTrainer toggles these; keep as no-ops
     def eval(self):
         self.is_eval = True
 
@@ -231,16 +202,12 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
 # ----------------------------------------------------------------------
 
 
-def make_collate_fn(pad_token_id: int, tokenizer, total_steps=0, tf_start_p=0.0, tf_end_p=0.0, schedule="linear", logger=None, log_interval=0): 
-    """Return a `BBOBCollator` instance with default linear decay."""
+def make_collate_fn(pad_token_id: int, tokenizer, **kwargs):
+    """Create a collator – all teacher-forcing args are ignored for back-compat."""
 
     return BBOBCollator(
         pad_token_id,
         tokenizer,
-        tf_start_p=tf_start_p,  
-        tf_end_p=tf_end_p,
-        total_steps=total_steps,
-        schedule=schedule,
-        logger=logger,
-        log_interval=log_interval,
+        logger=kwargs.get("logger"),
+        log_interval=kwargs.get("log_interval", 0),
     ) 
