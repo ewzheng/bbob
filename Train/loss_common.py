@@ -1,7 +1,9 @@
 import torch
 import torch.nn.functional as F
 import re
-from scipy.optimize import linear_sum_assignment
+
+from torch import linear_sum_assignment  
+from torchvision.ops import box_iou as _box_iou  
 
 # ----------------------------------------------------------------------
 # Constants
@@ -60,57 +62,27 @@ def _parse_boxes(logits, tokenizer):
 
     return detections_batch
 
-def _iou_xywh(boxes1, boxes2):
-    """Compute IoU between two (N,4) tensors of [x,y,w,h] normalised coords."""
-    if boxes1.numel() == 0 or boxes2.numel() == 0:
-        # Return an (N, M) matrix of zeros so downstream .view / Hungarian
-        # reshaping always works, even for degenerate cases where N==0 or
-        # M==0.  N or M can be zero which yields an empty tensor of the
-        # correct 2-D shape.
-        return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
+def _xywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
+    """Convert `[..., x,y,w,h]` to `[..., x1,y1,x2,y2]`."""
+    x1 = boxes[..., 0]
+    y1 = boxes[..., 1]
+    x2 = boxes[..., 0] + boxes[..., 2]
+    y2 = boxes[..., 1] + boxes[..., 3]
+    return torch.stack((x1, y1, x2, y2), dim=-1)
 
-    b1_x1 = boxes1[:, 0]
-    b1_y1 = boxes1[:, 1]
-    b1_x2 = boxes1[:, 0] + boxes1[:, 2]
-    b1_y2 = boxes1[:, 1] + boxes1[:, 3]
-
-    b2_x1 = boxes2[:, 0]
-    b2_y1 = boxes2[:, 1]
-    b2_x2 = boxes2[:, 0] + boxes2[:, 2]
-    b2_y2 = boxes2[:, 1] + boxes2[:, 3]
-
-    inter_x1 = torch.max(b1_x1, b2_x1)
-    inter_y1 = torch.max(b1_y1, b2_y1)
-    inter_x2 = torch.min(b1_x2, b2_x2)
-    inter_y2 = torch.min(b1_y2, b2_y2)
-
-    inter_w = (inter_x2 - inter_x1).clamp(min=0)
-    inter_h = (inter_y2 - inter_y1).clamp(min=0)
-    inter_area = inter_w * inter_h
-
-    area1 = boxes1[:, 2] * boxes1[:, 3]
-    area2 = boxes2[:, 2] * boxes2[:, 3]
-
-    union = area1 + area2 - inter_area + EPSILON
-    return inter_area / union   
+# ----------------------------------------------------------------------
+# Vectorised IoU helpers (Torchvision fallback to our previous impl)
+# ----------------------------------------------------------------------
 
 def _iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
-    """Compute pair-wise IoU matrix for two sets of [x,y,w,h] boxes.
-
-    Parameters
-    ----------
-    boxes1 : Tensor, shape (N,4)
-    boxes2 : Tensor, shape (M,4)
-
-    Returns
-    -------
-    Tensor of shape (N, M) with IoU for every pair (i,j).
-    """
-
+    """Compute pair-wise IoU matrix using Torchvision for speed if available."""
     if boxes1.numel() == 0 or boxes2.numel() == 0:
         return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
 
-    # (N,1) vs (1,M) broadcast to (N,M)
+    if _box_iou is not None:
+        return _box_iou(_xywh_to_xyxy(boxes1), _xywh_to_xyxy(boxes2))
+
+    # fallback to manual implementation (previous version)
     b1_x1 = boxes1[:, 0].unsqueeze(1)
     b1_y1 = boxes1[:, 1].unsqueeze(1)
     b1_x2 = (boxes1[:, 0] + boxes1[:, 2]).unsqueeze(1)
@@ -144,10 +116,11 @@ def _match_boxes_hungarian(pred, gt):
     iou_mat = _iou_matrix_xywh(pred, gt)
 
     # numpy does not understand torch.bfloat16.  Cast to float32 on CPU first.
-    cost = (1.0 - iou_mat + EPSILON).float().cpu().numpy()
+    cost = (1.0 - iou_mat + EPSILON)
+
+    # Torch's linear_sum_assignment works on both CPU & CUDA tensors.
     row_ind, col_ind = linear_sum_assignment(cost)
-    # Keep all assignments; downstream logic can choose to ignore very low IoU
-    return [(int(r), int(c)) for r, c in zip(row_ind, col_ind)]
+    return [(int(r), int(c)) for r, c in zip(row_ind.tolist(), col_ind.tolist())]
 
 class CompositeLoss:
     """Compute combined language-model and detection losses.
@@ -332,19 +305,31 @@ class CompositeLoss:
         if parsed_strs is None:
             parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
 
-        batch_preds = []
-        fmt_vals = []  # collect format-error scores across batch
+        # ------------------------------------------------------------------
+        # Vectorised parsing: build a single flat list of coords, then split
+        # back into per-sample tensors to avoid thousands of small tensor
+        # allocations on GPU each step.
+        # ------------------------------------------------------------------
+
+        flat_coords: list[list[float]] = []
+        fmt_vals: list[float] = []
+        counts: list[int] = []
+
         for det_list in parsed_strs:
-            boxes = []
+            counts.append(len(det_list))
             for det in det_list:
                 coords, fmt_err = self._parse_detection_string(det)
-                boxes.append(coords)
+                flat_coords.append(coords)
                 fmt_vals.append(fmt_err)
-            
-            if boxes:
-                batch_preds.append(torch.tensor(boxes, device=lm_logits.device, dtype=lm_logits.dtype))
-            else:
-                batch_preds.append(torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype))
+
+        if flat_coords:
+            all_preds = torch.tensor(flat_coords, device=lm_logits.device, dtype=lm_logits.dtype)
+            split_preds = list(all_preds.split(counts))
+        else:
+            # Handle edge-case when no predictions at all in batch
+            split_preds = [torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype) for _ in counts]
+
+        batch_preds = split_preds
 
         # Compute loss per sample with simple first-K matching
         l1_vals = []
@@ -390,7 +375,7 @@ class CompositeLoss:
             g_matched = torch.stack([gt[j] for _, j in pairs])
 
             l1_vals.append(F.l1_loss(p_matched, g_matched, reduction="mean"))
-            iou_vals.append(1.0 - _iou_xywh(p_matched, g_matched).mean())
+            iou_vals.append(1.0 - _iou_matrix_xywh(p_matched, g_matched).mean())
 
             # -------------------------------------------------------------
             # GT match rate statistics
