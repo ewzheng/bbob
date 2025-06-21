@@ -63,7 +63,7 @@ def train(
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
-        dataloader_prefetch_factor=2,
+        dataloader_prefetch_factor=8,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=True,
         save_total_limit=2,
@@ -150,7 +150,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.num_workers == -1:
-        num_workers = mp.cpu_count() - 4
+        num_workers = min(mp.cpu_count() - 4, 4)
     else:
         num_workers = args.num_workers
 
