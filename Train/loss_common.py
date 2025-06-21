@@ -173,7 +173,7 @@ class CompositeLoss:
         # Curriculum parameters
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
-        self.min_detection_weight = 0.002
+        self.min_detection_weight = 0.1
         self.max_detection_weight = 256
         self.smoothing_factor = smoothing_factor
         
@@ -542,6 +542,21 @@ class CompositeLoss:
             }
             
             self.logger.info(f"LOSS STATUS: {loss_dict}")
+
+            # ----------------------------------------------------------
+            # Log one raw model output occasionally for qualitative check
+            # ----------------------------------------------------------
+            if self.step_count % (self._log_interval * 5) == 0:
+                sample_pred_ids = lm_logits[0].argmax(dim=-1)
+                sample_pred_text = self.tokenizer.decode(sample_pred_ids.tolist(), skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+                # decode ground-truth of the same sample (filter ignore_index)
+                gt_ids = lm_labels[0][lm_labels[0] != -100].tolist()
+                sample_gt_text = self.tokenizer.decode(gt_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+
+                self.logger.info(
+                    f"[sample] pred: {sample_pred_text[:300]} || gt: {sample_gt_text[:300]}"
+                )
 
         return total_loss
 
