@@ -149,7 +149,7 @@ def main():
 
     if args.output_dir is None:
         args.output_dir = f"Output/vision_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(f"Output/{args.output_dir}", exist_ok=True)
 
     if args.num_workers == -1:
         num_workers = min(mp.cpu_count() - 4, 8)

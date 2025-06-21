@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import re
 
-from torch import linear_sum_assignment  
+from scipy.optimize import linear_sum_assignment
 from torchvision.ops import box_iou as _box_iou  
 
 # ----------------------------------------------------------------------
