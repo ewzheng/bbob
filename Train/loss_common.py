@@ -3,6 +3,13 @@ import torch.nn.functional as F
 import re
 from scipy.optimize import linear_sum_assignment
 
+# ----------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------
+
+EPSILON: float = 1e-8       # small value to avoid division-by-zero
+FMT_OK_THRESHOLD: float = 0.25  # consider a box "well-formed" when fmt_err < 0.25
+
 def _val(x):
     return x.item() if isinstance(x, torch.Tensor) else float(x)
 
@@ -56,7 +63,11 @@ def _parse_boxes(logits, tokenizer):
 def _iou_xywh(boxes1, boxes2):
     """Compute IoU between two (N,4) tensors of [x,y,w,h] normalised coords."""
     if boxes1.numel() == 0 or boxes2.numel() == 0:
-        return torch.zeros(min(boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
+        # Return an (N, M) matrix of zeros so downstream .view / Hungarian
+        # reshaping always works, even for degenerate cases where N==0 or
+        # M==0.  N or M can be zero which yields an empty tensor of the
+        # correct 2-D shape.
+        return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
 
     b1_x1 = boxes1[:, 0]
     b1_y1 = boxes1[:, 1]
@@ -80,23 +91,63 @@ def _iou_xywh(boxes1, boxes2):
     area1 = boxes1[:, 2] * boxes1[:, 3]
     area2 = boxes2[:, 2] * boxes2[:, 3]
 
-    union = area1 + area2 - inter_area + 1e-7
+    union = area1 + area2 - inter_area + EPSILON
     return inter_area / union   
+
+def _iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """Compute pair-wise IoU matrix for two sets of [x,y,w,h] boxes.
+
+    Parameters
+    ----------
+    boxes1 : Tensor, shape (N,4)
+    boxes2 : Tensor, shape (M,4)
+
+    Returns
+    -------
+    Tensor of shape (N, M) with IoU for every pair (i,j).
+    """
+
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
+
+    # (N,1) vs (1,M) broadcast to (N,M)
+    b1_x1 = boxes1[:, 0].unsqueeze(1)
+    b1_y1 = boxes1[:, 1].unsqueeze(1)
+    b1_x2 = (boxes1[:, 0] + boxes1[:, 2]).unsqueeze(1)
+    b1_y2 = (boxes1[:, 1] + boxes1[:, 3]).unsqueeze(1)
+
+    b2_x1 = boxes2[:, 0].unsqueeze(0)
+    b2_y1 = boxes2[:, 1].unsqueeze(0)
+    b2_x2 = (boxes2[:, 0] + boxes2[:, 2]).unsqueeze(0)
+    b2_y2 = (boxes2[:, 1] + boxes2[:, 3]).unsqueeze(0)
+
+    inter_x1 = torch.max(b1_x1, b2_x1)
+    inter_y1 = torch.max(b1_y1, b2_y1)
+    inter_x2 = torch.min(b1_x2, b2_x2)
+    inter_y2 = torch.min(b1_y2, b2_y2)
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    area1 = (boxes1[:, 2] * boxes1[:, 3]).unsqueeze(1)
+    area2 = (boxes2[:, 2] * boxes2[:, 3]).unsqueeze(0)
+
+    union = area1 + area2 - inter_area + EPSILON
+    return inter_area / union
 
 def _match_boxes_hungarian(pred, gt):
     """Return index pairs using Hungarian algorithm on IoU cost."""
     if pred.numel() == 0 or gt.numel() == 0:
         return []
 
-    iou_mat = _iou_xywh(
-        pred.unsqueeze(1).expand(-1, gt.shape[0], -1).reshape(-1, 4),
-        gt.unsqueeze(0).expand(pred.shape[0], -1, 4).reshape(-1, 4),
-    ).view(pred.shape[0], gt.shape[0])
+    iou_mat = _iou_matrix_xywh(pred, gt)
 
     # numpy does not understand torch.bfloat16.  Cast to float32 on CPU first.
-    cost = (1.0 - iou_mat).float().cpu().numpy()
+    cost = (1.0 - iou_mat + EPSILON).float().cpu().numpy()
     row_ind, col_ind = linear_sum_assignment(cost)
-    return [(int(r), int(c)) for r, c in zip(row_ind, col_ind) if iou_mat[r, c] > 0]
+    # Keep all assignments; downstream logic can choose to ignore very low IoU
+    return [(int(r), int(c)) for r, c in zip(row_ind, col_ind)]
 
 class CompositeLoss:
     """Compute combined language-model and detection losses.
@@ -203,7 +254,8 @@ class CompositeLoss:
 
         # Missing components add fixed penalty; out-of-range adds proportional
         fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0)
-        fmt_err = max(0.0, min(1.0, fmt_err))
+        # Leave the raw error (can exceed 1 slightly) for analysis; clamp only
+        # when computing the loss to keep gradients bounded.
 
         return clamped, fmt_err
 
@@ -235,7 +287,7 @@ class CompositeLoss:
         # ------------------------------------------------------------------
 
         # --- language-model progress ---------------------------------------
-        lm_ratio = self.lm_target / (self.lm_loss_ema + 1e-8)
+        lm_ratio = self.lm_target / (self.lm_loss_ema + EPSILON)
         progress_lm = max(0.0, min(1.0, 2.0 * lm_ratio - 1.0))  # linear ramp: 0 when ratio≤0.5, 1 when ratio≥1
 
         # --- format progress ----------------------------------------------
@@ -243,10 +295,12 @@ class CompositeLoss:
         if parsed_predictions is not None:
             total_preds = sum(len(p) for p in parsed_predictions)
             if total_preds > 0:
-                valid_preds = sum(
-                    len([p for p in plist if self._parse_detection_string(p) is not None])
-                    for plist in parsed_predictions
-                )
+                valid_preds = 0
+                for plist in parsed_predictions:
+                    for p in plist:
+                        coords, fmt_err = self._parse_detection_string(p)
+                        if fmt_err < FMT_OK_THRESHOLD:
+                            valid_preds += 1
                 fmt_rate = valid_preds / total_preds
                 progress_fmt = max(0.0, min(1.0, fmt_rate / 0.8))  # 0.8 compliance ⇒ 1.0
             else:
@@ -256,14 +310,27 @@ class CompositeLoss:
 
         return self.min_detection_weight + progress * (self.max_detection_weight - self.min_detection_weight)
 
-    def compute_detection_loss(self, lm_logits, target_boxes):
-        """Compute detection losses (L1 + IoU + count penalty) and GT-match rate."""
+    def compute_detection_loss(self, lm_logits, target_boxes, parsed_strs=None):
+        """Compute detection losses and match statistics.
+
+        Parameters
+        ----------
+        lm_logits : Tensor
+            Language-model logits (needed for dtype / device).
+        target_boxes : list | Tensor | None
+            Ground-truth boxes, optional.
+        parsed_strs : list[list[str]] | None
+            Output of `_parse_boxes` if already available.  When *None* the
+            method will call `_parse_boxes` internally.  Supplying it avoids
+            double work in the main forward pass.
+        """
         if target_boxes is None:
             zeros = torch.tensor(0.0, device=lm_logits.device)
             return zeros, zeros, zeros, zeros, 0.0
 
-        # Parse predicted boxes from language model output
-        parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
+        # Parse predicted boxes from language-model output once if not given
+        if parsed_strs is None:
+            parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
 
         batch_preds = []
         fmt_vals = []  # collect format-error scores across batch
@@ -304,7 +371,11 @@ class CompositeLoss:
             
             # Count penalty: penalize difference in number of predictions
             count_diff = abs(pred_count - gt_count)
-            count_penalty = (count_diff ** 2) / max(1, gt_count)
+            # When gt_count == 0, bound the penalty growth to avoid exploding losses
+            if gt_count == 0:
+                count_penalty = min(count_diff ** 2, 16.0)  # cap at 16
+            else:
+                count_penalty = (count_diff ** 2) / gt_count
             count_vals.append(count_penalty)
             
             if pred.numel() == 0 or gt.numel() == 0:
@@ -331,7 +402,12 @@ class CompositeLoss:
         l1_loss = torch.stack(l1_vals).mean() if l1_vals else torch.tensor(0.0, device=lm_logits.device)
         iou_loss = torch.stack(iou_vals).mean() if iou_vals else torch.tensor(0.0, device=lm_logits.device)
         count_loss = torch.tensor(count_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if count_vals else torch.tensor(0.0, device=lm_logits.device)
-        format_loss = torch.tensor(fmt_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if fmt_vals else torch.tensor(0.0, device=lm_logits.device)
+        if fmt_vals:
+            # Clamp to [0,1] to keep the scale bounded before averaging.
+            fmt_tensor = torch.tensor([min(1.0, max(0.0, v)) for v in fmt_vals], device=lm_logits.device, dtype=lm_logits.dtype)
+            format_loss = fmt_tensor.mean()
+        else:
+            format_loss = torch.tensor(0.0, device=lm_logits.device)
         
         match_rate = (matched_gt / total_gt) if total_gt else 0.0
         return l1_loss, iou_loss, count_loss, format_loss, match_rate
@@ -380,7 +456,7 @@ class CompositeLoss:
         # Update curriculum tracking
         self._update_lm_loss_tracking(lm_loss)
         
-        # Parse predicted boxes for both detection loss computation and curriculum assessment
+        # Parse predicted boxes once for curriculum assessment and detection loss
         parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
         
         # Compute adaptive weights based on LM performance AND format compliance
@@ -409,7 +485,9 @@ class CompositeLoss:
                 target_boxes.append(boxes)
 
         # Compute detection losses
-        l1_loss, iou_loss, count_loss, format_loss, match_rate = self.compute_detection_loss(lm_logits, target_boxes)
+        l1_loss, iou_loss, count_loss, format_loss, match_rate = self.compute_detection_loss(
+            lm_logits, target_boxes, parsed_strs
+        )
         
         # Apply adaptive weights to detection losses
         adaptive_lambda_detection = self.lambda_detection * weight_multiplier
