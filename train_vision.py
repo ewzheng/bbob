@@ -66,7 +66,7 @@ def train(
         dataloader_prefetch_factor=num_workers*2,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=True,
-        save_total_limit=2,
+        save_total_limit=3,
         save_safetensors=True,
         lr_scheduler_type="cosine_with_restarts",
         warmup_ratio=warmup_ratio,
@@ -149,7 +149,6 @@ def main():
 
     if args.output_dir is None:
         args.output_dir = f"Output/vision_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    # Ensure the directory exists (avoid double 'Output/' prefix)
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.num_workers == -1:
