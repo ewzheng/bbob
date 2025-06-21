@@ -132,7 +132,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 0.002
-        self.max_detection_weight = 32
+        self.max_detection_weight = 256
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
@@ -309,12 +309,22 @@ class CompositeLoss:
         if lm_labels is None:
             raise ValueError("Labels must be provided in inputs for loss computation")
         
-        # Compute language modeling loss
+        # --------------------------------------------------------------
+        # Align tokens for causal language-model training.
+        #   At position *t* the model must predict token *t*+1, therefore
+        #   we drop the last time-step from the logits and the first one
+        #   from the labels before computing the CE loss.  This matches
+        #   the internal behaviour of transformersʼ `AutoModelForCausalLM`.
+        # --------------------------------------------------------------
+
         vocab_size = lm_logits.size(-1)
+        shift_logits = lm_logits[..., :-1, :].contiguous()
+        shift_labels = lm_labels[..., 1:].contiguous()
+
         lm_loss = F.cross_entropy(
-            lm_logits.view(-1, vocab_size), 
-            lm_labels.view(-1), 
-            ignore_index=-100
+            shift_logits.view(-1, vocab_size),
+            shift_labels.view(-1),
+            ignore_index=-100,
         )
         
         # Update curriculum tracking
