@@ -182,10 +182,10 @@ class CompositeLoss:
         Returns
         -------
         coords : list[float]
-            Always four values, each clamped to the \[0,1] range so the rest
+            Always four values, each clamped to the [0,1] range so the rest
             of the loss pipeline can operate without crashing.
         fmt_err : float
-            *Format error* in \[0,1] – 0 for a perfectly formatted box, 1 for a
+            *Format error* in [0,1] – 0 for a perfectly formatted box, 1 for a
             completely malformed one.  We combine two signals:
 
             1. **Missing components** – +¼ for each of the four numbers that
