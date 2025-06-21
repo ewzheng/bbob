@@ -482,7 +482,7 @@ class CompositeLoss:
             for row in lm_labels:
                 # Remove ignore_index tokens to avoid bogus ids in decoding
                 valid_ids = row[row != -100].tolist()
-                gt_texts.append(self.tokenizer.decode(valid_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True))
+                gt_texts.append(self.tokenizer.decode(valid_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True))
 
             target_boxes = []
             for txt in gt_texts:
