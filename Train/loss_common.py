@@ -325,6 +325,7 @@ class CompositeLoss:
             shift_logits.view(-1, vocab_size),
             shift_labels.view(-1),
             ignore_index=-100,
+            reduction="mean"
         )
         
         # Update curriculum tracking
