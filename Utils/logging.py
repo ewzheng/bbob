@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 
 from transformers import TrainerCallback
-from Train.loss_common import _parse_boxes, _iou_xywh
 
 def create_metrics_functions(tokenizer):
     """
