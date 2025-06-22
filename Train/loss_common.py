@@ -56,14 +56,26 @@ def _parse_boxes(logits, tokenizer):
         while True:
             try:
                 start = row.index(id_open, i)
-                end   = row.index(id_close, start + 1)
             except ValueError:
-                break  # no more tags in this sequence
+                break  # no more opening tags in this sequence
 
+            # Look for the corresponding closing tag. If not found,
+            # add an *empty* snippet so that downstream format_loss = 1.0,
+            # then stop scanning this sequence (no more tags can be valid).
+            try:
+                end = row.index(id_close, start + 1)
+            except ValueError:
+                all_snippets.append([])  # unmatched opening tag → fmt_err = 1
+                snippet_owner.append(b)
+                break
+
+            # When both tags are present collect the snippet if non-empty
             if end - start > 1:
                 snippet = row[start + 1 : end]
-                all_snippets.append(snippet)
-                snippet_owner.append(b)
+            else:
+                snippet = []  # empty snippet, still yields fmt_err = 1
+            all_snippets.append(snippet)
+            snippet_owner.append(b)
             i = end + 1
 
     # Decode only the snippets (they are short → negligible cost)
@@ -306,7 +318,7 @@ class CompositeLoss:
             else:
                 progress_fmt = 0.0  # no predictions yet
 
-        progress = progress_lm * progress_fmt
+        progress = 0.75 * progress_lm + 0.5 * progress_fmt
 
         # Store for later logging
         self.progress_lm  = progress_lm
