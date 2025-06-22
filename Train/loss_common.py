@@ -193,7 +193,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 1
-        self.max_detection_weight = 75
+        self.max_detection_weight = 10
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
@@ -419,6 +419,13 @@ class CompositeLoss:
 
             l1_vals.append(F.l1_loss(p_matched, g_matched, reduction="mean"))
             iou_vals.append(1.0 - _iou_matrix_xywh(p_matched, g_matched).mean())
+
+            # Guard against NaNs that can arise from degenerate boxes (zero area)
+            # or numerical overflow.  Treat NaN IoU as 0, which yields the
+            # maximum penalty (1 − IoU = 1).
+            mean_iou = _iou_matrix_xywh(p_matched, g_matched).mean()
+            mean_iou = torch.nan_to_num(mean_iou, nan=0.0, posinf=0.0, neginf=0.0)
+            iou_vals.append(1.0 - mean_iou)
 
             # -------------------------------------------------------------
             # GT match rate statistics
