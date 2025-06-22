@@ -40,7 +40,14 @@ def train(
 
     cuda = torch.cuda.is_available()
     bf16_supported = cuda and torch.cuda.is_bf16_supported()
-    steps_per_epoch = max(math.ceil(len(train_dataset) / (batch_size * grad_acc_steps)), 1)
+
+    batches_per_epoch = max(math.ceil(len(train_dataset) / batch_size), 1)
+    optim_steps_per_epoch = max(math.ceil(batches_per_epoch / grad_acc_steps), 1)
+    total_optim_steps = epochs * optim_steps_per_epoch
+    total_tf_steps = int(warmup_ratio * total_optim_steps)
+
+    # Keep the old variable name for backward-compatibility
+    steps_per_epoch = optim_steps_per_epoch
 
     cfg = TrainingArguments(
         output_dir=output_dir,
@@ -108,7 +115,6 @@ def train(
     # This creates two functions that share closure variables for accumulating metrics
     compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer)
 
-    total_tf_steps = int(warmup_ratio * epochs * steps_per_epoch)
     trainer = BBOBTrainer(
         model=model,
         train_dataset=train_dataset,
