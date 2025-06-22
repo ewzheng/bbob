@@ -540,7 +540,14 @@ class CompositeLoss:
         # gradients reasonable when the detection weight is very small.
         # --------------------------------------------------------------
 
-        lm_weight = 1.0 / max(1.0, adaptive_lambda_detection)
+        # Inverse scaling based on the *raw* curriculum multiplier so that
+        #   • when detection weight is low (weight_multiplier < 1) the LM
+        #     branch keeps full weight (≤ 1.0);
+        #   • when detection weight grows the LM branch is down-weighted
+        #     proportionally, but never below 0.05 to keep gradients alive.
+
+        lm_weight = 1.0 / weight_multiplier
+        lm_weight = min(max(lm_weight, 0.05), 1.0)  # clamp ∈ [0.05, 1.0]
         total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
         
         # ------------------------------------------------------------------
