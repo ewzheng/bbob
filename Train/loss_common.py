@@ -2,8 +2,8 @@ import torch
 import torch.nn.functional as F
 import re
 
-from scipy.optimize import linear_sum_assignment
-from torchvision.ops import box_iou as _box_iou  
+from torch import linear_sum_assignment  # type: ignore
+from torchvision.ops import box_iou as _box_iou  # type: ignore
 
 # ----------------------------------------------------------------------
 # Constants
@@ -11,6 +11,13 @@ from torchvision.ops import box_iou as _box_iou
 
 EPSILON: float = 1e-8       # small value to avoid division-by-zero
 FMT_OK_THRESHOLD: float = 0.25  # consider a box "well-formed" when fmt_err < 0.25
+
+# ----------------------------------------------------------------------
+# Tag tokens
+# ----------------------------------------------------------------------
+
+TAG_OPEN = "<|bbob|>"
+TAG_CLOSE = "</|bbob|>"
 
 def _val(x):
     return x.item() if isinstance(x, torch.Tensor) else float(x)
@@ -37,7 +44,7 @@ def _parse_boxes(logits, tokenizer):
     token_ids = logits.argmax(dim=-1)  # (B, S)
 
     # Get tag IDs once
-    id_open, id_close = tokenizer.convert_tokens_to_ids(["<bbob>", "</bbob>"])
+    id_open, id_close = tokenizer.convert_tokens_to_ids([TAG_OPEN, TAG_CLOSE])
 
     all_snippets: list[list[int]] = []
     snippet_owner: list[int] = []  # which batch index produced each snippet
@@ -174,7 +181,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 1
-        self.max_detection_weight = 256
+        self.max_detection_weight = 150
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables

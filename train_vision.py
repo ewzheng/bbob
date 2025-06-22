@@ -84,7 +84,7 @@ def train(
     # ------------------------------------------------------------------
 
     special = {
-        "additional_special_tokens": ["<bbob>", "</bbob>"]
+        "additional_special_tokens": ["<|bbob|>", "</|bbob|>"]
     }
     num_added = tokenizer.add_special_tokens(special)
     if num_added > 0:
