@@ -359,9 +359,9 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
                 # Using lookup when possible; fallback = str(cat)
                 label = label_lookup.get(cat, str(cat)) if isinstance(cat, int) else str(cat)
 
-                # bbox components already 0-1 normalised; format with 3 decimals
-                bbox_txt = " ".join(f"{v:.3f}" for v in bbox)
-                detection_fragments.append(f"<bbob>{label}:{bbox_txt}</bbob>")
+                # bbox components already 0-1 normalised; format as [x, y, w, h]
+                bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
+                detection_fragments.append(f"<bbob>{label}: [{bbox_txt}]</bbob>")
 
             detection_text = " ".join(detection_fragments)
 
