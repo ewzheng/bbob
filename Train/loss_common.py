@@ -193,7 +193,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 0.1
-        self.max_detection_weight = 10
+        self.max_detection_weight = 15
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
@@ -266,6 +266,21 @@ class CompositeLoss:
 
         # Missing components add fixed penalty; out-of-range adds proportional
         fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0)
+
+        # ------------------------------------------------------------------
+        # 3) penalise degenerate (zero-area) boxes
+        # ------------------------------------------------------------------
+        # When either width or height is exactly zero after clamping we add a
+        # fixed surcharge to the format error so the model receives an
+        # explicit gradient to predict *positive* extents.  The surcharge is
+        # chosen so that two consecutive infractions push fmt_err above the
+        # FMT_OK_THRESHOLD used elsewhere in the curriculum.
+
+        ZERO_AREA_PENALTY = 0.25  # tuned so one degenerate side = +0.25 fmt
+        w, h = clamped[2], clamped[3]
+        if w == 0.0 or h == 0.0:
+            fmt_err += ZERO_AREA_PENALTY
+
         # Leave the raw error (can exceed 1 slightly) for analysis; clamp only
         # when computing the loss to keep gradients bounded.
 
@@ -318,7 +333,7 @@ class CompositeLoss:
             else:
                 progress_fmt = 0.0  # no predictions yet
 
-        progress = 0.75 * progress_lm + 0.5 * progress_fmt
+        progress = progress_lm + progress_fmt
 
         # Store for later logging
         self.progress_lm  = progress_lm
@@ -547,7 +562,7 @@ class CompositeLoss:
         #     proportionally, but never below 0.05 to keep gradients alive.
 
         lm_weight = 1.0 / weight_multiplier
-        lm_weight = min(max(lm_weight, 0.05), 1.0)  # clamp ∈ [0.05, 1.0]
+        lm_weight = min(max(lm_weight, 0.25), 1.0)  # clamp ∈ [0.05, 1.0]
         total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
         
         # ------------------------------------------------------------------
