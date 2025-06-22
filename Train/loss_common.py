@@ -229,7 +229,7 @@ class CompositeLoss:
 
             1. **Missing components** – +¼ for each of the four numbers that
                could not be parsed;
-            2. **Out-of-range values** – the absolute amount of clipping
+            2. **Out-of-range values** – the absolute amount of clipping    
                required, averaged over the four coordinates.
         """
 
@@ -533,8 +533,15 @@ class CompositeLoss:
             + self.lambda_format * format_loss
         )
         
-        # Total loss with adaptive weighting
-        total_loss = lm_loss + adaptive_lambda_detection * detection_loss
+        # --------------------------------------------------------------
+        # Scale the LM loss inversely with the detection weight so that
+        # as the curriculum focuses more on boxes the language-model
+        # component is gradually deemphasised.  Clamp the factor to keep
+        # gradients reasonable when the detection weight is very small.
+        # --------------------------------------------------------------
+
+        lm_weight = 1.0 / max(1.0, adaptive_lambda_detection)
+        total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
         
         # ------------------------------------------------------------------
         # Optional inline logging every `log_interval` calls
