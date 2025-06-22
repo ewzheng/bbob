@@ -86,22 +86,6 @@ def train(
         tokenizer.pad_token = tokenizer.eos_token
     clean_tokenizer_config(tokenizer)
 
-    # ------------------------------------------------------------------
-    # Add <bbob> tokens so the language model can emit them
-    # ------------------------------------------------------------------
-
-    special = {
-        "additional_special_tokens": ["<|bbob|>", "</|bbob|>"]
-    }
-    num_added = tokenizer.add_special_tokens(special)
-    if num_added > 0:
-        logger.info(f"Added {num_added} special tokens to tokenizer – resizing model embeddings")
-        try:
-            model.base_model.resize_token_embeddings(len(tokenizer))
-        except AttributeError:
-            # Fallback for different attribute names
-            model.resize_token_embeddings(len(tokenizer))
-
     logger.info(model_size_breakdown(model))
 
     logger.info("Preparing dataset …")
@@ -167,10 +151,31 @@ def main():
     logger.info(f"Loading model from {args.model}")
     model = build_BBOB(args.model, args.bnb_config, load=True)
 
+    # --------------------------------------------------------------
+    # Ensure the tokenizer knows the special <|bbob|> tags *before*
+    # we encode the dataset so that they are stored as single tokens.
+    # --------------------------------------------------------------
+
+    tokenizer = model.get_tokenizer()
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    special = {"additional_special_tokens": ["<|bbob|>", "</|bbob|>"]}
+    num_added = tokenizer.add_special_tokens(special)
+    if num_added > 0:
+        logger.info(f"Added {num_added} special tokens to tokenizer – resizing model embeddings")
+        try:
+            model.base_model.resize_token_embeddings(len(tokenizer))
+        except AttributeError:
+            model.resize_token_embeddings(len(tokenizer))
+
+    # Sanitize config after modification so Trainer can save it
+    clean_tokenizer_config(tokenizer)
+
     logger.info("Preparing dataset …")
     train_ds, val_ds = load_and_prepare_dataset(
         args.dataset,
-        tokenizer=model.get_tokenizer(),
+        tokenizer=tokenizer,
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
         dtype=model.dtype,

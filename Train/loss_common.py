@@ -506,7 +506,9 @@ class CompositeLoss:
             target_boxes = []
             for txt in gt_texts:
                 boxes = []
-                for det in re.findall(r"<bbob>(.*?)</bbob>", txt):
+                # Match using the exact special tokens so we stay in sync
+                pattern = re.escape(TAG_OPEN) + r"(.*?)" + re.escape(TAG_CLOSE)
+                for det in re.findall(pattern, txt):
                     coords, fmt_err = self._parse_detection_string(det)
                     if coords is not None:
                         boxes.append(coords)
