@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import re
+import math  # for isnan / isfinite checks
 
 from scipy.optimize import linear_sum_assignment  # type: ignore
 from torchvision.ops import box_iou as _box_iou  # type: ignore
@@ -306,20 +307,32 @@ class CompositeLoss:
         return clamped, fmt_err
 
     def _update_lm_loss_tracking(self, current_lm_loss):
-        """Update the exponential moving average of LM loss."""
+        """Update the EMA of LM loss while guarding against NaN/Inf values."""
         lm_loss_value = current_lm_loss.detach().item()
-        
+
+        # --------------------------------------------------------------
+        # Skip the update when the loss is not finite to avoid
+        # contaminating the EMA with NaN/Inf and breaking the curriculum.
+        # --------------------------------------------------------------
+        if not math.isfinite(lm_loss_value):
+            # Still advance global step to keep schedules in sync
+            self.step_count += 1
+            return
+
         if self.lm_loss_ema is None:
             self.lm_loss_ema = lm_loss_value
         else:
-            self.lm_loss_ema = (self.smoothing_factor * self.lm_loss_ema + 
-                               (1 - self.smoothing_factor) * lm_loss_value)
-        
+            self.lm_loss_ema = (
+                self.smoothing_factor * self.lm_loss_ema
+                + (1 - self.smoothing_factor) * lm_loss_value
+            )
+
         self.step_count += 1
 
     def _compute_adaptive_weights(self, parsed_predictions=None):
         """Compute adaptive detection loss weights based on LM performance and format compliance."""
-        if self.lm_loss_ema is None:
+        # Guard against uninitialised or invalid EMA values
+        if self.lm_loss_ema is None or not math.isfinite(self.lm_loss_ema):
             return self.min_detection_weight
         
         # ------------------------------------------------------------------
@@ -621,8 +634,15 @@ class CompositeLoss:
             shift_logits.view(-1, vocab_size),
             shift_labels.view(-1),
             ignore_index=-100,
-            reduction="mean"
+            reduction="mean",
         )
+        
+        # ----------------------------------------------------------
+        # Numerical safety: abort early if the LM loss is NaN/Inf so
+        # we do not corrupt the model with undefined gradients.
+        # ----------------------------------------------------------
+        if not torch.isfinite(lm_loss):
+            raise RuntimeError("NaN or Inf detected in LM loss – aborting training step.")
         
         # Update curriculum tracking
         self._update_lm_loss_tracking(lm_loss)
