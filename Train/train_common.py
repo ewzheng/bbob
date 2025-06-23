@@ -661,49 +661,33 @@ def calculate_optimal_batch_size(
     min_batch_size=MIN_BATCH_SIZE,
     max_batch_size=MAX_BATCH_SIZE,
 ):
-    """Compute **both** GPU and CPU batch sizes.
+    """Compute an optimal CPU batch size for preprocessing.
 
-    GPU: uses free VRAM; CPU: uses available system RAM & logical cores.
+    GPU heuristics have been removed because preprocessing runs on CPU
+    workers only.  The function therefore always returns ``None`` for
+    the GPU batch size component.
 
     Returns
     -------
-    (gpu_bs, cpu_bs) : tuple[int | None, int]
-        • *gpu_bs* – optimal per-device GPU batch size or *None* when CUDA is
-          not available.
-        • *cpu_bs* – optimal CPU-side batch size for multiprocessing image
-          preprocessing.
+    (gpu_bs, cpu_bs) : tuple[None, int]
+        • gpu_bs is always *None*.
+        • cpu_bs is the optimal CPU-side batch size.
     """
 
-    # gpu batch
+    # ------------------------------------------------------------------
+    # GPU batch size disabled – skip VRAM inspection
+    # ------------------------------------------------------------------
     gpu_batch_size = None
-    if torch.cuda.is_available():
-        props = torch.cuda.get_device_properties(0)
-        total_vram = props.total_memory
-        allocated = torch.cuda.memory_allocated(0)
-        available_vram = total_vram - allocated
 
-        print("VRAM Analysis:")
-        print(f"  Total VRAM:       {total_vram/1024**3:.1f} GB")
-        print(f"  Currently alloc.: {allocated/1024**3:.1f} GB")
-        print(f"  Available:        {available_vram/1024**3:.1f} GB")
-
-        gpu_batch_size = int(available_vram / GPU_MEMORY_PER_SAMPLE)
-        gpu_batch_size = min(gpu_batch_size, MAX_PREPROC_GPU_BATCH)
-
-        if gpu_batch_size >= 2:
-            gpu_batch_size = 2 ** int(math.log2(gpu_batch_size))
-
-        est_usage = (gpu_batch_size * GPU_MEMORY_PER_SAMPLE) / 1024**3
-        pct = (est_usage / (total_vram / 1024**3)) * 100
-        print(f"  → GPU batch size:  {gpu_batch_size}  (≈{est_usage:.1f} GB, {pct:.1f}% of VRAM)")
-
-    # cpu batch
+    # ------------------------------------------------------------------
+    # CPU batch size heuristic
+    # ------------------------------------------------------------------
     if psutil is not None:
         vm = psutil.virtual_memory()
         total_ram = vm.total
         available_ram = vm.available
     else:
-        # fallback: assume 8 GB total with 50 % free
+        # Fallback: assume 8 GB total with 50 % free
         total_ram = 8 * 1024**3
         available_ram = total_ram * (1 - safety_margin)
 
@@ -711,9 +695,11 @@ def calculate_optimal_batch_size(
     print(f"  Total RAM:        {total_ram/1024**3:.1f} GB")
     print(f"  Available RAM:    {available_ram/1024**3:.1f} GB")
 
-    cpu_bs_mem = int(available_ram * (1 - safety_margin) / CPU_MEMORY_PER_SAMPLE) // workers // 2
+    # Conservative estimate: divide by number of workers and apply margin
+    cpu_bs_mem = int(available_ram * (1 - safety_margin) / CPU_MEMORY_PER_SAMPLE) // max(workers, 1) // 2
 
-    cpu_batch_size = min(cpu_bs_mem, max_batch_size)
+    # Clamp to valid range and round to nearest power-of-two for efficiency
+    cpu_batch_size = min(max(cpu_bs_mem, min_batch_size), max_batch_size)
     if cpu_batch_size >= 2:
         cpu_batch_size = 2 ** int(math.log2(cpu_batch_size))
 
