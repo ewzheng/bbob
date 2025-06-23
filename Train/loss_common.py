@@ -4,6 +4,7 @@ import re
 
 from scipy.optimize import linear_sum_assignment  # type: ignore
 from torchvision.ops import box_iou as _box_iou  # type: ignore
+from torchvision.ops import generalized_box_iou as _generalized_box_iou  # type: ignore
 
 # ----------------------------------------------------------------------
 # Constants
@@ -136,6 +137,17 @@ def _iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor
     union = area1 + area2 - inter_area + EPSILON
     return inter_area / union
 
+def _giou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """Compute pair-wise Generalised IoU matrix."""
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
+
+    if _generalized_box_iou is not None:
+        return _generalized_box_iou(_xywh_to_xyxy(boxes1), _xywh_to_xyxy(boxes2))
+
+    # Fallback: use IoU when GIoU kernel not available
+    return _iou_matrix_xywh(boxes1, boxes2)
+
 def _match_boxes_hungarian(pred, gt):
     """Return index pairs using Hungarian algorithm on IoU cost."""
     if pred.numel() == 0 or gt.numel() == 0:
@@ -180,7 +192,7 @@ class CompositeLoss:
         lm_target=1.5,
         smoothing_factor=0.95,
         logger=None,
-        log_interval: int = 100,
+        log_interval: int = 100,    
     ):
         self.tokenizer = tokenizer
         self.lambda_l1 = lambda_l1
@@ -443,10 +455,10 @@ class CompositeLoss:
             g_matched = torch.stack([gt[j] for _, j in pairs])
 
             l1_vals.append(F.l1_loss(p_matched, g_matched, reduction="mean"))
-            # Compute mean IoU and guard against NaNs that can arise from
+            # Compute mean GIoU and guard against NaNs that can arise from
             # degenerate boxes (zero area) or numerical overflow.  Treat
-            # NaN IoU as 0, which yields the maximum penalty (1 − IoU = 1).
-            mean_iou = _iou_matrix_xywh(p_matched, g_matched).mean()
+            # NaN as -1 (worst case) so (1 - GIoU) clamps to 2.
+            mean_iou = _giou_matrix_xywh(p_matched, g_matched).mean()
             mean_iou = torch.nan_to_num(mean_iou, nan=0.0, posinf=0.0, neginf=0.0)
             iou_vals.append(1.0 - mean_iou)
 
@@ -558,7 +570,11 @@ class CompositeLoss:
             + self.lambda_format * format_loss
         )
 
-        total_loss = lm_loss + adaptive_lambda_detection * detection_loss
+        # Inverse scaling: down-weight LM loss as detection weight grows,
+        # but keep at least 30 % so class predictions still receive signal.
+        lm_weight = 1.0 / weight_multiplier
+        lm_weight = min(max(lm_weight, 0.3), 1.0)  # clamp in [0.3, 1]
+        total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
         
         # ------------------------------------------------------------------
         # Optional inline logging every `log_interval` calls
