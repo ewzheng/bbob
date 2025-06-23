@@ -174,7 +174,7 @@ class CompositeLoss:
         *,
         lambda_l1=0.75,
         lambda_iou=1.5,
-        lambda_count=0.25,
+        lambda_count=0.15,
         lambda_detection=0.15,
         lambda_format=0.5,
         lm_target=1.5,
@@ -193,7 +193,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 0.1
-        self.max_detection_weight = 15
+        self.max_detection_weight = 25
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
@@ -310,7 +310,7 @@ class CompositeLoss:
         #   • `progress_fmt`  ∈ [0,1]   – fraction of boxes that can be parsed,
         #     scaled so that 0.8 compliance → 1.0 (cap at 1).
         #   • Overall progress = progress_lm × progress_fmt.
-        #   • Weight  = min + progress × (max − min).
+        #   • Weight  = min + progress × (max − min).   
         # ------------------------------------------------------------------
 
         # --- language-model progress ---------------------------------------
