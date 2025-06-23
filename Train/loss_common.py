@@ -665,11 +665,17 @@ class CompositeLoss:
         
         # Apply adaptive weights to detection losses
         adaptive_lambda_detection = self.lambda_detection * weight_multiplier
-        detection_loss = self.lambda_iou * iou_loss + self.lambda_format * format_loss
-        
-        # Update curriculum tracking
-        self._update_lm_loss_tracking(lm_loss)
-        
+        detection_loss = (
+            self.lambda_iou * iou_loss +
+            self.lambda_format * format_loss
+        )
+
+        # Inverse scaling: down-weight LM loss when detection weight grows,
+        # but keep at least 30 % so the model still learns language tokens.
+        lm_weight = max(0.3, min(1.0, 1.0 / weight_multiplier))
+
+        total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
+
         # ------------------------------------------------------------------
         # Optional inline logging every `log_interval` calls
         # ------------------------------------------------------------------
@@ -682,7 +688,7 @@ class CompositeLoss:
                 avg_gt = 0.0
 
             loss_dict = {
-                "loss_total": _val(iou_loss + detection_loss),
+                "loss_total": _val(total_loss),
                 "loss_lm": _val(lm_loss),
                 "loss_iou": _val(iou_loss),
                 "loss_fmt": _val(format_loss),
@@ -716,7 +722,7 @@ class CompositeLoss:
                     f"[sample] pred: {sample_pred_text} || gt: {sample_gt_text}"
                 )
 
-        return iou_loss + detection_loss
+        return total_loss
 
     
 def create_compute_loss_func(
