@@ -35,7 +35,7 @@ from .train_augments import apply_batch_augmentations
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
 DEFAULT_TARGET_SIZE = (256, 256)
-MAX_TARGET_TEXT_LENGTH = 512
+MAX_TARGET_TEXT_LENGTH = 256
 DEFAULT_BBOX_JITTER_RATIO = 0.05
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
