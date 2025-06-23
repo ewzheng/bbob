@@ -221,6 +221,7 @@ class CompositeLoss:
             raise RuntimeError("Tokenizer lacks distinct tokens '0'–'9' required for digit-wise straight-through")
 
         self._digit_token_ids = torch.tensor(digit_ids, dtype=torch.long)
+        self._digit_token_id_set = set(digit_ids)
         self._enable_digit_st = True
 
         # Gumbel-Softmax temperature schedule
@@ -484,7 +485,8 @@ class CompositeLoss:
 
             i = 0
             coords_list = []
-            digit_buffer = []  # store differentiable digit values
+            digit_buffer: list[torch.Tensor] = []  # collect 3 digits per coordinate
+            coord_buffer: list[torch.Tensor] = []  # collect 4 coords per box
             while True:
                 try:
                     start = row.index(id_open, i)
@@ -498,13 +500,19 @@ class CompositeLoss:
                 # Iterate positions between start and end (exclusive)
                 for pos in range(start + 1, end):
                     tok_id = row[pos]
-                    if tok_id in self._numeric_token_ids:
-                        # Differentiable coordinate value
-                        coord_val = self._st_expect_coord(logits_row[pos : pos + 1, :])[0]
-                        numeric_buffer.append(coord_val)
-                        if len(numeric_buffer) == 4:
-                            coords_list.append(torch.stack(numeric_buffer))
-                            numeric_buffer = []
+                    if tok_id in self._digit_token_id_set:
+                        digit_val = self._st_expect_coord(logits_row[pos : pos + 1, :])[0]
+                        digit_buffer.append(digit_val)
+                        if len(digit_buffer) == 3:
+                            # Compose 3 digits into a single coordinate value in [0,1]
+                            coord_int = (digit_buffer[0] * 100 + digit_buffer[1] * 10 + digit_buffer[2])
+                            coord_val = coord_int / 999.0
+                            coord_buffer.append(coord_val)
+                            digit_buffer = []
+
+                            if len(coord_buffer) == 4:
+                                coords_list.append(torch.stack(coord_buffer))
+                                coord_buffer = []
                 i = end + 1
 
             if coords_list:
