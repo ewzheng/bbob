@@ -4,7 +4,6 @@ import re
 
 from scipy.optimize import linear_sum_assignment  # type: ignore
 from torchvision.ops import box_iou as _box_iou  # type: ignore
-from torchvision.ops import generalized_box_iou as _generalized_box_iou  # type: ignore
 from torchvision.ops import complete_box_iou_loss as _complete_box_iou_loss  # type: ignore
 
 # ----------------------------------------------------------------------
@@ -137,17 +136,6 @@ def _iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor
 
     union = area1 + area2 - inter_area + EPSILON
     return inter_area / union
-
-def _giou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
-    """Compute pair-wise Generalised IoU matrix."""
-    if boxes1.numel() == 0 or boxes2.numel() == 0:
-        return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
-
-    if _generalized_box_iou is not None:
-        return _generalized_box_iou(_xywh_to_xyxy(boxes1), _xywh_to_xyxy(boxes2))
-
-    # Fallback: use IoU when GIoU kernel not available
-    return _iou_matrix_xywh(boxes1, boxes2)
 
 def _match_boxes_hungarian(pred, gt):
     """Return index pairs using Hungarian algorithm on IoU cost."""
