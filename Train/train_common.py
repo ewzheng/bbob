@@ -35,7 +35,7 @@ from .train_augments import apply_batch_augmentations
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
 DEFAULT_TARGET_SIZE = (256, 256)
-MAX_TARGET_TEXT_LENGTH = 128
+MAX_TARGET_TEXT_LENGTH = 512
 DEFAULT_BBOX_JITTER_RATIO = 0.05
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
@@ -363,19 +363,30 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
                 bbox_txt = ", ".join(str(int(round(v * 999))) for v in bbox)
                 detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
 
-            detection_text = " ".join(detection_fragments)
+            # ---------------------------------------------------------
+            # Join the fragments but ensure *whole* boxes fit within the
+            # max-length budget.  If the tokenised string exceeds the
+            # limit, drop entire fragments from the END until it fits so
+            # we never cut a <|bbob|> … </|bbob|> pair in half.
+            # ---------------------------------------------------------
 
-            # No manual BOS/EOS – rely on tokenizer's add_special_tokens
-
-            # Tokenise—NOTE: no padding here; collate will pad.
-            if detection_text:
-                ids = tokenizer(
-                    detection_text,
-                    return_tensors="pt",
-                    truncation=True,
-                    max_length=MAX_TARGET_TEXT_LENGTH,
-                )["input_ids"].squeeze(0).tolist()
+            if detection_fragments:
+                current = detection_fragments.copy()
+                while current:
+                    candidate_text = " ".join(current)
+                    t_ids = tokenizer(candidate_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+                    if t_ids.size(0) <= MAX_TARGET_TEXT_LENGTH:
+                        detection_text = candidate_text
+                        ids = t_ids.tolist()
+                        break
+                    # drop the last fragment and try again
+                    current.pop()
+                else:
+                    # Even the first fragment is too long – fallback to hard truncation
+                    single = detection_fragments[0]
+                    ids = tokenizer(single, return_tensors="pt", truncation=True, max_length=MAX_TARGET_TEXT_LENGTH)["input_ids"].squeeze(0).tolist()
             else:
+                detection_text = ""
                 ids = []
 
             # store per-sample
