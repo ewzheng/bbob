@@ -502,7 +502,7 @@ class CompositeLoss:
         matched_gt, total_gt = 0, 0
         disc_iou_vals: list[torch.Tensor] = []
 
-        for pred, gt in zip(batch_preds, target_boxes):
+        for b, (pred, gt) in enumerate(zip(batch_preds, target_boxes)):
             # Convert GT to tensor on the correct device / dtype
             if isinstance(gt, list):
                 gt = torch.tensor(gt, device=lm_logits.device, dtype=lm_logits.dtype)
