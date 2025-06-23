@@ -169,21 +169,6 @@ def main():
         except AttributeError:
             model.resize_token_embeddings(len(tokenizer))
 
-    # ------------------------------------------------------------------
-    # Add numeric coordinate tokens "0"–"999" so that every coordinate
-    # value is represented by a *single* token.  We add them as *regular*
-    # tokens (not special) to preserve normal MLM behaviour.
-    # ------------------------------------------------------------------
-
-    numeric_tokens = [str(i) for i in range(1000)]
-    added_numeric = tokenizer.add_tokens(numeric_tokens, special_tokens=False)
-    if added_numeric > 0:
-        logger.info(f"Added {added_numeric} numeric tokens (0–999) to tokenizer – resizing model embeddings")
-        try:
-            model.base_model.resize_token_embeddings(len(tokenizer))
-        except AttributeError:
-            model.resize_token_embeddings(len(tokenizer))
-
     # Sanitize config after modification so Trainer can save it
     clean_tokenizer_config(tokenizer)
 
