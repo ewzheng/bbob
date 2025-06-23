@@ -11,6 +11,7 @@ from torchvision.ops import complete_box_iou_loss as _complete_box_iou_loss  # t
 # ----------------------------------------------------------------------
 
 EPSILON: float = 1e-8       # small value to avoid division-by-zero
+BBOX_SCALE: float = 999.0    # integer scale for coordinate tokens 0–999
 FMT_OK_THRESHOLD: float = 0.25  # consider a box "well-formed" when fmt_err < 0.25
 
 # ----------------------------------------------------------------------
@@ -174,17 +175,16 @@ class CompositeLoss:
         tokenizer,
         *,
         lambda_iou=1.5,
-        lambda_count=0.15,
         lambda_detection=0.15,
         lambda_format=0.5,
         lm_target=1.5,
         smoothing_factor=0.95,
         logger=None,
-        log_interval: int = 100,    
+        log_interval: int = 100,
+        gumbel_tau: float = 1.0,
     ):
         self.tokenizer = tokenizer
         self.lambda_iou = lambda_iou
-        self.lambda_count = lambda_count
         self.lambda_detection = lambda_detection
         self.lambda_format = lambda_format
         
@@ -206,6 +206,13 @@ class CompositeLoss:
         # Store latest curriculum progress for logging
         self.progress_lm: float | None = None
         self.progress_fmt: float | None = None
+
+        self._numeric_token_ids = torch.tensor([
+            tokenizer.convert_tokens_to_ids(str(i)) for i in range(1000)
+        ], dtype=torch.long)
+        # Pre-compute value vector 0..999 / scale for expectation trick
+        self._numeric_values = torch.arange(1000, dtype=torch.float32) / BBOX_SCALE
+        self.gumbel_tau = gumbel_tau
 
     def _parse_detection_string(self, det_str):
         """Robustly parse a detection string in the canonical form
@@ -261,7 +268,7 @@ class CompositeLoss:
 
         missing = 4 - len(nums)
         # Fill the rest with a neutral prior (centre-ish square)
-        nums.extend([0.5] * missing)
+        nums.extend([0.5 * BBOX_SCALE] * missing)
 
         # ------------------------------------------------------------------
         # 2) clamp to [0,1] and accumulate formatting error
@@ -269,9 +276,11 @@ class CompositeLoss:
         clip_diffs = []
         clamped = []
         for v in nums:
-            v_clamped = max(0.0, min(1.0, v))
+            # Convert integer-ish token back to 0–1 float
+            v_float = v / BBOX_SCALE
+            v_clamped = max(0.0, min(1.0, v_float))
             clamped.append(v_clamped)
-            clip_diffs.append(abs(v - v_clamped))
+            clip_diffs.append(abs(v_float - v_clamped))
 
         # Missing components add fixed penalty; out-of-range adds proportional
         fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0) + blank_label_pen
@@ -350,121 +359,213 @@ class CompositeLoss:
 
         return self.min_detection_weight + progress * (self.max_detection_weight - self.min_detection_weight)
 
+    # ------------------------------------------------------------------
+    # Differentiable coordinate helper using straight-through Gumbel-Softmax
+    # ------------------------------------------------------------------
+
+    def _st_expect_coord(self, logits_slice: torch.Tensor) -> torch.Tensor:
+        """Return differentiable expected coordinate in [0,1] for a slice
+        of logits corresponding to numeric token ids.
+
+        Uses the straight-through Gumbel-Softmax estimator so the forward
+        pass behaves like an arg-max (integer token) while the backward
+        pass uses soft probabilities.
+        """
+        # logits_slice: (..., vocab)
+        device = logits_slice.device
+        # select numeric logits
+        numeric_logits = logits_slice.index_select(-1, self._numeric_token_ids.to(device))  # (..., 1000)
+
+        # If gradients are disabled (e.g., evaluation), skip soft path
+        if not torch.is_grad_enabled():
+            idx_hard = numeric_logits.argmax(dim=-1)
+            values = self._numeric_values.to(device, dtype=logits_slice.dtype)
+            coord = values[idx_hard]
+            return coord
+
+        # Training: use Gumbel-Softmax straight-through
+        y_soft = torch.nn.functional.gumbel_softmax(
+            numeric_logits, tau=self.gumbel_tau, hard=False, dim=-1
+        )
+
+        idx_hard = y_soft.argmax(dim=-1)
+        y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=1000).type_as(y_soft)
+
+        # Straight-through substitute
+        y_st = y_hard + (y_soft - y_soft.detach())
+
+        values = self._numeric_values.to(device, dtype=logits_slice.dtype)
+        coord = (y_st * values).sum(dim=-1)
+        return coord
+
     def compute_detection_loss(self, lm_logits, target_boxes, parsed_strs=None):
         """Compute detection losses and match statistics.
 
-        Parameters
-        ----------
-        lm_logits : Tensor
-            Language-model logits (needed for dtype / device).
-        target_boxes : list | Tensor | None
-            Ground-truth boxes, optional.
-        parsed_strs : list[list[str]] | None
-            Output of `_parse_boxes` if already available.  When *None* the
-            method will call `_parse_boxes` internally.  Supplying it avoids
-            double work in the main forward pass.
+        Integrates straight-through Gumbel-Softmax so that coordinate
+        values carry gradients.
         """
         if target_boxes is None:
             zeros = torch.tensor(0.0, device=lm_logits.device)
             return zeros, zeros, zeros, zeros, 0.0
 
-        # Parse predicted boxes from language-model output once if not given
+        batch_size, seq_len, _ = lm_logits.shape
+
+        # ------------------------------------------------------------------
+        # Pass 1: non-differentiable parsing for curriculum / progress stats
+        # ------------------------------------------------------------------
         if parsed_strs is None:
             parsed_strs = _parse_boxes(lm_logits, self.tokenizer)
 
-        # ------------------------------------------------------------------
-        # Vectorised parsing: build a single flat list of coords, then split
-        # back into per-sample tensors to avoid thousands of small tensor
-        # allocations on GPU each step.
-        # ------------------------------------------------------------------
-
-        flat_coords: list[list[float]] = []
-        fmt_vals: list[float] = []
-        counts: list[int] = []
-
+        # Build discrete prediction tensors (no gradients) from parsed_strs
+        disc_preds_batch: list[torch.Tensor] = []
         for det_list in parsed_strs:
-            counts.append(len(det_list))
+            coords_list = []
             for det in det_list:
-                coords, fmt_err = self._parse_detection_string(det)
-                flat_coords.append(coords)
-                fmt_vals.append(fmt_err)
+                coords, _ = self._parse_detection_string(det)
+                coords_list.append(coords)
+            if coords_list:
+                disc_preds_batch.append(torch.tensor(coords_list, device=lm_logits.device, dtype=lm_logits.dtype))
+            else:
+                disc_preds_batch.append(torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype))
 
-        if flat_coords:
-            all_preds = torch.tensor(flat_coords, device=lm_logits.device, dtype=lm_logits.dtype)
-            split_preds = list(all_preds.split(counts))
-        else:
-            # Handle edge-case when no predictions at all in batch
-            split_preds = [torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype) for _ in counts]
+        # ------------------------------------------------------------------
+        # Pass 2: differentiable extraction of coordinates using ST-Gumbel.
+        # We scan the arg-max ids to identify numeric-token positions, but we
+        # compute the coordinate values with _st_expect_coord, which keeps
+        # gradients w.r.t. the logits.  The positional scan is hard, so the
+        # graph is still cut if a numeric token is mis-typed, but correct
+        # numeric tokens now receive meaningful gradients.
+        # ------------------------------------------------------------------
 
-        batch_preds = split_preds
+        token_ids = lm_logits.argmax(dim=-1)  # (B, S) – used only for pattern detection
+        id_open, id_close = self.tokenizer.convert_tokens_to_ids([TAG_OPEN, TAG_CLOSE])
 
-        # Compute loss per sample with simple first-K matching
-        iou_vals = []
-        count_vals = []
-        
+        batch_preds: list[torch.Tensor] = []  # each [K,4] differentiable
+
+        for b in range(batch_size):
+            row = token_ids[b].tolist()
+            logits_row = lm_logits[b]  # (S, V)
+
+            i = 0
+            coords_list = []
+            numeric_buffer = []  # store differentiable coords
+            while True:
+                try:
+                    start = row.index(id_open, i)
+                except ValueError:
+                    break
+                try:
+                    end = row.index(id_close, start + 1)
+                except ValueError:
+                    break  # unmatched → ignore rest
+
+                # Iterate positions between start and end (exclusive)
+                for pos in range(start + 1, end):
+                    tok_id = row[pos]
+                    if tok_id in self._numeric_token_ids:
+                        # Differentiable coordinate value
+                        coord_val = self._st_expect_coord(logits_row[pos : pos + 1, :])[0]
+                        numeric_buffer.append(coord_val)
+                        if len(numeric_buffer) == 4:
+                            coords_list.append(torch.stack(numeric_buffer))
+                            numeric_buffer = []
+                i = end + 1
+
+            if coords_list:
+                preds_b = torch.stack(coords_list)  # (K,4)
+            else:
+                preds_b = torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype)
+            batch_preds.append(preds_b)
+
+        # ------------------------------------------------------------------
+        # Aggregate losses per sample (CIoU and count) using differentiable
+        # predictions.  This mirrors the old logic but retains gradients.
+        # ------------------------------------------------------------------
+
+        iou_vals: list[torch.Tensor] = []
+        soft_iou_vals: list[torch.Tensor] = []
+
         matched_gt, total_gt = 0, 0
-        
+        disc_iou_vals: list[torch.Tensor] = []
+
         for pred, gt in zip(batch_preds, target_boxes):
-            # Convert gt to tensor if it's a list
+            # Convert GT to tensor on the correct device / dtype
             if isinstance(gt, list):
-                if not gt:  # Empty list
-                    gt_count = 0
-                    gt = torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype)
-                else:
-                    gt_count = len(gt)
-                    gt = torch.tensor(gt, device=lm_logits.device, dtype=lm_logits.dtype)
+                gt = torch.tensor(gt, device=lm_logits.device, dtype=lm_logits.dtype)
             elif gt is None:
-                continue
-            else:
-                gt_count = gt.shape[0]
-            
+                gt = torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype)
+
+            gt_count = gt.shape[0]
             pred_count = pred.shape[0]
-            
-            # Count penalty: penalize difference in number of predictions
-            count_diff = abs(pred_count - gt_count)
-            # When gt_count == 0, bound the penalty growth to avoid exploding losses
-            if gt_count == 0:
-                count_penalty = min(count_diff ** 2, 16.0)  # cap at 16
-            else:
-                count_penalty = (count_diff ** 2) / gt_count
-            count_vals.append(count_penalty)
-            
+
             if pred.numel() == 0 or gt.numel() == 0:
                 continue
 
             pairs = _match_boxes_hungarian(pred, gt)
-
             if not pairs:
                 continue
 
             p_matched = torch.stack([pred[i] for i, _ in pairs])
             g_matched = torch.stack([gt[j] for _, j in pairs])
 
-            # CIoU loss (1 − CIoU).  Handles overlap, distance, and aspect ratio.
             ciou = _complete_box_iou_loss(
                 _xywh_to_xyxy(p_matched), _xywh_to_xyxy(g_matched), reduction="none"
             ).mean()
             ciou = torch.nan_to_num(ciou, nan=2.0, posinf=2.0, neginf=0.0)
             iou_vals.append(ciou)
 
-            # -------------------------------------------------------------
-            # GT match rate statistics
-            # -------------------------------------------------------------
-            matched_gt += len({j for _, j in pairs})
-            total_gt   += gt_count
+            # Convert differentiable CIoU to IoU (approx) for correlation
+            soft_iou_vals.append((1.0 - ciou.detach()))
 
-        # Aggregate losses
+            # -------------------------------------------
+            # Discrete IoU using arg-max parsed boxes
+            # -------------------------------------------
+            disc_pred_sample = disc_preds_batch[b]
+            if disc_pred_sample.shape[0] > 0:
+                d_matched = torch.stack([disc_pred_sample[i] for i, _ in pairs])
+                with torch.no_grad():
+                    disc_pair_iou = _iou_matrix_xywh(d_matched, g_matched).diag().mean()
+                disc_iou_vals.append(disc_pair_iou)
+
+            matched_gt += len({j for _, j in pairs})
+            total_gt += gt_count
+
         iou_loss = torch.stack(iou_vals).mean() if iou_vals else torch.tensor(0.0, device=lm_logits.device)
-        count_loss = torch.tensor(count_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if count_vals else torch.tensor(0.0, device=lm_logits.device)
+
+        # ------------------------------------------------------------------
+        # Keep format / count evaluation via existing parser
+        # ------------------------------------------------------------------
+        fmt_vals: list[float] = []
+
+        for det_list in parsed_strs:
+            for det in det_list:
+                _, fmt_err = self._parse_detection_string(det)
+                fmt_vals.append(fmt_err)
+
         if fmt_vals:
-            # Clamp to [0,1] to keep the scale bounded before averaging.
             fmt_tensor = torch.tensor([min(1.0, max(0.0, v)) for v in fmt_vals], device=lm_logits.device, dtype=lm_logits.dtype)
             format_loss = fmt_tensor.mean()
         else:
             format_loss = torch.tensor(0.0, device=lm_logits.device)
         
         match_rate = (matched_gt / total_gt) if total_gt else 0.0
-        return iou_loss, count_loss, format_loss, match_rate
+
+        # --------------------------------------------------------------
+        # Pearson correlation between discrete IoU and differentiable IoU
+        # --------------------------------------------------------------
+        if len(disc_iou_vals) > 1 and len(disc_iou_vals) == len(soft_iou_vals):
+            dx = torch.stack(disc_iou_vals)
+            sx = torch.stack(soft_iou_vals)
+            mean_d = dx.mean()
+            mean_s = sx.mean()
+            cov = ((dx - mean_d) * (sx - mean_s)).mean()
+            var_d = dx.var(unbiased=False)
+            var_s = sx.var(unbiased=False)
+            corr = cov / (torch.sqrt(var_d * var_s) + EPSILON)
+        else:
+            corr = torch.tensor(float('nan'), device=lm_logits.device)
+
+        return iou_loss, format_loss, match_rate, corr
 
     def __call__(self, outputs, labels, **kwargs):
         """
@@ -541,23 +642,16 @@ class CompositeLoss:
                 target_boxes.append(boxes)
 
         # Compute detection losses
-        iou_loss, count_loss, format_loss, match_rate = self.compute_detection_loss(
+        iou_loss, format_loss, match_rate, corr = self.compute_detection_loss(
             lm_logits, target_boxes, parsed_strs
         )
         
         # Apply adaptive weights to detection losses
         adaptive_lambda_detection = self.lambda_detection * weight_multiplier
-        detection_loss = (
-            self.lambda_iou * iou_loss
-            + self.lambda_count * count_loss
-            + self.lambda_format * format_loss
-        )
-
-        # Inverse scaling: down-weight LM loss as detection weight grows,
-        # but keep at least 30 % so class predictions still receive signal.
-        lm_weight = 1.0 / weight_multiplier
-        lm_weight = min(max(lm_weight, 0.3), 1.0)  # clamp in [0.3, 1]
-        total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
+        detection_loss = self.lambda_iou * iou_loss + self.lambda_format * format_loss
+        
+        # Update curriculum tracking
+        self._update_lm_loss_tracking(lm_loss)
         
         # ------------------------------------------------------------------
         # Optional inline logging every `log_interval` calls
@@ -571,10 +665,9 @@ class CompositeLoss:
                 avg_gt = 0.0
 
             loss_dict = {
-                "loss_total": _val(total_loss),
+                "loss_total": _val(iou_loss + detection_loss),
                 "loss_lm": _val(lm_loss),
                 "loss_iou": _val(iou_loss),
-                "loss_count": _val(count_loss),
                 "loss_fmt": _val(format_loss),
                 "det_weight": _val(adaptive_lambda_detection),
                 "gt_match_rate": match_rate,
@@ -585,7 +678,8 @@ class CompositeLoss:
                 'lm_loss_ema': self.lm_loss_ema,
                 'lm_target': self.lm_target,
                 'current_weight_multiplier': weight_multiplier,
-                'step_count': self.step_count
+                'step_count': self.step_count,
+                'corr': _val(corr)
             }
             
             self.logger.info(f"LOSS STATUS: {loss_dict}")
@@ -605,14 +699,13 @@ class CompositeLoss:
                     f"[sample] pred: {sample_pred_text} || gt: {sample_gt_text}"
                 )
 
-        return total_loss
+        return iou_loss + detection_loss
 
-
+    
 def create_compute_loss_func(
     tokenizer,
     *,
     lambda_iou=1.5,
-    lambda_count=0.15,
     lambda_detection=0.15,
     lambda_format=0.5,
     lm_target=2.0,
@@ -624,7 +717,6 @@ def create_compute_loss_func(
     loss_computer = CompositeLoss(
         tokenizer=tokenizer,
         lambda_iou=lambda_iou,
-        lambda_count=lambda_count,
         lambda_detection=lambda_detection,
         lambda_format=lambda_format,
         lm_target=lm_target,

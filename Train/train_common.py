@@ -360,7 +360,7 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
                 label = label_lookup.get(cat, str(cat)) if isinstance(cat, int) else str(cat)
 
                 # bbox components already 0-1 normalised; format as [x, y, w, h]
-                bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
+                bbox_txt = ", ".join(str(int(round(v * 999))) for v in bbox)
                 detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
 
             detection_text = " ".join(detection_fragments)
