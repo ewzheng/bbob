@@ -86,6 +86,12 @@ def train(
         tokenizer.pad_token = tokenizer.eos_token
     clean_tokenizer_config(tokenizer)
 
+    # Ensure special tokens are added automatically during encoding
+    if hasattr(tokenizer, "add_bos_token"):
+        tokenizer.add_bos_token = True
+    if hasattr(tokenizer, "add_eos_token"):
+        tokenizer.add_eos_token = True
+
     logger.info(model_size_breakdown(model))
 
     logger.info("Preparing dataset …")

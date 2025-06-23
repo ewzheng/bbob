@@ -605,7 +605,7 @@ class CompositeLoss:
                 sample_gt_text = self.tokenizer.decode(gt_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
 
                 self.logger.info(
-                    f"[sample] pred: {sample_pred_text[:300]} || gt: {sample_gt_text[:300]}"
+                    f"[sample] pred: {sample_pred_text} || gt: {sample_gt_text}"
                 )
 
         return total_loss

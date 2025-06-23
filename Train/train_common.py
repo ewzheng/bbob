@@ -365,13 +365,7 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
 
             detection_text = " ".join(detection_fragments)
 
-            # Prepend BOS token to penalise any leading text before detections
-            if tokenizer.bos_token is not None:
-                detection_text = f"{tokenizer.bos_token} {detection_text}"
-
-            # Append EOS so the model is penalised for trailing text
-            if tokenizer.eos_token is not None:
-                detection_text = f"{detection_text} {tokenizer.eos_token}"
+            # No manual BOS/EOS – rely on tokenizer's add_special_tokens
 
             # Tokenise—NOTE: no padding here; collate will pad.
             if detection_text:
