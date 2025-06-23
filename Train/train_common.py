@@ -40,7 +40,8 @@ DEFAULT_BBOX_JITTER_RATIO = 0.05
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
 MAX_BATCH_SIZE = 4096
-GPU_MEMORY_PER_SAMPLE = 4 * 1024 * 1024  # 4 MB heuristic
+GPU_MEMORY_PER_SAMPLE = 16 * 1024 * 1024  # 16 MB heuristic (was 4 MB)
+MAX_PREPROC_GPU_BATCH = 256
 CPU_MEMORY_PER_SAMPLE = 6 * 1024 * 1024  # 6 MB heuristic
 
 def jitter_bboxes(bboxes, img_width, img_height, dtype, jitter_ratio=DEFAULT_BBOX_JITTER_RATIO):
@@ -691,7 +692,7 @@ def calculate_optimal_batch_size(
         print(f"  Available:        {available_vram/1024**3:.1f} GB")
 
         gpu_batch_size = int(available_vram / GPU_MEMORY_PER_SAMPLE)
-        gpu_batch_size = max(min_batch_size, min(gpu_batch_size, max_batch_size*(workers//2)))
+        gpu_batch_size = min(gpu_batch_size, MAX_PREPROC_GPU_BATCH)
 
         if gpu_batch_size >= 2:
             gpu_batch_size = 2 ** int(math.log2(gpu_batch_size))
