@@ -147,41 +147,39 @@ def _match_boxes_hungarian(pred, gt):
     # Replace possible NaNs (can arise from zero-area boxes) with zeros
     iou_mat = torch.nan_to_num(iou_mat, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # numpy does not understand torch.bfloat16.  Cast to float32 on CPU first.
+    # Convert to cost matrix suitable for SciPy (detach from graph, move to CPU, NumPy array).
+    # Note: Detaching is essential because SciPy will internally call .numpy();
+    # calling that on a tensor that requires gradients raises an error.
     cost = (1.0 - iou_mat + EPSILON)
 
-    # Torch's linear_sum_assignment currently expects a CPU tensor.
-    if cost.is_cuda:
-        cost_cpu = cost.cpu()
-    else:
-        cost_cpu = cost
+    # SciPy operates on NumPy arrays; ensure the tensor is on CPU, detached, and uses a supported dtype.
+    cost_np = cost.detach().cpu().float().numpy()
 
-    row_ind, col_ind = linear_sum_assignment(cost_cpu)
+    # Perform Hungarian matching on the NumPy cost matrix.
+    row_ind, col_ind = linear_sum_assignment(cost_np)
     return [(int(r), int(c)) for r, c in zip(row_ind.tolist(), col_ind.tolist())]
 
 class CompositeLoss:
     """Compute combined language-model and detection losses.
 
     The total loss is:
-        L = L_lm + λd (λ1 * L1(box) + λ2 * (1 − IoU) + λ3 * count_penalty)
+        L = w_lm · L_lm + λ_det · (λ_iou · (1 − CIoU) + λ_fmt · format_error)
 
     where the auxiliary terms are only added when ground-truth boxes are
-    provided. Simple 1-to-1 matching is assumed (first K predictions matched
-    to first K GT boxes).
+    provided. Hungarian matching is used to assign predictions to GT boxes.
     """
 
     def __init__(
         self,
         tokenizer,
         *,
-        lambda_iou=1.5,
-        lambda_detection=0.15,
-        lambda_format=0.5,
-        lm_target=1.5,
-        smoothing_factor=0.95,
+        lambda_iou: float = 1.5,
+        lambda_detection: float = 0.15,
+        lambda_format: float = 0.5,
+        lm_target: float = 1.5,
+        smoothing_factor: float = 0.95,
         logger=None,
         log_interval: int = 100,
-        gumbel_tau: float = 1.0,
     ):
         self.tokenizer = tokenizer
         self.lambda_iou = lambda_iou
@@ -215,8 +213,7 @@ class CompositeLoss:
         # Gumbel-Softmax temperature schedule
         self.tau_start = 2.0
         self.tau_end = 0.1
-        self.tau_steps = 10_000  # linear decay over this many optimisation steps
-        self.gumbel_tau = gumbel_tau  # kept for backward compatibility; may be overridden by schedule
+        self.tau_steps = 10_000  # linear decay of Gumbel-Softmax temperature
 
     def _parse_detection_string(self, det_str):
         """Robustly parse a detection string in the canonical form
@@ -729,9 +726,9 @@ def create_compute_loss_func(
     tokenizer,
     *,
     lambda_iou=1.5,
-    lambda_detection=0.15,
-    lambda_format=0.5,
-    lm_target=2.0,
+    lambda_detection: float = 0.15,
+    lambda_format: float = 0.5,
+    lm_target: float = 2.0,
     logger=None,
     log_interval: int = 100,
 ):
