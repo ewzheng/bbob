@@ -239,6 +239,16 @@ class CompositeLoss:
             return [0, 0, 0, 0], 1.0
 
         # ------------------------------------------------------------------
+        # 0) blank-label penalty – if the substring before ':' has no
+        #    non-whitespace characters we add a fixed surcharge.  This
+        #    encourages the model to always output a class name.
+        # ------------------------------------------------------------------
+
+        BLANK_LABEL_PENALTY = 0.25
+        label_str = parts[0].strip()
+        blank_label_pen = BLANK_LABEL_PENALTY if len(label_str) == 0 else 0.0
+
+        # ------------------------------------------------------------------
         # 1) extract numeric substrings (robust to commas, multiple spaces…)
         # ------------------------------------------------------------------
         num_strs = re.findall(r"[-+]?\d*\.?\d+", parts[1])
@@ -265,7 +275,7 @@ class CompositeLoss:
             clip_diffs.append(abs(v - v_clamped))
 
         # Missing components add fixed penalty; out-of-range adds proportional
-        fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0)
+        fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0) + blank_label_pen
 
         # ------------------------------------------------------------------
         # 3) penalise degenerate (zero-area) boxes
