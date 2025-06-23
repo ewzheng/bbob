@@ -212,7 +212,11 @@ class CompositeLoss:
         ], dtype=torch.long)
         # Pre-compute value vector 0..999 / scale for expectation trick
         self._numeric_values = torch.arange(1000, dtype=torch.float32) / BBOX_SCALE
-        self.gumbel_tau = gumbel_tau
+        # Gumbel-Softmax temperature schedule
+        self.tau_start = 2.0
+        self.tau_end = 0.1
+        self.tau_steps = 10_000  # linear decay over this many optimisation steps
+        self.gumbel_tau = gumbel_tau  # kept for backward compatibility; may be overridden by schedule
 
     def _parse_detection_string(self, det_str):
         """Robustly parse a detection string in the canonical form
@@ -376,23 +380,36 @@ class CompositeLoss:
         # select numeric logits
         numeric_logits = logits_slice.index_select(-1, self._numeric_token_ids.to(device))  # (..., 1000)
 
-        # If gradients are disabled (e.g., evaluation), skip soft path
+        # If gradients are disabled (e.g., evaluation), skip soft path entirely
         if not torch.is_grad_enabled():
             idx_hard = numeric_logits.argmax(dim=-1)
             values = self._numeric_values.to(device, dtype=logits_slice.dtype)
             coord = values[idx_hard]
             return coord
 
-        # Training: use Gumbel-Softmax straight-through
+        # --------------------------------------------------------------
+        # Training: temperature-annealed Gumbel-Softmax
+        # --------------------------------------------------------------
+
+        # Linear decay of τ from start → end
+        tau_progress = min(1.0, self.step_count / float(self.tau_steps))
+        tau = max(self.tau_end, self.tau_start * (1.0 - tau_progress))
+
+        # Clamp logits for numerical stability
+        numeric_logits = numeric_logits.clamp(min=-10.0, max=10.0)
+
         y_soft = torch.nn.functional.gumbel_softmax(
-            numeric_logits, tau=self.gumbel_tau, hard=False, dim=-1
+            numeric_logits, tau=tau, hard=False, dim=-1
         )
 
         idx_hard = y_soft.argmax(dim=-1)
         y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=1000).type_as(y_soft)
 
-        # Straight-through substitute
-        y_st = y_hard + (y_soft - y_soft.detach())
+        # Straight-through substitute; NaN guard on soft output
+        if torch.isnan(y_soft).any() or torch.isinf(y_soft).any():
+            y_st = y_hard  # fall back to hard path if numerical issues
+        else:
+            y_st = y_hard + (y_soft - y_soft.detach())
 
         values = self._numeric_values.to(device, dtype=logits_slice.dtype)
         coord = (y_st * values).sum(dim=-1)
