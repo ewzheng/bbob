@@ -56,7 +56,7 @@ def train(
         per_device_eval_batch_size=batch_size,
         gradient_accumulation_steps=grad_acc_steps,
         learning_rate=lr,
-        optim="adamw_torch",
+        optim="paged_adamw_8bit",
         weight_decay=0.1,
         max_grad_norm=1.0,
         adam_beta1=0.9,

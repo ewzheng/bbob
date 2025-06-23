@@ -191,7 +191,7 @@ def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.flo
 
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_jitter_ratio=DEFAULT_BBOX_JITTER_RATIO, training=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
+def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAULT_BBOX_JITTER_RATIO, training=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
     '''
     build vision-language features for one raw dataset batch.
 
@@ -201,7 +201,6 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
         - batch (dict): incoming dataset slice.
         - tokenizer (PreTrainedTokenizer): hf tokenizer.
         - image_processor: MobileViTImageProcessor instance for image processing
-        - gpu_batch_size (int): images processed per cuda chunk.
         - bbox_jitter_ratio (float): amplitude of bbox noise.
         - training (bool): enables bbox jitter.
         - target_size (tuple[int,int]): final (w, h) resolution.
@@ -449,18 +448,15 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         max_workers = min(mp.cpu_count() - 1, 8)
     
     # determine optimal batch sizes ----------------------------------------------------
-    gpu_batch_size, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=MEMORY_SAFETY_MARGIN)
+    _, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=MEMORY_SAFETY_MARGIN)
 
-    if torch.cuda.is_available():
-        print(f"Using GPU batch size: {gpu_batch_size}, CPU batch size: {cpu_batch_size}")
-    else:
-        print(f"CPU mode - using batch size: {cpu_batch_size}")
+    print(f"CPU batch size (image preprocessing): {cpu_batch_size}")
     
     _preprocessing_function = partial(
         preprocess_batch,
         tokenizer=tokenizer,
         image_processor=image_processor,
-        gpu_batch_size=gpu_batch_size,
+        bbox_jitter_ratio=DEFAULT_BBOX_JITTER_RATIO,
         training=is_training,
         dtype=dtype,
         label_lookup=label_lookup,
@@ -472,8 +468,8 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         batch_size=cpu_batch_size,  # smaller CPU batch for RAM safety
         remove_columns=dataset.column_names,
         num_proc=max_workers,
-        desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size}, GPU batch={gpu_batch_size})",
-        load_from_cache_file=True
+        desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size})",
+        load_from_cache_file=False
     )
 
     return dataset
