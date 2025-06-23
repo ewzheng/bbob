@@ -176,7 +176,7 @@ class CompositeLoss:
         lambda_iou=1.5,
         lambda_count=0.25,
         lambda_detection=0.15,
-        lambda_format=0.35,
+        lambda_format=0.5,
         lm_target=1.5,
         smoothing_factor=0.95,
         logger=None,
