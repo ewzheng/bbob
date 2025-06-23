@@ -35,7 +35,7 @@ from .train_augments import apply_batch_augmentations
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
 DEFAULT_TARGET_SIZE = (256, 256)
-MAX_TARGET_TEXT_LENGTH = 512
+MAX_TARGET_TEXT_LENGTH = 1024
 DEFAULT_BBOX_JITTER_RATIO = 0.05
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
@@ -359,8 +359,8 @@ def preprocess_batch(batch, tokenizer, image_processor, gpu_batch_size=64, bbox_
                 # Using lookup when possible; fallback = str(cat)
                 label = label_lookup.get(cat, str(cat)) if isinstance(cat, int) else str(cat)
 
-                # bbox components already 0-1 normalised; format as [x, y, w, h]
-                bbox_txt = ", ".join(str(int(round(v * 999))) for v in bbox)
+                # bbox components are already 0-1; keep them as 3-decimal floats
+                bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
                 detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
 
             # ---------------------------------------------------------

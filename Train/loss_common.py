@@ -206,11 +206,23 @@ class CompositeLoss:
         self.progress_lm: float | None = None
         self.progress_fmt: float | None = None
 
-        self._numeric_token_ids = torch.tensor([
-            tokenizer.convert_tokens_to_ids(str(i)) for i in range(1000)
-        ], dtype=torch.long)
-        # Pre-compute value vector 0..999 / scale for expectation trick
-        self._numeric_values = torch.arange(1000, dtype=torch.float32) / BBOX_SCALE
+        # --------------------------------------------------------------
+        # Optional straight-through numeric gradient path.
+        # Only enable it when the tokenizer contains *distinct* tokens
+        # for every integer 0‥999 (i.e. when those tokens were added).
+        # When they are missing – typical when we rely on the model to
+        # compose numbers from sub-tokens – we fall back to the old
+        # non-differentiable detection loss.
+        # --------------------------------------------------------------
+
+        # Require digit tokens 0-9; raise if missing
+        digit_ids = [tokenizer.convert_tokens_to_ids(str(i)) for i in range(10)]
+        if len(set(digit_ids)) != 10 or -1 in digit_ids or tokenizer.unk_token_id in digit_ids:
+            raise RuntimeError("Tokenizer lacks distinct tokens '0'–'9' required for digit-wise straight-through")
+
+        self._digit_token_ids = torch.tensor(digit_ids, dtype=torch.long)
+        self._enable_digit_st = True
+
         # Gumbel-Softmax temperature schedule
         self.tau_start = 2.0
         self.tau_end = 0.1
@@ -264,7 +276,11 @@ class CompositeLoss:
         nums = []
         for s in num_strs[:4]:  # take at most 4 numbers
             try:
-                nums.append(float(s))
+                val = float(s)
+                # Treat values >1 as integer tokens 0–999; <=1 already normalised
+                if val > 1.0 + EPSILON:
+                    val = val / BBOX_SCALE
+                nums.append(val * BBOX_SCALE)  # store as 0–999 scale downstream expects
             except ValueError:
                 continue
 
@@ -278,7 +294,7 @@ class CompositeLoss:
         clip_diffs = []
         clamped = []
         for v in nums:
-            # Convert integer-ish token back to 0–1 float
+            # v is already scaled 0–999; convert to 0–1
             v_float = v / BBOX_SCALE
             v_clamped = max(0.0, min(1.0, v_float))
             clamped.append(v_clamped)
@@ -387,45 +403,36 @@ class CompositeLoss:
         pass behaves like an arg-max (integer token) while the backward
         pass uses soft probabilities.
         """
-        # logits_slice: (..., vocab)
-        device = logits_slice.device
-        # select numeric logits
-        numeric_logits = logits_slice.index_select(-1, self._numeric_token_ids.to(device))  # (..., 1000)
+        if self._enable_digit_st:
+            # ----------------------------------------------------------
+            # Digit-wise expectation: soft arg-max over {0..9}
+            # ----------------------------------------------------------
+            device = logits_slice.device
+            digit_logits = logits_slice.index_select(-1, self._digit_token_ids.to(device))  # (...,10)
 
-        # If gradients are disabled (e.g., evaluation), skip soft path entirely
-        if not torch.is_grad_enabled():
-            idx_hard = numeric_logits.argmax(dim=-1)
-            values = self._numeric_values.to(device, dtype=logits_slice.dtype)
-            coord = values[idx_hard]
-            return coord
+            # Temperature schedule shared with full mode
+            tau_progress = min(1.0, self.step_count / float(self.tau_steps))
+            tau = max(self.tau_end, self.tau_start * (1.0 - tau_progress))
 
-        # --------------------------------------------------------------
-        # Training: temperature-annealed Gumbel-Softmax
-        # --------------------------------------------------------------
+            digit_logits = digit_logits.clamp(min=-10.0, max=10.0)
+            y_soft = torch.nn.functional.gumbel_softmax(digit_logits, tau=tau, hard=False, dim=-1)
 
-        # Linear decay of τ from start → end
-        tau_progress = min(1.0, self.step_count / float(self.tau_steps))
-        tau = max(self.tau_end, self.tau_start * (1.0 - tau_progress))
+            idx_hard = y_soft.argmax(dim=-1)
+            y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=10).type_as(y_soft)
 
-        # Clamp logits for numerical stability
-        numeric_logits = numeric_logits.clamp(min=-10.0, max=10.0)
+            if torch.isnan(y_soft).any() or torch.isinf(y_soft).any():
+                y_st = y_hard
+            else:
+                y_st = y_hard + (y_soft - y_soft.detach())
 
-        y_soft = torch.nn.functional.gumbel_softmax(
-            numeric_logits, tau=tau, hard=False, dim=-1
-        )
+            values = torch.arange(10, device=device, dtype=logits_slice.dtype)
+            digit_val = (y_st * values).sum(dim=-1)  # (...,)
 
-        idx_hard = y_soft.argmax(dim=-1)
-        y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=1000).type_as(y_soft)
-
-        # Straight-through substitute; NaN guard on soft output
-        if torch.isnan(y_soft).any() or torch.isinf(y_soft).any():
-            y_st = y_hard  # fall back to hard path if numerical issues
+            # Return raw digit value 0-9; caller will compose 3 digits
+            return digit_val
         else:
-            y_st = y_hard + (y_soft - y_soft.detach())
-
-        values = self._numeric_values.to(device, dtype=logits_slice.dtype)
-        coord = (y_st * values).sum(dim=-1)
-        return coord
+            # ST disabled – return centre (0.5)
+            return torch.full(logits_slice.shape[:-1], 0.5, device=logits_slice.device, dtype=logits_slice.dtype)
 
     def compute_detection_loss(self, lm_logits, target_boxes, parsed_strs=None):
         """Compute detection losses and match statistics.
@@ -477,7 +484,7 @@ class CompositeLoss:
 
             i = 0
             coords_list = []
-            numeric_buffer = []  # store differentiable coords
+            digit_buffer = []  # store differentiable digit values
             while True:
                 try:
                     start = row.index(id_open, i)
@@ -527,7 +534,8 @@ class CompositeLoss:
             gt_count = gt.shape[0]
             pred_count = pred.shape[0]
 
-            if pred.numel() == 0 or gt.numel() == 0:
+            # When ST is disabled pred may be zeros; skip in that case too
+            if pred.numel() == 0 or gt.numel() == 0 or not self._enable_st_full:
                 continue
 
             pairs = _match_boxes_hungarian(pred, gt)
