@@ -5,6 +5,7 @@ import re
 from scipy.optimize import linear_sum_assignment  # type: ignore
 from torchvision.ops import box_iou as _box_iou  # type: ignore
 from torchvision.ops import generalized_box_iou as _generalized_box_iou  # type: ignore
+from torchvision.ops import complete_box_iou_loss as _complete_box_iou_loss  # type: ignore
 
 # ----------------------------------------------------------------------
 # Constants
@@ -184,7 +185,6 @@ class CompositeLoss:
         self,
         tokenizer,
         *,
-        lambda_l1=0.75,
         lambda_iou=1.5,
         lambda_count=0.15,
         lambda_detection=0.15,
@@ -195,7 +195,6 @@ class CompositeLoss:
         log_interval: int = 100,    
     ):
         self.tokenizer = tokenizer
-        self.lambda_l1 = lambda_l1
         self.lambda_iou = lambda_iou
         self.lambda_count = lambda_count
         self.lambda_detection = lambda_detection
@@ -412,7 +411,6 @@ class CompositeLoss:
         batch_preds = split_preds
 
         # Compute loss per sample with simple first-K matching
-        l1_vals = []
         iou_vals = []
         count_vals = []
         
@@ -454,13 +452,12 @@ class CompositeLoss:
             p_matched = torch.stack([pred[i] for i, _ in pairs])
             g_matched = torch.stack([gt[j] for _, j in pairs])
 
-            l1_vals.append(F.l1_loss(p_matched, g_matched, reduction="mean"))
-            # Compute mean GIoU and guard against NaNs that can arise from
-            # degenerate boxes (zero area) or numerical overflow.  Treat
-            # NaN as -1 (worst case) so (1 - GIoU) clamps to 2.
-            mean_iou = _giou_matrix_xywh(p_matched, g_matched).mean()
-            mean_iou = torch.nan_to_num(mean_iou, nan=0.0, posinf=0.0, neginf=0.0)
-            iou_vals.append(1.0 - mean_iou)
+            # CIoU loss (1 − CIoU).  Handles overlap, distance, and aspect ratio.
+            ciou = _complete_box_iou_loss(
+                _xywh_to_xyxy(p_matched), _xywh_to_xyxy(g_matched), reduction="none"
+            ).mean()
+            ciou = torch.nan_to_num(ciou, nan=2.0, posinf=2.0, neginf=0.0)
+            iou_vals.append(ciou)
 
             # -------------------------------------------------------------
             # GT match rate statistics
@@ -469,7 +466,6 @@ class CompositeLoss:
             total_gt   += gt_count
 
         # Aggregate losses
-        l1_loss = torch.stack(l1_vals).mean() if l1_vals else torch.tensor(0.0, device=lm_logits.device)
         iou_loss = torch.stack(iou_vals).mean() if iou_vals else torch.tensor(0.0, device=lm_logits.device)
         count_loss = torch.tensor(count_vals, device=lm_logits.device, dtype=lm_logits.dtype).mean() if count_vals else torch.tensor(0.0, device=lm_logits.device)
         if fmt_vals:
@@ -480,7 +476,7 @@ class CompositeLoss:
             format_loss = torch.tensor(0.0, device=lm_logits.device)
         
         match_rate = (matched_gt / total_gt) if total_gt else 0.0
-        return l1_loss, iou_loss, count_loss, format_loss, match_rate
+        return iou_loss, count_loss, format_loss, match_rate
 
     def __call__(self, outputs, labels, **kwargs):
         """
@@ -557,15 +553,14 @@ class CompositeLoss:
                 target_boxes.append(boxes)
 
         # Compute detection losses
-        l1_loss, iou_loss, count_loss, format_loss, match_rate = self.compute_detection_loss(
+        iou_loss, count_loss, format_loss, match_rate = self.compute_detection_loss(
             lm_logits, target_boxes, parsed_strs
         )
         
         # Apply adaptive weights to detection losses
         adaptive_lambda_detection = self.lambda_detection * weight_multiplier
         detection_loss = (
-            self.lambda_l1 * l1_loss
-            + self.lambda_iou * iou_loss
+            self.lambda_iou * iou_loss
             + self.lambda_count * count_loss
             + self.lambda_format * format_loss
         )
@@ -590,9 +585,7 @@ class CompositeLoss:
             loss_dict = {
                 "loss_total": _val(total_loss),
                 "loss_lm": _val(lm_loss),
-                "loss_l1": _val(l1_loss),
                 "loss_iou": _val(iou_loss),
-                "mean_iou": 1.0 - _val(iou_loss) if _val(iou_loss) > 0 else 0.0,
                 "loss_count": _val(count_loss),
                 "loss_fmt": _val(format_loss),
                 "det_weight": _val(adaptive_lambda_detection),
@@ -630,11 +623,10 @@ class CompositeLoss:
 def create_compute_loss_func(
     tokenizer,
     *,
-    lambda_l1=0.35,
-    lambda_iou=0.5,
-    lambda_count=0.2,
+    lambda_iou=1.5,
+    lambda_count=0.15,
     lambda_detection=0.15,
-    lambda_format=0.1,
+    lambda_format=0.5,
     lm_target=2.0,
     logger=None,
     log_interval: int = 100,
@@ -643,7 +635,6 @@ def create_compute_loss_func(
     """
     loss_computer = CompositeLoss(
         tokenizer=tokenizer,
-        lambda_l1=lambda_l1,
         lambda_iou=lambda_iou,
         lambda_count=lambda_count,
         lambda_detection=lambda_detection,
