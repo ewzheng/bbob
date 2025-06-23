@@ -193,7 +193,7 @@ class CompositeLoss:
         self.lm_target = lm_target
         # scalars for adaptive detection loss weight
         self.min_detection_weight = 0.1
-        self.max_detection_weight = 25
+        self.max_detection_weight = 15
         self.smoothing_factor = smoothing_factor
         
         # Tracking variables
