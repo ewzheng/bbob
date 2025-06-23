@@ -543,7 +543,7 @@ class CompositeLoss:
             pred_count = pred.shape[0]
 
             # When ST is disabled pred may be zeros; skip in that case too
-            if pred.numel() == 0 or gt.numel() == 0 or not self._enable_st_full:
+            if pred.numel() == 0 or gt.numel() == 0 or not self._enable_digit_st:
                 continue
 
             pairs = _match_boxes_hungarian(pred, gt)

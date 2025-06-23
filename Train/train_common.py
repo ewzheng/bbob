@@ -448,7 +448,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         max_workers = min(mp.cpu_count() - 1, 8)
     
     # determine optimal batch sizes ----------------------------------------------------
-    _, cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=MEMORY_SAFETY_MARGIN)
+    cpu_batch_size = calculate_optimal_batch_size(workers=max_workers, safety_margin=MEMORY_SAFETY_MARGIN)
 
     print(f"CPU batch size (image preprocessing): {cpu_batch_size}")
     
@@ -661,23 +661,17 @@ def calculate_optimal_batch_size(
     min_batch_size=MIN_BATCH_SIZE,
     max_batch_size=MAX_BATCH_SIZE,
 ):
-    """Compute an optimal CPU batch size for preprocessing.
+    """Return an optimal CPU batch size for image preprocessing.
 
-    GPU heuristics have been removed because preprocessing runs on CPU
-    workers only.  The function therefore always returns ``None`` for
-    the GPU batch size component.
+    The heuristic estimates how many samples fit comfortably into RAM
+    given the number of preprocessing workers.  GPU memory is no longer
+    considered because all heavy preprocessing happens on the CPU.
 
     Returns
     -------
-    (gpu_bs, cpu_bs) : tuple[None, int]
-        • gpu_bs is always *None*.
-        • cpu_bs is the optimal CPU-side batch size.
+    int
+        Optimal CPU-side batch size.
     """
-
-    # ------------------------------------------------------------------
-    # GPU batch size disabled – skip VRAM inspection
-    # ------------------------------------------------------------------
-    gpu_batch_size = None
 
     # ------------------------------------------------------------------
     # CPU batch size heuristic
@@ -706,7 +700,7 @@ def calculate_optimal_batch_size(
     est_cpu_usage = (cpu_batch_size * CPU_MEMORY_PER_SAMPLE) / 1024**3
     print(f"  → CPU batch size:  {cpu_batch_size}  (≈{est_cpu_usage:.1f} GB RAM)")
 
-    return gpu_batch_size, cpu_batch_size
+    return cpu_batch_size
 
 
 def load_labels_from_yaml(yaml_path):
