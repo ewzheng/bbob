@@ -352,7 +352,9 @@ class CompositeLoss:
             else:
                 progress_fmt = 0.0  # no predictions yet
 
-        progress = progress_lm + progress_fmt
+        # Use *product* so detection weight stays low until BOTH
+        # language modelling and format compliance have made progress.
+        progress = progress_lm * progress_fmt
 
         # Store for later logging
         self.progress_lm  = progress_lm
