@@ -173,7 +173,7 @@ class CompositeLoss:
         tokenizer,
         *,
         lambda_l1=0.5,
-        lambda_iou=0.7,
+        lambda_iou=1.5,
         lambda_count=0.25,
         lambda_detection=0.15,
         lambda_format=0.1,
