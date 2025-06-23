@@ -530,6 +530,16 @@ def load_and_prepare_dataset(
     Returns:
         - train, test datasets with extracted features
     """
+    # ------------------------------------------------------------------
+    # Ensure the tokenizer inserts one BOS and one EOS automatically so we
+    # do not have to add them manually when building detection strings.
+    # ------------------------------------------------------------------
+
+    if hasattr(tokenizer, "add_bos_token"):
+        tokenizer.add_bos_token = True
+    if hasattr(tokenizer, "add_eos_token"):
+        tokenizer.add_eos_token = True
+
     print(f"Loading dataset {dataset_name}")
     
     dataset = datasets.load_dataset(
