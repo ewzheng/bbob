@@ -238,25 +238,28 @@ class CompositeLoss:
             matched, total = 0, 0
 
             for b in range(B):
-                pred = diff_preds[b]
-                gt = gt_boxes[b]
-                if isinstance(gt, list):
-                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+                    # ------------------------------------------------------------------
+                    # Re-apply the non–degenerate filter **again** so that the row/col
+                    # indices returned by batch_linear_assignment refer to the same
+                    # tensors we used when we built the cost matrix.
+                    # ------------------------------------------------------------------
+                    pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
+                    gt_f   = gt  [(gt  [:, 2] > EPSILON) & (gt  [:, 3] > EPSILON)]
 
-                P, G = pred.size(0), gt.size(0)
-                if P == 0 or G == 0:
+                    P, G = pred_f.size(0), gt_f.size(0)
+                    if P == 0 or G == 0:
+                        total += G          # still count GT objects
+                        continue
+
+                    valid = (rows[b] >= 0) & (rows[b] < P) & (cols[b] >= 0) & (cols[b] < G)
+                    r_sel = rows[b][valid]
+                    c_sel = cols[b][valid]
+
+                    if r_sel.numel() > 0:
+                        pm_list.append(pred_f[r_sel])
+                        gm_list.append(gt_f[c_sel])
+                        matched += r_sel.numel()
                     total += G
-                    continue
-
-                valid = (rows[b] >= 0) & (rows[b] < P) & (cols[b] >= 0) & (cols[b] < G)
-                r_sel = rows[b][valid]
-                c_sel = cols[b][valid]
-
-                if r_sel.numel() > 0:
-                    pm_list.append(pred[r_sel])
-                    gm_list.append(gt[c_sel])
-                    matched += r_sel.numel()
-                total += G
 
             if pm_list:
                 pm_all = torch.cat(pm_list, dim=0)
