@@ -469,7 +469,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size})",
-        load_from_cache_file=False
+        load_from_cache_file=True
     )
 
     return dataset
@@ -690,7 +690,7 @@ def calculate_optimal_batch_size(
     print(f"  Available RAM:    {available_ram/1024**3:.1f} GB")
 
     # Conservative estimate: divide by number of workers and apply margin
-    cpu_bs_mem = int(available_ram * (1 - safety_margin) / CPU_MEMORY_PER_SAMPLE) // max(workers, 1) // 2
+    cpu_bs_mem = int(available_ram * (1 - safety_margin) / CPU_MEMORY_PER_SAMPLE) // max(workers, 1)
 
     # Clamp to valid range and round to nearest power-of-two for efficiency
     cpu_batch_size = min(max(cpu_bs_mem, min_batch_size), max_batch_size)
