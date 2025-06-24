@@ -44,7 +44,7 @@ class CompositeLoss:
         *,
         lambda_iou: float = 1.5,
         lambda_detection: float = 0.15,
-        lambda_match_penalty: float = 0.5,
+        lambda_match_penalty: float = 1,
         lm_target: float = 2,
         smoothing_factor: float = 0.95,
         logger=None,
