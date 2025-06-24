@@ -36,6 +36,9 @@ class BBOBTrainer(Trainer):
         Total number of steps for teacher-forcing schedule.
     tf_schedule : str
         Schedule type for teacher-forcing.
+    compute_loss_func : callable | None
+        Loss function to use for training. If *None*, the default loss function
+        is used.
     All other positional / keyword arguments are forwarded to
     ``transformers.Trainer``.
     """
@@ -50,12 +53,20 @@ class BBOBTrainer(Trainer):
         tf_end_p: float = 0.0,
         total_tf_steps: int = 0,
         tf_schedule: str = "cosine",
+        compute_loss_func: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
         # If caller did not pass an explicit data_collator we insert the train-one
         if "data_collator" not in kwargs and train_collator is not None:
             kwargs["data_collator"] = train_collator
+
+        # Forward the loss callable to HF Trainer (if supported) _and_ store local ref
+        if compute_loss_func is not None:
+            kwargs["compute_loss_func"] = compute_loss_func
+
         super().__init__(*args, **kwargs)
+
+        self._loss_func = compute_loss_func
 
         # Store collators (fallback: use the same for both)
         self._train_collator = train_collator or self.data_collator
@@ -75,6 +86,8 @@ class BBOBTrainer(Trainer):
         # Ensure correct mode before workers are spawned
         if hasattr(self._train_collator, "train"):
             self._train_collator.train()
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = False
         dl = super().get_train_dataloader()
         dl.collate_fn = self._train_collator  # make sure
         return dl
@@ -83,6 +96,8 @@ class BBOBTrainer(Trainer):
         # Switch to eval mode before new workers are forked
         if hasattr(self._eval_collator, "eval"):
             self._eval_collator.eval()
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = True
         dl = super().get_eval_dataloader(eval_dataset)
         dl.collate_fn = self._eval_collator
         return dl
@@ -91,6 +106,8 @@ class BBOBTrainer(Trainer):
     def get_test_dataloader(self, test_dataset) -> DataLoader:  # noqa: D401
         if hasattr(self._eval_collator, "eval"):
             self._eval_collator.eval()
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = True
         dl = super().get_test_dataloader(test_dataset)
         dl.collate_fn = self._eval_collator
         return dl
