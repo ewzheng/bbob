@@ -599,8 +599,8 @@ class CompositeLoss:
             gt_f   = gt[gt_valid]
 
             # Keep mapping to original indices for discrete IoU later
-            pred_idx_map = torch.nonzero(pred_valid, as_tuple=False).squeeze(1)
-            gt_idx_map   = torch.nonzero(gt_valid, as_tuple=False).squeeze(1)
+            pred_idx_map = torch.nonzero(pred_valid, as_tuple=False).flatten()
+            gt_idx_map   = torch.nonzero(gt_valid, as_tuple=False).flatten()
 
             pairs = _match_boxes_hungarian(pred_f, gt_f)
             if not pairs:
@@ -642,9 +642,13 @@ class CompositeLoss:
             if disc_pred_sample.shape[0] > 0:
                 # Map pair indices back to original pred / gt indices
                 valid_pairs = []
-                for i_f, j_f in pairs:
+                for idx_pair, (i_f, j_f) in enumerate(pairs):
+                    if not valid_mask[idx_pair]:
+                        continue  # pair involves degenerate box filtered earlier
+
                     i_orig = pred_idx_map[i_f].item()
                     j_orig = gt_idx_map[j_f].item()
+
                     if i_orig < disc_pred_sample.size(0) and j_orig < gt.shape[0]:
                         valid_pairs.append((i_orig, j_orig))
                 if valid_pairs:
