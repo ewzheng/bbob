@@ -37,6 +37,7 @@ class CompositeLoss:
         *,
         lambda_iou: float = 1.5,
         lambda_detection: float = 0.15,
+        lambda_match_penalty: float = 0.5,
         lm_target: float = 1.5,
         smoothing_factor: float = 0.95,
         logger=None,
@@ -45,6 +46,7 @@ class CompositeLoss:
         self.tok = tokenizer
         self.lambda_iou = lambda_iou
         self.lambda_det = lambda_detection
+        self.lambda_match = lambda_match_penalty
         self.lm_target = lm_target
         self.smoothing = smoothing_factor
         self.logger = logger
@@ -52,6 +54,7 @@ class CompositeLoss:
         self.step = 0
         self.lm_loss_ema: float | None = None
         self.is_eval = False
+        self._dangling_total = 0  # aggregate counter for malformed coord digits
 
         # digit/ST cache
         digit_ids = [tokenizer.convert_tokens_to_ids(str(i)) for i in range(10)]
@@ -130,8 +133,7 @@ class CompositeLoss:
 
         # ensure multiple of 4 values
         if len(coords) % 4:
-            if self.logger:
-                self.logger.warning("Dropped %d dangling coord values", len(coords) % 4)
+            self._dangling_total += len(coords) % 4
             coords = coords[: len(coords) // 4 * 4]
 
         if coords:
@@ -192,7 +194,9 @@ class CompositeLoss:
             raise RuntimeError("NaN/Inf in LM loss")
 
         iou_loss, match_rate = self._detection_loss(logits, gt_boxes)
-        det_loss = self.lambda_iou * iou_loss
+
+        match_pen = self.lambda_match * (1.0 - match_rate)
+        det_loss = self.lambda_iou * iou_loss + match_pen
         total_loss = lm_loss + self.lambda_det * det_loss
 
         if self.is_eval and self.logger is not None:
@@ -202,13 +206,18 @@ class CompositeLoss:
             self.logger.info({"sample_pred": pred_str, "sample_gt": gt_str})
 
         if self.logger and self.step % self.log_interval == 0:
-            self.logger.info({
+            log_dict = {
                 "step": self.step,
                 "loss": self._val(total_loss),
-                "lm": self._val(lm_loss),
-                "iou": self._val(iou_loss),
-                "match": round(match_rate, 4),
-            })
+                "lm loss": self._val(lm_loss),
+                "iou loss": self._val(iou_loss),
+                "match rate": round(match_rate, 4),
+                "match penalty": round(match_pen.item() if torch.is_tensor(match_pen) else match_pen, 6),
+            }
+            if self._dangling_total > 0:
+                log_dict["dangling_coords"] = int(self._dangling_total)
+                self._dangling_total = 0
+            self.logger.info(log_dict)
         self.step += 1
         return total_loss
 

@@ -15,6 +15,8 @@ from torch.utils.data import DataLoader
 from transformers import Trainer
 import math
 import random
+import torch
+import torch.nn.functional as F
 
 
 class BBOBTrainer(Trainer):
@@ -39,6 +41,8 @@ class BBOBTrainer(Trainer):
     compute_loss_func : callable | None
         Loss function to use for training. If *None*, the default loss function
         is used.
+    guidance_strength : float
+        Strength of guided sampling.
     All other positional / keyword arguments are forwarded to
     ``transformers.Trainer``.
     """
@@ -54,6 +58,7 @@ class BBOBTrainer(Trainer):
         total_tf_steps: int = 0,
         tf_schedule: str = "cosine",
         compute_loss_func: Optional[Any] = None,
+        guidance_strength: float = 10.0,
         **kwargs: Any,
     ) -> None:
         # If caller did not pass an explicit data_collator we insert the train-one
@@ -77,6 +82,10 @@ class BBOBTrainer(Trainer):
         self._tf_end_p   = float(tf_end_p)
         self._tf_total   = int(total_tf_steps) if total_tf_steps > 0 else 1
         self._tf_sched   = tf_schedule
+
+        # guided sampling uses the same warm-up length as teacher-forcing
+        self._guidance_steps = self._tf_total
+        self._guidance_strength = guidance_strength
 
     # ------------------------------------------------------------------
     # Overridden DataLoader builders
@@ -133,7 +142,7 @@ class BBOBTrainer(Trainer):
         inputs = super().prepare_inputs(inputs)
         if self.model.training and self.state.global_step < self._tf_total:
             p = self._tf_prob(self.state.global_step)
-            if random.random() < p:
+            if torch.rand(1, device=inputs["input_ids"].device).item() < p:
                 if "input_ids" in inputs and "labels" in inputs:
                     ids = inputs["input_ids"].clone()
                     lbl = inputs["labels"]
@@ -141,3 +150,32 @@ class BBOBTrainer(Trainer):
                     ids[mask] = lbl[mask]
                     inputs["input_ids"] = ids
         return inputs 
+
+    # ---------------- inject guided sampling before loss -----------------
+
+    def compute_loss(self, model, inputs, return_outputs=False):  # type: ignore[override]
+        labels = inputs.get("labels")
+        outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
+
+        guidance_loss = None
+        if self.model.training and self.state.global_step < self._guidance_steps and labels is not None and self._loss_func is not None:
+            logits = outputs.logits  # (B, S, V)
+            flat_logits = logits.view(-1, logits.size(-1))
+            flat_labels = labels.view(-1)
+            digit_ids = self._loss_func.digit_ids.to(flat_labels.device)
+            mask = (flat_labels >= 0) & torch.isin(flat_labels, digit_ids)
+            if mask.any():
+                idx = mask.nonzero(as_tuple=False).squeeze(1)
+                correct = flat_labels[idx]
+                base_loss = F.cross_entropy(flat_logits[idx], correct, reduction="mean")
+                factor = self._guidance_strength * (1.0 - self.state.global_step / self._guidance_steps)
+                guidance_loss = factor * base_loss
+
+        if self._loss_func is not None:
+            loss = self._loss_func(outputs, labels)
+            if guidance_loss is not None:
+                loss = loss + guidance_loss
+        else:
+            loss = outputs.loss if hasattr(outputs, "loss") else None
+
+        return (loss, outputs) if return_outputs else loss 
