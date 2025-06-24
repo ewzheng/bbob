@@ -183,7 +183,7 @@ class CompositeLoss:
 
     # ---------------- helper: parse coords per sample ----------------
 
-    # ------------- detection loss (vectorised coords) ----------------
+   # ------------- detection loss (vectorised coords) ----------------
     def _detection_loss(self, logits: torch.Tensor, gt_boxes):
         """Compute IoU loss & match-rate in a batched, GPU-friendly way."""
 
@@ -196,9 +196,6 @@ class CompositeLoss:
         diff_preds: List[torch.Tensor] = [
             self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
-
-        # Total number of *parsed* coordinate 4-tuples before area filtering
-        parsed_total = sum(p.size(0) for p in diff_preds)
 
         # --------------------------------------------------------------
         # Fast path – use torch_linear_assignment in batch on GPU
@@ -221,15 +218,16 @@ class CompositeLoss:
                 if isinstance(gt, list):
                     gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
 
-                # keep only non-degenerate boxes and count them for logging
-                pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-                self.last_pred_boxes = int(pred.size(0)) if b == 0 else self.last_pred_boxes + int(pred.size(0))
-                gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
+                # Filter non-degenerate boxes and count them for logging
+                pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
+                self.last_pred_boxes += int(pred_f.size(0))
+                gt_f   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
 
-                if pred.numel() == 0 or gt.numel() == 0:
+                if pred_f.numel() == 0 or gt_f.numel() == 0:
                     continue
 
-                cost_batch[b, : pred.size(0), : gt.size(0)] = 1.0 - iou_matrix_xywh(pred, gt)
+                # Build cost matrix using FILTERED boxes
+                cost_batch[b, : pred_f.size(0), : gt_f.size(0)] = 1.0 - iou_matrix_xywh(pred_f, gt_f)
 
             assignment = batch_linear_assignment(cost_batch)
             rows, cols = assignment_to_indices(assignment)  # shape (B, K)
@@ -238,28 +236,31 @@ class CompositeLoss:
             matched, total = 0, 0
 
             for b in range(B):
-                    # ------------------------------------------------------------------
-                    # Re-apply the non–degenerate filter **again** so that the row/col
-                    # indices returned by batch_linear_assignment refer to the same
-                    # tensors we used when we built the cost matrix.
-                    # ------------------------------------------------------------------
-                    pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-                    gt_f   = gt  [(gt  [:, 2] > EPSILON) & (gt  [:, 3] > EPSILON)]
+                # Retrieve the original (unfiltered) predictions and GT for this sample
+                pred = diff_preds[b]
+                gt   = gt_boxes[b]
+                if isinstance(gt, list):
+                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
 
-                    P, G = pred_f.size(0), gt_f.size(0)
-                    if P == 0 or G == 0:
-                        total += G          # still count GT objects
-                        continue
+                # Re-apply the same filter so that the row/col indices from assignment
+                # correctly refer to the filtered tensors used in cost matrix construction
+                pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
+                gt_f   = gt  [(gt  [:, 2] > EPSILON) & (gt  [:, 3] > EPSILON)]
 
-                    valid = (rows[b] >= 0) & (rows[b] < P) & (cols[b] >= 0) & (cols[b] < G)
-                    r_sel = rows[b][valid]
-                    c_sel = cols[b][valid]
+                P, G = pred_f.size(0), gt_f.size(0)
+                if P == 0 or G == 0:
+                    total += G  # still count GT objects even if no prediction passes
+                    continue
 
-                    if r_sel.numel() > 0:
-                        pm_list.append(pred_f[r_sel])
-                        gm_list.append(gt_f[c_sel])
-                        matched += r_sel.numel()
-                    total += G
+                valid = (rows[b] >= 0) & (rows[b] < P) & (cols[b] >= 0) & (cols[b] < G)
+                r_sel = rows[b][valid]
+                c_sel = cols[b][valid]
+
+                if r_sel.numel() > 0:
+                    pm_list.append(pred_f[r_sel])
+                    gm_list.append(gt_f[c_sel])
+                    matched += r_sel.numel()
+                total += G
 
             if pm_list:
                 pm_all = torch.cat(pm_list, dim=0)
