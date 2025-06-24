@@ -98,8 +98,6 @@ class BBOBTrainer(Trainer):
         dl = super().get_train_dataloader()
         dl.collate_fn = self._train_collator  # make sure
         # Ensure loss function is in *train* mode
-        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
-            self._loss_func.is_eval = False
         return dl
 
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:  # noqa: D401
@@ -117,8 +115,6 @@ class BBOBTrainer(Trainer):
     def get_test_dataloader(self, test_dataset) -> DataLoader:  # noqa: D401
         if hasattr(self._eval_collator, "eval"):
             self._eval_collator.eval()
-        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
-            self._loss_func.is_eval = True
         dl = super().get_test_dataloader(test_dataset)
         dl.collate_fn = self._eval_collator
         return dl
@@ -154,6 +150,16 @@ class BBOBTrainer(Trainer):
         return inputs 
 
     # ---------------- inject guided sampling before loss -----------------
+
+    def training_step(self, model, inputs):
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = False
+        return super().training_step(model, inputs)
+
+    def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None, metric_key_prefix="eval"):
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = True
+        return super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
         labels = inputs.get("labels")
