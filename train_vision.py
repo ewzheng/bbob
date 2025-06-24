@@ -66,7 +66,7 @@ def train(
         eval_strategy="steps",
         eval_steps=max(steps_per_epoch // 4, 1),
         save_strategy="epoch",  
-        logging_steps=max(batch_size // grad_acc_steps, 1),
+        logging_steps=max(batch_size * grad_acc_steps, 1),
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
@@ -93,7 +93,7 @@ def train(
     # Collator always hides targets; TF decision moved to BBOBTrainer
     collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
     # Composite loss callable
-    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size // grad_acc_steps, 1), lm_target=lm_target)  
+    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size * grad_acc_steps, 1), lm_target=lm_target)  
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
