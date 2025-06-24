@@ -70,7 +70,7 @@ def train(
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
-        dataloader_prefetch_factor=4,
+        dataloader_prefetch_factor=num_workers,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=True,
         save_total_limit=3,
