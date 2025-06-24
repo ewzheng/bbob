@@ -11,8 +11,7 @@ from torchvision.ops import complete_box_iou_loss as _complete_box_iou_loss  # t
 # Constants
 # ----------------------------------------------------------------------
 
-EPSILON: float = 1e-8       # small value to avoid division-by-zero
-BBOX_SCALE: float = 999.0    # integer scale for coordinate tokens 0–999
+EPSILON: float = 1e-6       # small value to avoid division-by-zero
 FMT_OK_THRESHOLD: float = 0.25  # consider a box "well-formed" when fmt_err < 0.25
 
 # ----------------------------------------------------------------------
@@ -21,9 +20,13 @@ FMT_OK_THRESHOLD: float = 0.25  # consider a box "well-formed" when fmt_err < 0.
 
 TAG_OPEN = "<|bbob|>"
 TAG_CLOSE = "</|bbob|>"
+TAG_PATTERN = re.compile(re.escape(TAG_OPEN) + r"(.*?)" + re.escape(TAG_CLOSE))
 
-def _val(x):
-    return x.item() if isinstance(x, torch.Tensor) else float(x)
+def _val(x: torch.Tensor | float | int):
+    """Utility to convert tensors to Python scalars for logging."""
+    if isinstance(x, torch.Tensor):
+        return round(x.item(), 6)
+    return x
 
 def _parse_boxes(logits, tokenizer):
     """Extract detection strings without decoding whole sequences.
@@ -95,11 +98,8 @@ def _parse_boxes(logits, tokenizer):
 
 def _xywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
     """Convert `[..., x,y,w,h]` to `[..., x1,y1,x2,y2]`."""
-    x1 = boxes[..., 0]
-    y1 = boxes[..., 1]
-    x2 = boxes[..., 0] + boxes[..., 2]
-    y2 = boxes[..., 1] + boxes[..., 3]
-    return torch.stack((x1, y1, x2, y2), dim=-1)
+    x, y, w, h = boxes.unbind(-1)
+    return torch.stack((x, y, x + w, y + h), -1)
 
 # ----------------------------------------------------------------------
 # Vectorised IoU helpers (Torchvision fallback to our previous impl)
@@ -144,6 +144,16 @@ def _match_boxes_hungarian(pred, gt):
     if pred.numel() == 0 or gt.numel() == 0:
         return []
 
+    # Filter out degenerate (zero-area) boxes before matching
+    pred_mask = (pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)
+    gt_mask   = (gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)
+
+    if not pred_mask.any() or not gt_mask.any():
+        return []
+
+    pred = pred[pred_mask]
+    gt   = gt[gt_mask]
+
     iou_mat = _iou_matrix_xywh(pred, gt)
     # Replace possible NaNs (can arise from zero-area boxes) with zeros
     iou_mat = torch.nan_to_num(iou_mat, nan=0.0, posinf=0.0, neginf=0.0)
@@ -155,6 +165,9 @@ def _match_boxes_hungarian(pred, gt):
 
     # SciPy operates on NumPy arrays; ensure the tensor is on CPU, detached, and uses a supported dtype.
     cost_np = cost.detach().cpu().float().numpy()
+
+    if cost_np.size == 0:
+        return []
 
     # Perform Hungarian matching on the NumPy cost matrix.
     row_ind, col_ind = linear_sum_assignment(cost_np)
@@ -217,9 +230,21 @@ class CompositeLoss:
 
         # Require digit tokens 0-9; raise if missing
         digit_ids = [tokenizer.convert_tokens_to_ids(str(i)) for i in range(10)]
+        # ------------------------------------------------------------------
+        # Validate that tokenizer contains all required special tokens and
+        # numeric tokens.  Fail fast so training doesn't proceed with an
+        # invalid vocabulary that would crash later during indexing.
+        # ------------------------------------------------------------------
+
+        required_tokens = [TAG_OPEN, TAG_CLOSE] + [str(i) for i in range(10)]
+        missing = [t for t in required_tokens if tokenizer.convert_tokens_to_ids(t) == tokenizer.unk_token_id]
+        if missing:
+            raise ValueError(f"Tokenizer missing required tokens: {missing}")
+
         if len(set(digit_ids)) != 10 or -1 in digit_ids or tokenizer.unk_token_id in digit_ids:
             raise RuntimeError("Tokenizer lacks distinct tokens '0'–'9' required for digit-wise straight-through")
 
+        # Store digit token ids on CPU; we create a device-local copy lazily
         self._digit_token_ids = torch.tensor(digit_ids, dtype=torch.long)
         self._digit_token_id_set = set(digit_ids)
         self._enable_digit_st = True
@@ -278,16 +303,14 @@ class CompositeLoss:
         for s in num_strs[:4]:  # take at most 4 numbers
             try:
                 val = float(s)
-                # Treat values >1 as integer tokens 0–999; <=1 already normalised
-                if val > 1.0 + EPSILON:
-                    val = val / BBOX_SCALE
-                nums.append(val * BBOX_SCALE)  # store as 0–999 scale downstream expects
+                # Clamp to [0,1] regardless of how the number was written
+                nums.append(max(0.0, min(1.0, val)))
             except ValueError:
                 continue
 
         missing = 4 - len(nums)
         # Fill the rest with a neutral prior (centre-ish square)
-        nums.extend([0.5 * BBOX_SCALE] * missing)
+        nums.extend([0.5] * missing)
 
         # ------------------------------------------------------------------
         # 2) clamp to [0,1] and accumulate formatting error
@@ -295,11 +318,9 @@ class CompositeLoss:
         clip_diffs = []
         clamped = []
         for v in nums:
-            # v is already scaled 0–999; convert to 0–1
-            v_float = v / BBOX_SCALE
-            v_clamped = max(0.0, min(1.0, v_float))
+            v_clamped = max(0.0, min(1.0, v))
             clamped.append(v_clamped)
-            clip_diffs.append(abs(v_float - v_clamped))
+            clip_diffs.append(abs(v - v_clamped))
 
         # Missing components add fixed penalty; out-of-range adds proportional
         fmt_err = (missing / 4.0) + (sum(clip_diffs) / 4.0) + blank_label_pen
@@ -409,22 +430,42 @@ class CompositeLoss:
             # Digit-wise expectation: soft arg-max over {0..9}
             # ----------------------------------------------------------
             device = logits_slice.device
-            digit_logits = logits_slice.index_select(-1, self._digit_token_ids.to(device))  # (...,10)
+            # Ensure token-id tensor is on the same device *without* mutating the
+            # class attribute (safe for multi-device setups).
+            digit_token_ids = self._digit_token_ids.to(device)
+
+            # Guard: when tokenizer size has shrunk or vocab changed such that
+            # a digit id exceeds the vocabulary dimension we return a neutral
+            # 0.5 expectation to avoid indexing errors.
+            if digit_token_ids.max().item() >= logits_slice.size(-1):
+                return torch.full(logits_slice.shape[:-1], 0.5, device=device, dtype=logits_slice.dtype)
+
+            digit_logits = logits_slice.index_select(-1, digit_token_ids)  # (...,10)
 
             # Temperature schedule shared with full mode
-            tau_progress = min(1.0, self.step_count / float(self.tau_steps))
+            # Guard against tau_steps = 0
+            tau_progress = min(1.0, self.step_count / max(1.0, float(self.tau_steps)))
             tau = max(self.tau_end, self.tau_start * (1.0 - tau_progress))
 
             digit_logits = digit_logits.clamp(min=-10.0, max=10.0)
             y_soft = torch.nn.functional.gumbel_softmax(digit_logits, tau=tau, hard=False, dim=-1)
 
-            idx_hard = y_soft.argmax(dim=-1)
-            y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=10).type_as(y_soft)
+            # ------------------------------------------------------------------
+            # Robustness: if Gumbel-Softmax produced non-finite values fall back
+            # to a plain softmax at a small temperature so gradients survive.
+            # ------------------------------------------------------------------
+            if not torch.isfinite(y_soft).all():
+                y_soft = torch.softmax(digit_logits / max(tau, 0.1), dim=-1)
 
-            if torch.isnan(y_soft).any() or torch.isinf(y_soft).any():
-                y_st = y_hard
+                # Recompute hard assignments after fallback
+                idx_hard = y_soft.argmax(dim=-1)
+                y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=10).type_as(y_soft)
             else:
-                y_st = y_hard + (y_soft - y_soft.detach())
+                idx_hard = y_soft.argmax(dim=-1)
+                y_hard = torch.nn.functional.one_hot(idx_hard, num_classes=10).type_as(y_soft)
+
+            # Straight-through: propagate gradients via y_soft (safe path)
+            y_st = y_hard + (y_soft - y_soft.detach())
 
             values = torch.arange(10, device=device, dtype=logits_slice.dtype)
             digit_val = (y_st * values).sum(dim=-1)  # (...,)
@@ -506,7 +547,7 @@ class CompositeLoss:
                         if len(digit_buffer) == 3:
                             # Compose 3 digits into a single coordinate value in [0,1]
                             coord_int = (digit_buffer[0] * 100 + digit_buffer[1] * 10 + digit_buffer[2])
-                            coord_val = coord_int / 999.0
+                            coord_val = coord_int / 1000.0  # 000-999 → 0-0.999
                             coord_buffer.append(coord_val)
                             digit_buffer = []
 
@@ -546,12 +587,44 @@ class CompositeLoss:
             if pred.numel() == 0 or gt.numel() == 0 or not self._enable_digit_st:
                 continue
 
-            pairs = _match_boxes_hungarian(pred, gt)
+            # Pre-filter zero-area boxes (already done inside matcher but we need
+            # the mapping to original indices for discrete branch)
+            pred_valid = (pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)
+            gt_valid   = (gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)
+
+            if not pred_valid.any() or not gt_valid.any():
+                continue
+
+            pred_f = pred[pred_valid]
+            gt_f   = gt[gt_valid]
+
+            # Keep mapping to original indices for discrete IoU later
+            pred_idx_map = torch.nonzero(pred_valid, as_tuple=False).squeeze(1)
+            gt_idx_map   = torch.nonzero(gt_valid, as_tuple=False).squeeze(1)
+
+            pairs = _match_boxes_hungarian(pred_f, gt_f)
             if not pairs:
                 continue
 
-            p_matched = torch.stack([pred[i] for i, _ in pairs])
-            g_matched = torch.stack([gt[j] for _, j in pairs])
+            p_matched = torch.stack([pred_f[i] for i, _ in pairs])
+            g_matched = torch.stack([gt_f[j] for _, j in pairs])
+
+            # ------------------------------------------------------
+            # Filter out degenerate boxes (zero width/height) to
+            # avoid NaNs in IoU/CIoU.  If all pairs are degenerate we
+            # skip this sample entirely.
+            # ------------------------------------------------------
+            valid_mask = (
+                (p_matched[:, 2] > EPSILON)
+                & (p_matched[:, 3] > EPSILON)
+                & (g_matched[:, 2] > EPSILON)
+                & (g_matched[:, 3] > EPSILON)
+            )
+            if not valid_mask.any():
+                continue
+
+            p_matched = p_matched[valid_mask]
+            g_matched = g_matched[valid_mask]
 
             ciou = _complete_box_iou_loss(
                 _xywh_to_xyxy(p_matched), _xywh_to_xyxy(g_matched), reduction="none"
@@ -567,10 +640,23 @@ class CompositeLoss:
             # -------------------------------------------
             disc_pred_sample = disc_preds_batch[b]
             if disc_pred_sample.shape[0] > 0:
-                d_matched = torch.stack([disc_pred_sample[i] for i, _ in pairs])
-                with torch.no_grad():
-                    disc_pair_iou = _iou_matrix_xywh(d_matched, g_matched).diag().mean()
-                disc_iou_vals.append(disc_pair_iou)
+                # Map pair indices back to original pred / gt indices
+                valid_pairs = []
+                for i_f, j_f in pairs:
+                    i_orig = pred_idx_map[i_f].item()
+                    j_orig = gt_idx_map[j_f].item()
+                    if i_orig < disc_pred_sample.size(0) and j_orig < gt.shape[0]:
+                        valid_pairs.append((i_orig, j_orig))
+                if valid_pairs:
+                    pred_idx = torch.tensor([i for i, _ in valid_pairs], device=lm_logits.device)
+                    gt_idx   = torch.tensor([j for _, j in valid_pairs], device=lm_logits.device)
+
+                    d_matched = disc_pred_sample.index_select(0, pred_idx)
+                    g_sub      = gt.index_select(0, gt_idx)
+
+                    with torch.no_grad():
+                        disc_pair_iou = _iou_matrix_xywh(d_matched, g_sub).diag().mean()
+                    disc_iou_vals.append(disc_pair_iou)
 
             matched_gt += len({j for _, j in pairs})
             total_gt += gt_count
@@ -606,7 +692,10 @@ class CompositeLoss:
             cov = ((dx - mean_d) * (sx - mean_s)).mean()
             var_d = dx.var(unbiased=False)
             var_s = sx.var(unbiased=False)
-            corr = cov / (torch.sqrt(var_d * var_s) + EPSILON)
+            if var_d < EPSILON or var_s < EPSILON:
+                corr = torch.tensor(0.0, device=lm_logits.device)
+            else:
+                corr = cov / (torch.sqrt(var_d * var_s) + EPSILON)
         else:
             corr = torch.tensor(float('nan'), device=lm_logits.device)
 
@@ -686,11 +775,9 @@ class CompositeLoss:
             for txt in gt_texts:
                 boxes = []
                 # Match using the exact special tokens so we stay in sync
-                pattern = re.escape(TAG_OPEN) + r"(.*?)" + re.escape(TAG_CLOSE)
-                for det in re.findall(pattern, txt):
+                for det in TAG_PATTERN.findall(txt):
                     coords, fmt_err = self._parse_detection_string(det)
-                    if coords is not None:
-                        boxes.append(coords)
+                    boxes.append(coords)
                 target_boxes.append(boxes)
 
         # Compute detection losses
@@ -705,9 +792,9 @@ class CompositeLoss:
             self.lambda_format * format_loss
         )
 
-        # Inverse scaling: down-weight LM loss when detection weight grows,
-        # but keep at least 30 % so the model still learns language tokens.
-        lm_weight = max(0.3, min(1.0, 1.0 / weight_multiplier))
+        # Inverse scaling: smoothly decrease LM weight as detection importance rises.
+        # Linear ramp: weight_multiplier ≈1 → lm_weight≈1; ≥15 → lm_weight→0.3.
+        lm_weight = max(0.3, min(1.0, 1.0 - 0.05 * (weight_multiplier - 1.0)))
 
         total_loss = lm_weight * lm_loss + adaptive_lambda_detection * detection_loss
 
