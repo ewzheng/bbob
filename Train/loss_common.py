@@ -44,8 +44,8 @@ class CompositeLoss:
         *,
         lambda_iou: float = 1.5,
         lambda_detection: float = 0.15,
-        lambda_match_penalty: float = 0.5,
-        lm_target: float = 1.5,
+        lambda_match_penalty: float = 1,
+        lm_target: float = 2,
         smoothing_factor: float = 0.95,
         logger=None,
         log_interval: int = 100,
@@ -62,6 +62,7 @@ class CompositeLoss:
         self.lm_loss_ema: float | None = None
         self.is_eval = False
         self._dangling_total = 0  # aggregate counter for malformed coord digits
+        self.last_pred_boxes: int = 0  # number of predicted boxes after filtering per step
 
         # digit/ST cache
         digit_ids = [tokenizer.convert_tokens_to_ids(str(i)) for i in range(10)]
@@ -189,9 +190,15 @@ class CompositeLoss:
         B = logits.size(0)
         token_ids = logits.argmax(dim=-1)
 
+        # Reset counter for this step
+        self.last_pred_boxes = 0
+
         diff_preds: List[torch.Tensor] = [
             self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
+
+        # Total number of *parsed* coordinate 4-tuples before area filtering
+        parsed_total = sum(p.size(0) for p in diff_preds)
 
         # --------------------------------------------------------------
         # Fast path – use torch_linear_assignment in batch on GPU
@@ -214,7 +221,9 @@ class CompositeLoss:
                 if isinstance(gt, list):
                     gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
 
+                # keep only non-degenerate boxes and count them for logging
                 pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
+                self.last_pred_boxes = int(pred.size(0)) if b == 0 else self.last_pred_boxes + int(pred.size(0))
                 gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
 
                 if pred.numel() == 0 or gt.numel() == 0:
@@ -275,7 +284,9 @@ class CompositeLoss:
             if isinstance(gt, list):
                 gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
 
+            # keep only non-degenerate boxes and count them for logging
             pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
+            self.last_pred_boxes += int(pred.size(0))
             gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
             if pred.numel() == 0 or gt.numel() == 0:
                 total += gt.size(0)
@@ -327,11 +338,13 @@ class CompositeLoss:
                 + (1.0 - self.smoothing) * lm_loss.detach().item()
             )
 
-        # Scale detection weight when LM has reached target quality
-        det_scale = max(
-            1.0,
-            min(15.0, self.lm_target / max(self.lm_loss_ema, 1e-4)),
-        )
+        # When the EMA of LM loss falls to the `lm_target` value we want the
+        # detection branch to carry *15 ×* its base weight (so that
+        #   effective_det_weight = lambda_det * det_scale ≈ 0.15 × 15 = 2.25).
+        # Earlier in training (lm_loss_ema > lm_target) the scale grows
+        # linearly from 1 → 15 and saturates there.
+        ratio = self.lm_target / max(self.lm_loss_ema, 1e-4)
+        det_scale = max(1.0, min(10.0, 10.0 * ratio))
 
         iou_loss, match_rate = self._detection_loss(logits, gt_boxes)
 
@@ -350,6 +363,7 @@ class CompositeLoss:
                 "loss": self._val(total_loss),
                 "lm loss": self._val(lm_loss),
                 "iou loss": self._val(iou_loss),
+                "pred boxes": self.last_pred_boxes,
                 "match rate": round(match_rate, 4),
                 "match penalty": round(match_pen.item() if torch.is_tensor(match_pen) else match_pen, 6),
                 "det_scale": round(det_scale, 3),
