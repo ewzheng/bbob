@@ -14,7 +14,13 @@ from typing import List, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.optimize import linear_sum_assignment  # type: ignore
+# Prefer GPU batch solver; fall back to SciPy if not installed / on CPU
+try:
+    from torch_linear_assignment import linear_sum_assignment as _tla_lsa  # type: ignore
+    _HAS_TLA = True
+except ImportError:  # pragma: no cover
+    _HAS_TLA = False
+    from scipy.optimize import linear_sum_assignment as _scipy_lsa  # type: ignore
 from torchvision.ops import box_iou as _box_iou  # type: ignore
 
 # -----------------------------------------------------------------------------
@@ -168,20 +174,31 @@ def iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
 # Matching ----------------------------------------------------------------------------
 
 def hungarian_match(pred: torch.Tensor, gt: torch.Tensor) -> List[Tuple[int, int]]:
-    """Return Hungarian assignment pairs using IoU-based cost."""
+    """Return Hungarian assignment pairs using IoU-based cost.
+
+    If *torch_linear_assignment* is available we use its CUDA-aware single-instance
+    solver; otherwise we fall back to SciPy (CPU).
+    """
     if pred.numel() == 0 or gt.numel() == 0:
         return []
 
     pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-    gt = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
+    gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
     if pred.numel() == 0 or gt.numel() == 0:
         return []
 
-    cost = (1.0 - iou_matrix_xywh(pred, gt)).cpu().float().numpy()
-    if cost.size == 0:
-        return []
-    row_ind, col_ind = linear_sum_assignment(cost)
-    return list(zip(row_ind.tolist(), col_ind.tolist()))
+    cost = 1.0 - iou_matrix_xywh(pred, gt)
+
+    if _HAS_TLA:
+        row_ind, col_ind = _tla_lsa(cost)  # works on tensors directly
+        if isinstance(row_ind, torch.Tensor):
+            row_ind = row_ind.cpu()
+            col_ind = col_ind.cpu()
+        return list(zip(row_ind.tolist(), col_ind.tolist()))
+    else:
+        cost_np = cost.cpu().float().numpy()
+        row_ind, col_ind = _scipy_lsa(cost_np)
+        return list(zip(row_ind.tolist(), col_ind.tolist()))
 
 # -----------------------------------------------------------------------------
 # High-level helpers for evaluation / logging

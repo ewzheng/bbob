@@ -58,7 +58,7 @@ class BBOBTrainer(Trainer):
         total_tf_steps: int = 0,
         tf_schedule: str = "cosine",
         compute_loss_func: Optional[Any] = None,
-        guidance_strength: float = 10.0,
+        guidance_strength: float = 1.5,
         **kwargs: Any,
     ) -> None:
         # If caller did not pass an explicit data_collator we insert the train-one
@@ -95,20 +95,22 @@ class BBOBTrainer(Trainer):
         # Ensure correct mode before workers are spawned
         if hasattr(self._train_collator, "train"):
             self._train_collator.train()
-        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
-            self._loss_func.is_eval = False
         dl = super().get_train_dataloader()
         dl.collate_fn = self._train_collator  # make sure
+        # Ensure loss function is in *train* mode
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = False
         return dl
 
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:  # noqa: D401
         # Switch to eval mode before new workers are forked
         if hasattr(self._eval_collator, "eval"):
             self._eval_collator.eval()
-        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
-            self._loss_func.is_eval = True
         dl = super().get_eval_dataloader(eval_dataset)
         dl.collate_fn = self._eval_collator
+        # Switch loss function to *eval* mode for correct logging behaviour
+        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
+            self._loss_func.is_eval = True
         return dl
 
     # Same treatment for prediction

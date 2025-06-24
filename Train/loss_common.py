@@ -20,11 +20,18 @@ from .loss_helpers import (
     TAG_CLOSE,
     EPSILON,
     hungarian_match,
+    iou_matrix_xywh,
     xywh_to_xyxy,
     decode_pred_gt,
     NUM_DIGITS,
     COORD_SCALE,
 )
+
+try:
+    from torch_linear_assignment import batch_linear_assignment, assignment_to_indices  # type: ignore
+    _use_tla = True
+except ImportError:  # pragma: no cover
+    _use_tla = False
 
 # -----------------------------------------------------------------------------
 # Composite loss – vectorised implementation
@@ -177,35 +184,119 @@ class CompositeLoss:
 
     # ------------- detection loss (vectorised coords) ----------------
     def _detection_loss(self, logits: torch.Tensor, gt_boxes):
-        B = logits.size(0)
+        """Compute IoU loss & match-rate in a batched, GPU-friendly way."""
 
+        B = logits.size(0)
         token_ids = logits.argmax(dim=-1)
+
         diff_preds: List[torch.Tensor] = [
             self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
 
-        iou_vals = []
+        # --------------------------------------------------------------
+        # Fast path – use torch_linear_assignment in batch on GPU
+        # --------------------------------------------------------------
+        if _use_tla:
+            pred_lens = [p.size(0) for p in diff_preds]
+            gt_lens   = [len(g) if isinstance(g, list) else g.size(0) for g in gt_boxes]
+
+            max_pred = max(pred_lens) if pred_lens else 0
+            max_gt   = max(gt_lens)   if gt_lens else 0
+
+            if max_pred == 0 or max_gt == 0:
+                return logits.new_tensor(0.0), 0.0
+
+            cost_batch = logits.new_ones((B, max_pred, max_gt))  # init cost=1 (no match)
+
+            for b in range(B):
+                pred = diff_preds[b]
+                gt = gt_boxes[b]
+                if isinstance(gt, list):
+                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+
+                pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
+                gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
+
+                if pred.numel() == 0 or gt.numel() == 0:
+                    continue
+
+                cost_batch[b, : pred.size(0), : gt.size(0)] = 1.0 - iou_matrix_xywh(pred, gt)
+
+            assignment = batch_linear_assignment(cost_batch)
+            rows, cols = assignment_to_indices(assignment)  # shape (B, K)
+
+            pm_list, gm_list = [], []
+            matched, total = 0, 0
+
+            for b in range(B):
+                pred = diff_preds[b]
+                gt = gt_boxes[b]
+                if isinstance(gt, list):
+                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+
+                P, G = pred.size(0), gt.size(0)
+                if P == 0 or G == 0:
+                    total += G
+                    continue
+
+                valid = (rows[b] >= 0) & (rows[b] < P) & (cols[b] >= 0) & (cols[b] < G)
+                r_sel = rows[b][valid]
+                c_sel = cols[b][valid]
+
+                if r_sel.numel() > 0:
+                    pm_list.append(pred[r_sel])
+                    gm_list.append(gt[c_sel])
+                    matched += r_sel.numel()
+                total += G
+
+            if pm_list:
+                pm_all = torch.cat(pm_list, dim=0)
+                gm_all = torch.cat(gm_list, dim=0)
+                iou_loss = _complete_box_iou_loss(
+                    xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="none"
+                ).mean()
+            else:
+                iou_loss = logits.new_tensor(0.0)
+
+            match_rate = matched / total if total else 0.0
+            return iou_loss, match_rate
+
+        # --------------------------------------------------------------
+        # Slow fallback – per-sample SciPy/Torch helper
+        # --------------------------------------------------------------
+
+        pm_list: list[torch.Tensor] = []
+        gm_list: list[torch.Tensor] = []
         matched, total = 0, 0
+
         for b in range(B):
             pred = diff_preds[b]
             gt = gt_boxes[b]
             if isinstance(gt, list):
                 gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+
             pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-            gt = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
+            gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
             if pred.numel() == 0 or gt.numel() == 0:
+                total += gt.size(0)
                 continue
+
             pairs = hungarian_match(pred, gt)
-            if not pairs:
-                continue
-            pm = torch.stack([pred[i] for i, _ in pairs])
-            gm = torch.stack([gt[j] for _, j in pairs])
-            ciou = _complete_box_iou_loss(xywh_to_xyxy(pm), xywh_to_xyxy(gm), reduction="none").mean()
-            iou_vals.append(ciou)
-            matched += len(pairs)
+            if pairs:
+                pm_list.append(torch.stack([pred[i] for i, _ in pairs]))
+                gm_list.append(torch.stack([gt[j] for _, j in pairs]))
+                matched += len(pairs)
             total += gt.size(0)
 
-        iou_loss = torch.stack(iou_vals).mean() if iou_vals else logits.new_tensor(0.0)
+        if pm_list:
+            pm_all = torch.cat(pm_list, dim=0)
+            gm_all = torch.cat(gm_list, dim=0)
+            iou_loss = _complete_box_iou_loss(
+                xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="none"
+            ).mean()
+        else:
+            iou_loss = logits.new_tensor(0.0)
+
         match_rate = matched / total if total else 0.0
         return iou_loss, match_rate
 
@@ -248,12 +339,11 @@ class CompositeLoss:
         det_loss = self.lambda_iou * iou_loss + match_pen
         total_loss = lm_loss + (self.lambda_det * det_scale) * det_loss
 
-        if self.is_eval and self.logger is not None:
+        if self.logger and self.is_eval and self.step % self.log_interval == 0:
             sample_pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
             sample_gt_ids = lm_labels[0].detach().cpu()
             pred_str, gt_str = decode_pred_gt(sample_pred_ids, sample_gt_ids, self.tok)
             self.logger.info({"sample_pred": pred_str, "sample_gt": gt_str})
-
         if self.logger and self.step % self.log_interval == 0:
             log_dict = {
                 "step": self.step,
