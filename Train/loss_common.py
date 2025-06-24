@@ -21,6 +21,7 @@ FMT_OK_THRESHOLD: float = 0.25  # consider a box "well-formed" when fmt_err < 0.
 TAG_OPEN = "<|bbob|>"
 TAG_CLOSE = "</|bbob|>"
 TAG_PATTERN = re.compile(re.escape(TAG_OPEN) + r"(.*?)" + re.escape(TAG_CLOSE))
+NUMERIC_PATTERN = re.compile(r"[-+]?\d*\.?\d+")  # precompiled numeric regex
 
 def _val(x: torch.Tensor | float | int):
     """Utility to convert tensors to Python scalars for logging."""
@@ -29,68 +30,35 @@ def _val(x: torch.Tensor | float | int):
     return x
 
 def _parse_boxes(logits, tokenizer):
-    """Extract detection strings without decoding whole sequences.
-
-    Strategy
-    --------
-    1. Arg-max over vocab → token-id matrix (B, S).
-    2. Locate indices of the special tokens "<bbob>" and "</bbob>".
-    3. Slice *only* the sub-sequences between those tag IDs.
-    4. Batch-decode that much shorter list of snippets.
-
-    The rest of the sequence (instruction, filler tokens) is never
-    converted back to text, eliminating most of the Python/string cost.
-    """
+    """Vectorised extraction of `<bbob>` snippets with a single pass on CPU."""
 
     if logits.dim() != 3:
-        raise ValueError(
-            f"Expected logits with shape (batch, seq_len, vocab) but got {logits.shape}"
-        )
+        raise ValueError(f"Expected logits with shape (batch, seq_len, vocab) but got {logits.shape}")
 
-    token_ids = logits.argmax(dim=-1)  # (B, S)
-
-    # Get tag IDs once
+    token_ids = logits.argmax(dim=-1)  # (B,S)
     id_open, id_close = tokenizer.convert_tokens_to_ids([TAG_OPEN, TAG_CLOSE])
 
+    ids_np = token_ids.cpu().numpy()
     all_snippets: list[list[int]] = []
-    snippet_owner: list[int] = []  # which batch index produced each snippet
+    snippet_owner: list[int] = []
 
-    ids_cpu = token_ids.cpu()  # single transfer
-
-    for b, row in enumerate(ids_cpu.tolist()):
-        i = 0
-        while True:
-            try:
-                start = row.index(id_open, i)
-            except ValueError:
-                break  # no more opening tags in this sequence
-
-            # Look for the corresponding closing tag. If not found,
-            # add an *empty* snippet so that downstream format_loss = 1.0,
-            # then stop scanning this sequence (no more tags can be valid).
-            try:
-                end = row.index(id_close, start + 1)
-            except ValueError:
-                all_snippets.append([])  # unmatched opening tag → fmt_err = 1
+    for b, row in enumerate(ids_np):
+        opens = (row == id_open).nonzero()[0]
+        closes = (row == id_close).nonzero()[0]
+        for start in opens:
+            end_candidates = closes[closes > start]
+            if end_candidates.size == 0:
+                all_snippets.append([])
                 snippet_owner.append(b)
-                break
-
-            # When both tags are present collect the snippet if non-empty
-            if end - start > 1:
-                snippet = row[start + 1 : end]
-            else:
-                snippet = []  # empty snippet, still yields fmt_err = 1
+                continue
+            end = end_candidates[0]
+            snippet = row[start + 1 : end].tolist() if end - start > 1 else []
             all_snippets.append(snippet)
             snippet_owner.append(b)
-            i = end + 1
 
-    # Decode only the snippets (they are short → negligible cost)
-    if all_snippets:
-        decoded = tokenizer.batch_decode(all_snippets, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-    else:
-        decoded = []
+    decoded = tokenizer.batch_decode(all_snippets, skip_special_tokens=True, clean_up_tokenization_spaces=True) if all_snippets else []
 
-    detections_batch: list[list[str]] = [[] for _ in range(token_ids.size(0))]
+    detections_batch = [[] for _ in range(token_ids.size(0))]
     for owner, txt in zip(snippet_owner, decoded):
         detections_batch[owner].append(txt.strip())
 
@@ -106,35 +74,33 @@ def _xywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
 # ----------------------------------------------------------------------
 
 def _iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
-    """Compute pair-wise IoU matrix using Torchvision for speed if available."""
+    """Compute pair-wise IoU matrix; vectorised fallback when Torchvision unavailable."""
     if boxes1.numel() == 0 or boxes2.numel() == 0:
         return torch.zeros((boxes1.shape[0], boxes2.shape[0]), device=boxes1.device)
 
     if _box_iou is not None:
         return _box_iou(_xywh_to_xyxy(boxes1), _xywh_to_xyxy(boxes2))
 
-    # fallback to manual implementation (previous version)
-    b1_x1 = boxes1[:, 0].unsqueeze(1)
-    b1_y1 = boxes1[:, 1].unsqueeze(1)
-    b1_x2 = (boxes1[:, 0] + boxes1[:, 2]).unsqueeze(1)
-    b1_y2 = (boxes1[:, 1] + boxes1[:, 3]).unsqueeze(1)
+    # Vectorised manual implementation
+    x1, y1, w1, h1 = boxes1.unbind(-1)
+    x2, y2, w2, h2 = boxes2.unbind(-1)
 
-    b2_x1 = boxes2[:, 0].unsqueeze(0)
-    b2_y1 = boxes2[:, 1].unsqueeze(0)
-    b2_x2 = (boxes2[:, 0] + boxes2[:, 2]).unsqueeze(0)
-    b2_y2 = (boxes2[:, 1] + boxes2[:, 3]).unsqueeze(0)
+    x1b = (x1 + w1).unsqueeze(1)
+    y1b = (y1 + h1).unsqueeze(1)
+    x2b = (x2 + w2).unsqueeze(0)
+    y2b = (y2 + h2).unsqueeze(0)
 
-    inter_x1 = torch.max(b1_x1, b2_x1)
-    inter_y1 = torch.max(b1_y1, b2_y1)
-    inter_x2 = torch.min(b1_x2, b2_x2)
-    inter_y2 = torch.min(b1_y2, b2_y2)
+    inter_x1 = torch.max(x1.unsqueeze(1), x2.unsqueeze(0))
+    inter_y1 = torch.max(y1.unsqueeze(1), y2.unsqueeze(0))
+    inter_x2 = torch.min(x1b, x2b)
+    inter_y2 = torch.min(y1b, y2b)
 
     inter_w = (inter_x2 - inter_x1).clamp(min=0)
     inter_h = (inter_y2 - inter_y1).clamp(min=0)
     inter_area = inter_w * inter_h
 
-    area1 = (boxes1[:, 2] * boxes1[:, 3]).unsqueeze(1)
-    area2 = (boxes2[:, 2] * boxes2[:, 3]).unsqueeze(0)
+    area1 = (w1 * h1).unsqueeze(1)
+    area2 = (w2 * h2).unsqueeze(0)
 
     union = area1 + area2 - inter_area + EPSILON
     return inter_area / union
@@ -249,6 +215,9 @@ class CompositeLoss:
         self._digit_token_id_set = set(digit_ids)
         self._enable_digit_st = True
 
+        # Cache arange(10) per device/dtype for faster digit expectation
+        self._values_10: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
         # Gumbel-Softmax temperature schedule
         self.tau_start = 2.0
         self.tau_end = 0.1
@@ -297,7 +266,7 @@ class CompositeLoss:
         # ------------------------------------------------------------------
         # 1) extract numeric substrings (robust to commas, multiple spaces…)
         # ------------------------------------------------------------------
-        num_strs = re.findall(r"[-+]?\d*\.?\d+", parts[1])
+        num_strs = NUMERIC_PATTERN.findall(parts[1])
 
         nums = []
         for s in num_strs[:4]:  # take at most 4 numbers
@@ -467,8 +436,10 @@ class CompositeLoss:
             # Straight-through: propagate gradients via y_soft (safe path)
             y_st = y_hard + (y_soft - y_soft.detach())
 
-            values = torch.arange(10, device=device, dtype=logits_slice.dtype)
-            digit_val = (y_st * values).sum(dim=-1)  # (...,)
+            key = (device, logits_slice.dtype)
+            if key not in self._values_10:
+                self._values_10[key] = torch.arange(10, device=device, dtype=logits_slice.dtype)
+            digit_val = (y_st * self._values_10[key]).sum(dim=-1)  # (...,)
 
             # Return raw digit value 0-9; caller will compose 3 digits
             return digit_val
@@ -526,7 +497,7 @@ class CompositeLoss:
 
             i = 0
             coords_list = []
-            digit_buffer: list[torch.Tensor] = []  # collect 3 digits per coordinate
+            digit_pos_buffer: list[int] = []  # collect positions for the 3 digits of one coordinate
             coord_buffer: list[torch.Tensor] = []  # collect 4 coords per box
             while True:
                 try:
@@ -542,14 +513,16 @@ class CompositeLoss:
                 for pos in range(start + 1, end):
                     tok_id = row[pos]
                     if tok_id in self._digit_token_id_set:
-                        digit_val = self._st_expect_coord(logits_row[pos : pos + 1, :])[0]
-                        digit_buffer.append(digit_val)
-                        if len(digit_buffer) == 3:
-                            # Compose 3 digits into a single coordinate value in [0,1]
-                            coord_int = (digit_buffer[0] * 100 + digit_buffer[1] * 10 + digit_buffer[2])
-                            coord_val = coord_int / 1000.0  # 000-999 → 0-0.999
+                        digit_pos_buffer.append(pos)
+                        if len(digit_pos_buffer) == 3:
+                            pos_tensor = torch.tensor(digit_pos_buffer, device=lm_logits.device)
+                            logits_slice = logits_row.index_select(0, pos_tensor)  # (3,V)
+                            digit_vals = self._st_expect_coord(logits_slice)  # (3,)
+
+                            coord_int = (digit_vals[0] * 100 + digit_vals[1] * 10 + digit_vals[2])
+                            coord_val = coord_int / 1000.0
                             coord_buffer.append(coord_val)
-                            digit_buffer = []
+                            digit_pos_buffer = []
 
                             if len(coord_buffer) == 4:
                                 coords_list.append(torch.stack(coord_buffer))
@@ -581,7 +554,6 @@ class CompositeLoss:
                 gt = torch.zeros((0, 4), device=lm_logits.device, dtype=lm_logits.dtype)
 
             gt_count = gt.shape[0]
-            pred_count = pred.shape[0]
 
             # When ST is disabled pred may be zeros; skip in that case too
             if pred.numel() == 0 or gt.numel() == 0 or not self._enable_digit_st:
@@ -598,36 +570,25 @@ class CompositeLoss:
             pred_f = pred[pred_valid]
             gt_f   = gt[gt_valid]
 
-            # Keep mapping to original indices for discrete IoU later
-            pred_idx_map = torch.nonzero(pred_valid, as_tuple=False).flatten()
-            gt_idx_map   = torch.nonzero(gt_valid, as_tuple=False).flatten()
-
-            pairs = _match_boxes_hungarian(pred_f, gt_f)
-            if not pairs:
-                continue
-
-            p_matched = torch.stack([pred_f[i] for i, _ in pairs])
-            g_matched = torch.stack([gt_f[j] for _, j in pairs])
-
             # ------------------------------------------------------
             # Filter out degenerate boxes (zero width/height) to
             # avoid NaNs in IoU/CIoU.  If all pairs are degenerate we
             # skip this sample entirely.
             # ------------------------------------------------------
             valid_mask = (
-                (p_matched[:, 2] > EPSILON)
-                & (p_matched[:, 3] > EPSILON)
-                & (g_matched[:, 2] > EPSILON)
-                & (g_matched[:, 3] > EPSILON)
+                (pred_f[:, 2] > EPSILON)
+                & (pred_f[:, 3] > EPSILON)
+                & (gt_f[:, 2] > EPSILON)
+                & (gt_f[:, 3] > EPSILON)
             )
             if not valid_mask.any():
                 continue
 
-            p_matched = p_matched[valid_mask]
-            g_matched = g_matched[valid_mask]
+            pred_f = pred_f[valid_mask]
+            gt_f   = gt_f[valid_mask]
 
             ciou = _complete_box_iou_loss(
-                _xywh_to_xyxy(p_matched), _xywh_to_xyxy(g_matched), reduction="none"
+                _xywh_to_xyxy(pred_f), _xywh_to_xyxy(gt_f), reduction="none"
             ).mean()
             ciou = torch.nan_to_num(ciou, nan=2.0, posinf=2.0, neginf=0.0)
             iou_vals.append(ciou)
@@ -639,30 +600,13 @@ class CompositeLoss:
             # Discrete IoU using arg-max parsed boxes
             # -------------------------------------------
             disc_pred_sample = disc_preds_batch[b]
-            if disc_pred_sample.shape[0] > 0:
-                # Map pair indices back to original pred / gt indices
-                valid_pairs = []
-                for idx_pair, (i_f, j_f) in enumerate(pairs):
-                    if not valid_mask[idx_pair]:
-                        continue  # pair involves degenerate box filtered earlier
+            if disc_pred_sample.shape[0] > 0 and gt.shape[0] > 0:
+                with torch.no_grad():
+                    disc_iou_mat = _iou_matrix_xywh(disc_pred_sample, gt)
+                    if disc_iou_mat.numel() > 0:
+                        disc_iou_vals.append(disc_iou_mat.max(dim=1)[0].mean())
 
-                    i_orig = pred_idx_map[i_f].item()
-                    j_orig = gt_idx_map[j_f].item()
-
-                    if i_orig < disc_pred_sample.size(0) and j_orig < gt.shape[0]:
-                        valid_pairs.append((i_orig, j_orig))
-                if valid_pairs:
-                    pred_idx = torch.tensor([i for i, _ in valid_pairs], device=lm_logits.device)
-                    gt_idx   = torch.tensor([j for _, j in valid_pairs], device=lm_logits.device)
-
-                    d_matched = disc_pred_sample.index_select(0, pred_idx)
-                    g_sub      = gt.index_select(0, gt_idx)
-
-                    with torch.no_grad():
-                        disc_pair_iou = _iou_matrix_xywh(d_matched, g_sub).diag().mean()
-                    disc_iou_vals.append(disc_pair_iou)
-
-            matched_gt += len({j for _, j in pairs})
+            matched_gt += len({j for _, j in _match_boxes_hungarian(pred_f, gt)})
             total_gt += gt_count
 
         iou_loss = torch.stack(iou_vals).mean() if iou_vals else torch.tensor(0.0, device=lm_logits.device)
@@ -807,28 +751,14 @@ class CompositeLoss:
         # ------------------------------------------------------------------
 
         if self.logger is not None and (self.step_count % self._log_interval == 0):
-            # Average number of GT boxes in this batch
-            if target_boxes is not None:
-                avg_gt = round(sum(len(tb) if isinstance(tb, list) else (tb.shape[0] if tb is not None else 0) for tb in target_boxes) / max(1, len(target_boxes)), 3)
-            else:
-                avg_gt = 0.0
-
             loss_dict = {
-                "loss_total": _val(total_loss),
-                "loss_lm": _val(lm_loss),
-                "loss_iou": _val(iou_loss),
-                "loss_fmt": _val(format_loss),
-                "det_weight": _val(adaptive_lambda_detection),
-                "gt_match_rate": match_rate,
-                "parsed_boxes_avg": round(sum(len(p) for p in parsed_strs) / max(1, len(parsed_strs)), 3),
-                "gt_boxes_avg": avg_gt,
-                "progress_lm": _val(self.progress_lm) if self.progress_lm is not None else None,
-                "progress_fmt": _val(self.progress_fmt) if self.progress_fmt is not None else None,
-                'lm_loss_ema': self.lm_loss_ema,
-                'lm_target': self.lm_target,
-                'current_weight_multiplier': weight_multiplier,
-                'step_count': self.step_count,
-                'corr': _val(corr)
+                "total": _val(total_loss),
+                "lm": _val(lm_loss),
+                "iou": _val(iou_loss),
+                "fmt": _val(format_loss),
+                "weight": _val(adaptive_lambda_detection),
+                "match_rate": match_rate,
+                "step": self.step_count,
             }
             
             self.logger.info(f"LOSS STATUS: {loss_dict}")
