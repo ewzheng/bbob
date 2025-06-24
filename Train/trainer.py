@@ -153,7 +153,7 @@ class BBOBTrainer(Trainer):
 
     # ---------------- inject guided sampling before loss -----------------
 
-    def compute_loss(self, model, inputs, return_outputs=False):  # type: ignore[override]
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
         labels = inputs.get("labels")
         outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
 
