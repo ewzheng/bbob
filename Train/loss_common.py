@@ -193,11 +193,27 @@ class CompositeLoss:
         if not torch.isfinite(lm_loss):
             raise RuntimeError("NaN/Inf in LM loss")
 
+        # ---------------- adaptive detection weighting -----------------
+        # Maintain EMA of LM loss to avoid jitter
+        if self.lm_loss_ema is None:
+            self.lm_loss_ema = lm_loss.detach().item()
+        else:
+            self.lm_loss_ema = (
+                self.smoothing * self.lm_loss_ema
+                + (1.0 - self.smoothing) * lm_loss.detach().item()
+            )
+
+        # Scale detection weight when LM has reached target quality
+        det_scale = max(
+            1.0,
+            min(15.0, self.lm_target / max(self.lm_loss_ema, 1e-4)),
+        )
+
         iou_loss, match_rate = self._detection_loss(logits, gt_boxes)
 
         match_pen = self.lambda_match * (1.0 - match_rate)
         det_loss = self.lambda_iou * iou_loss + match_pen
-        total_loss = lm_loss + self.lambda_det * det_loss
+        total_loss = lm_loss + (self.lambda_det * det_scale) * det_loss
 
         if self.is_eval and self.logger is not None:
             sample_pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
@@ -213,6 +229,7 @@ class CompositeLoss:
                 "iou loss": self._val(iou_loss),
                 "match rate": round(match_rate, 4),
                 "match penalty": round(match_pen.item() if torch.is_tensor(match_pen) else match_pen, 6),
+                "det_scale": round(det_scale, 3),
             }
             if self._dangling_total > 0:
                 log_dict["dangling_coords"] = int(self._dangling_total)
