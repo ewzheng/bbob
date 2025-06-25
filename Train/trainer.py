@@ -151,12 +151,27 @@ class BBOBTrainer(Trainer):
 
     # ---------------- inject guided sampling before loss -----------------
 
-    def training_step(self, model, inputs):
+    def training_step(self, model, inputs, *args, **kwargs):
+        """Thin wrapper around HF Trainer.training_step that stays compatible
+        with both the old (<4.40) two-argument signature and the newer one
+        that passes an additional *num_items_in_batch* parameter.  Any extra
+        positional/keyword arguments are forwarded verbatim to the parent
+        implementation so we do not break when the upstream API changes
+        again in future releases.
+        """
+
+        # Make sure the custom loss function logs in *train* mode
         if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
             self._loss_func.is_eval = False
-        return super().training_step(model, inputs)
 
-    def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None, metric_key_prefix="eval"):
+        # Call the parent method with the detected signature
+        try:
+            return super().training_step(model, inputs, *args, **kwargs)
+        except TypeError:
+            # Fallback for older transformers that expect only 2 positional args
+            return super().training_step(model, inputs)
+
+    def evaluation_loop(self, dataloader, description, prediction_loss_only=None, ignore_keys=None, metric_key_prefix="eval", **kwargs):
         if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
             self._loss_func.is_eval = True
         return super().evaluation_loop(dataloader, description, prediction_loss_only, ignore_keys, metric_key_prefix)
