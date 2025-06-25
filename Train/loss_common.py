@@ -168,7 +168,9 @@ class CompositeLoss:
         dig_vals = self._st_expect(dig_logits)             # (D,)
 
         dig_vals = dig_vals.view(num_complete, NUM_DIGITS)
-        coord_vals = (dig_vals * self._pow10_tensor(logits_row.device, dig_vals.dtype)).sum(-1) / COORD_SCALE
+        # Keep computations in the same precision as the logits (fp16 / bf16 / fp32)
+        scale_tensor = self._pow10_tensor(logits_row.device, dig_vals.dtype)
+        coord_vals = (dig_vals * scale_tensor).sum(-1) / scale_tensor.new_tensor(COORD_SCALE)
         coord_vals = coord_vals.clamp_(0.0, 1.0)
 
         # ------------------------------------------------------------------
@@ -351,6 +353,12 @@ class CompositeLoss:
         det_scale = max(1.0, min(10.0, 10.0 * ratio))
 
         iou_loss, match_rate = self._detection_loss(logits, gt_boxes)
+
+        # Make sure all loss components share the same dtype to avoid implicit
+        # casts when mixed-precision / autocast is enabled (saves memory and
+        # keeps gradient scaling straightforward).
+        if torch.is_tensor(iou_loss) and iou_loss.dtype != lm_loss.dtype:
+            iou_loss = iou_loss.to(lm_loss.dtype)
 
         match_pen = self.lambda_match * (1.0 - match_rate)
         det_loss = self.lambda_iou * iou_loss + match_pen
