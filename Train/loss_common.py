@@ -78,6 +78,12 @@ class CompositeLoss:
         #   (λ_det≈0.15  × 15 ≈ 2.25 effective weight).
         self.det_scale_max: float = 15.0
 
+        # ------------------------------------------------------------------
+        # Internal buffers that are re-used across forward passes to avoid
+        # frequent cudaMallocs / cpu->gpu allocations.
+        # ------------------------------------------------------------------
+        self._cost_buf: torch.Tensor | None = None  # (B, P_max, G_max)
+
     # ------------- straight-through digit expectation ----------------
     def _st_expect(self, logits_slice: torch.Tensor) -> torch.Tensor:
         device, dtype = logits_slice.device, logits_slice.dtype
@@ -93,9 +99,12 @@ class CompositeLoss:
         if not torch.isfinite(y_soft).all():
             y_soft = torch.softmax(dl / max(tau, 0.1), dim=-1)
 
-        idx = y_soft.argmax(-1)
-        y_hard = F.one_hot(idx, num_classes=10).type_as(y_soft)
-        y_st = y_hard + (y_soft - y_soft.detach())
+        # Faster straight-through path that avoids host <-> device sync by
+        # staying entirely on GPU and using `scatter_` instead of argmax →
+        # item() extraction.
+        idx = y_soft.argmax(-1, keepdim=True)
+        y_hard = torch.zeros_like(y_soft).scatter_(-1, idx, 1.0)
+        y_st = y_hard - y_soft.detach() + y_soft
         key = (device, dtype)
         if key not in self._values10:
             self._values10[key] = torch.arange(10, device=device, dtype=dtype)
@@ -216,7 +225,28 @@ class CompositeLoss:
             if max_pred == 0 or max_gt == 0:
                 return logits.new_tensor(0.0), 0.0
 
-            cost_batch = logits.new_ones((B, max_pred, max_gt))  # init cost=1 (no match)
+            # --------------------------------------------------------------
+            # Allocate / grow a persistent cost buffer once to reduce
+            # allocation overhead.  Keep dtype identical to `logits` so that
+            # mixed-precision runs avoid implicit casting.
+            # --------------------------------------------------------------
+            if (
+                self._cost_buf is None
+                or self._cost_buf.size(0) < B
+                or self._cost_buf.size(1) < max_pred
+                or self._cost_buf.size(2) < max_gt
+                or self._cost_buf.dtype != logits.dtype
+                or self._cost_buf.device != logits.device
+            ):
+                self._cost_buf = logits.new_empty((B, max_pred, max_gt))
+
+            cost_batch = self._cost_buf[:B, :max_pred, :max_gt]
+            cost_batch.fill_(1.0)
+
+            # Caches for filtered boxes so we don't recompute in the second
+            # loop.
+            cached_pred: list[torch.Tensor] = []
+            cached_gt:   list[torch.Tensor] = []
 
             for b in range(B):
                 pred = diff_preds[b]
@@ -226,8 +256,12 @@ class CompositeLoss:
 
                 # Filter non-degenerate boxes and count them for logging
                 pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-                self.last_pred_boxes += int(pred_f.size(0))
                 gt_f   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
+
+                cached_pred.append(pred_f)
+                cached_gt.append(gt_f)
+
+                self.last_pred_boxes += int(pred_f.size(0))
 
                 if pred_f.numel() == 0 or gt_f.numel() == 0:
                     continue
@@ -242,16 +276,9 @@ class CompositeLoss:
             matched, total = 0, 0
 
             for b in range(B):
-                # Retrieve the original (unfiltered) predictions and GT for this sample
-                pred = diff_preds[b]
-                gt   = gt_boxes[b]
-                if isinstance(gt, list):
-                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
-
-                # Re-apply the same filter so that the row/col indices from assignment
-                # correctly refer to the filtered tensors used in cost matrix construction
-                pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-                gt_f   = gt  [(gt  [:, 2] > EPSILON) & (gt  [:, 3] > EPSILON)]
+                # Retrieve cached filtered tensors (computed in the first loop)
+                pred_f = cached_pred[b]
+                gt_f   = cached_gt[b]
 
                 P, G = pred_f.size(0), gt_f.size(0)
                 if P == 0 or G == 0:
