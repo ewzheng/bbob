@@ -15,7 +15,7 @@ import torch.nn.functional as F
 from torchvision.ops import complete_box_iou_loss
 import warnings
 
-from loss_helpers import (
+from .loss_helpers import (
     TAG_OPEN,
     TAG_CLOSE,
     EPSILON,
@@ -43,8 +43,8 @@ class CompositeLoss:
         tokenizer,
         *,
         lambda_iou: float = 1.5,
-        lambda_detection: float = 0.15,
-        lambda_match_penalty: float = 1,
+        lambda_detection: float = 0.2,
+        lambda_match_penalty: float = 0.5,
         lm_target: float = 2,
         smoothing_factor: float = 0.95,
         logger=None,
@@ -72,7 +72,7 @@ class CompositeLoss:
         self.digit_set = set(digit_ids)
         self._values10: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
         self._pow10: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
-        self.tau_start, self.tau_end, self.tau_steps = 2.0, 0.1, 10_000
+        self.tau_start, self.tau_end, self.tau_steps = 5.0, 0.1, 50_000
 
     # ------------- straight-through digit expectation ----------------
     def _st_expect(self, logits_slice: torch.Tensor) -> torch.Tensor:
