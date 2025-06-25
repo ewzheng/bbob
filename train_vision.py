@@ -71,7 +71,7 @@ def train(
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
         dataloader_prefetch_factor=num_workers,
-        dataloader_persistent_workers=True,
+        dataloader_persistent_workers=False,
         dataloader_pin_memory=True,
         save_total_limit=3,
         save_safetensors=True,

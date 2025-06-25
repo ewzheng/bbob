@@ -12,10 +12,10 @@ from typing import List
 
 import torch
 import torch.nn.functional as F
-from torchvision.ops import complete_box_iou_loss as _complete_box_iou_loss  # type: ignore
+from torchvision.ops import complete_box_iou_loss
 import warnings
 
-from .loss_helpers import (
+from loss_helpers import (
     TAG_OPEN,
     TAG_CLOSE,
     EPSILON,
@@ -265,8 +265,8 @@ class CompositeLoss:
             if pm_list:
                 pm_all = torch.cat(pm_list, dim=0)
                 gm_all = torch.cat(gm_list, dim=0)
-                iou_loss = _complete_box_iou_loss(
-                    xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="none"
+                iou_loss = complete_box_iou_loss(
+                    xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="mean"
                 ).mean()
             else:
                 iou_loss = logits.new_tensor(0.0)
@@ -306,7 +306,7 @@ class CompositeLoss:
         if pm_list:
             pm_all = torch.cat(pm_list, dim=0)
             gm_all = torch.cat(gm_list, dim=0)
-            iou_loss = _complete_box_iou_loss(
+            iou_loss = complete_box_iou_loss(
                 xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="none"
             ).mean()
         else:
