@@ -263,9 +263,6 @@ class CompositeLoss:
 
                 self.last_pred_boxes += int(pred_f.size(0))
 
-                if pred_f.numel() == 0 or gt_f.numel() == 0:
-                    continue
-
                 # Build cost matrix using FILTERED boxes
                 cost_batch[b, : pred_f.size(0), : gt_f.size(0)] = 1.0 - iou_matrix_xywh(pred_f, gt_f)
 
@@ -285,14 +282,26 @@ class CompositeLoss:
                     total += G  # still count GT objects even if no prediction passes
                     continue
 
-                valid = (rows[b] >= 0) & (rows[b] < P) & (cols[b] >= 0) & (cols[b] < G)
-                r_sel = rows[b][valid]
-                c_sel = cols[b][valid]
+                # ----------------------------------------------------------
+                # NEW: pair *every* prediction with the nearest GT box so
+                # CIoU delivers a gradient even when IoU=0.  We still keep
+                # Hungarian above to measure proper matches; unmatched preds
+                # fall back to centre-distance pairing here.
+                # ----------------------------------------------------------
+                if G == 0 or P == 0:
+                    total += G
+                    continue
 
-                if r_sel.numel() > 0:
-                    pm_list.append(pred_f[r_sel])
-                    gm_list.append(gt_f[c_sel])
-                    matched += r_sel.numel()
+                # (P,G) centre-distance matrix, cheap vs IoU on GPU
+                dist = torch.cdist(pred_f[:, :2], gt_f[:, :2])
+                nearest = dist.argmin(dim=1)  # (P,)
+
+                pm_list.append(pred_f)                    # (P,4)
+                gm_list.append(gt_f[nearest])             # (P,4)
+
+                # Count matched predictions (IoU>0) for logging
+                ious_sel = iou_matrix_xywh(pred_f, gt_f)[torch.arange(P), nearest]
+                matched += int((ious_sel > 0).sum().item())
                 total += G
 
             if pm_list:
@@ -325,15 +334,19 @@ class CompositeLoss:
             pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
             self.last_pred_boxes += int(pred.size(0))
             gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
-            if pred.numel() == 0 or gt.numel() == 0:
+            if gt.size(0) == 0 or pred.size(0) == 0:
                 total += gt.size(0)
                 continue
 
-            pairs = hungarian_match(pred, gt)
-            if pairs:
-                pm_list.append(torch.stack([pred[i] for i, _ in pairs]))
-                gm_list.append(torch.stack([gt[j] for _, j in pairs]))
-                matched += len(pairs)
+            # Pair every prediction with nearest GT by centre distance
+            dist = torch.cdist(pred[:, :2], gt[:, :2])
+            nearest = dist.argmin(dim=1)  # (P,)
+
+            pm_list.append(pred)
+            gm_list.append(gt[nearest])
+
+            ious_sel = iou_matrix_xywh(pred, gt)[torch.arange(pred.size(0)), nearest]
+            matched += int((ious_sel > 0).sum().item())
             total += gt.size(0)
 
         if pm_list:
