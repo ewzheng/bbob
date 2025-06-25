@@ -54,6 +54,7 @@ class CompositeLoss:
         self.lambda_iou = lambda_iou
         self.lambda_det = lambda_detection
         self.lambda_match = lambda_match_penalty
+        self.lambda_cls = 1.0
         self.lm_target = lm_target
         self.smoothing = smoothing_factor
         self.logger = logger
@@ -84,6 +85,9 @@ class CompositeLoss:
         # ------------------------------------------------------------------
         self._cost_buf: torch.Tensor | None = None  # (B, P_max, G_max)
 
+        # Cache digit-id tensor per device to avoid `.to(device)` every step
+        self._digit_ids_cache: dict[torch.device, torch.Tensor] = {}
+
         # Punctuation tokens used inside <bbob> snippets.  If the tokenizer
         # does not contain a dedicated token we store -1 and simply skip the
         # check when scanning.
@@ -95,11 +99,15 @@ class CompositeLoss:
         self._id_comma = _get_id(",")
         self._id_dot   = _get_id(".")
 
+        # Tag token IDs – needed by __call__ masking before any forward pass
+        self._id_open = tokenizer.convert_tokens_to_ids(TAG_OPEN)
+        self._id_close = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
+
     # ------------- straight-through digit expectation ----------------
     def _st_expect(self, logits_slice: torch.Tensor) -> torch.Tensor:
         device, dtype = logits_slice.device, logits_slice.dtype
         ids = self.digit_ids.to(device)
-        if ids.max().item() >= logits_slice.size(-1):
+        if (ids >= logits_slice.size(-1)).any() or (ids < 0).any():
             warnings.warn("Digit token IDs exceed vocab range; falling back to uniform random coords and disabling ST path.")
             return torch.rand(logits_slice.shape[:-1], device=device, dtype=dtype)
 
@@ -128,8 +136,24 @@ class CompositeLoss:
             self._pow10[key] = torch.tensor([10 ** (NUM_DIGITS - 1 - k) for k in range(NUM_DIGITS)], device=device, dtype=dtype)
         return self._pow10[key]
 
+    # ---------------- helper: lazy device copy of digit ids -----------------
+    def _digit_ids_on(self, device: torch.device) -> torch.Tensor:
+        if device not in self._digit_ids_cache:
+            self._digit_ids_cache[device] = self.digit_ids.to(device)
+        return self._digit_ids_cache[device]
+
+    # ---------------- helper: mask tokens inside <bbob> tags ----------------
+    def _inside_mask(self, row: torch.Tensor) -> torch.Tensor:
+        """Return boolean mask for positions between <bbob> tags (exclusive)."""
+        open_mask = row == self._id_open
+        close_mask = row == self._id_close
+        depth = torch.cumsum(open_mask.int() - close_mask.int(), dim=0)
+        inside = depth > 0
+        # exclude the tag tokens themselves
+        return inside & ~(open_mask | close_mask)
+
     # ---------------- helper: parse coordinates from one sample ----------------
-    def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Vectorised extraction of `(N, 4)` *xywh* boxes from one sample.
 
         Compared to the previous Python-loop implementation this version:
@@ -176,7 +200,7 @@ class CompositeLoss:
             # Not enough digits for a single coordinate – return empty tensor
             if total_digits > 0:
                 self._dangling_total += total_digits
-            return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long)
+            return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long), logits_row.new_zeros((0,), dtype=torch.long)
 
         # Discard dangling digits that don't fit into full NUM_DIGITS groups
         num_complete = total_digits // NUM_DIGITS
@@ -210,6 +234,7 @@ class CompositeLoss:
             # This matches the typical   "<bbob> cat : 0 0 1 1 ..."  layout.
 
             lbl_ids: list[int] = []
+            lbl_pos: list[int] = []
             digits_per_box = NUM_DIGITS * 4
             for i in range(n_boxes):
                 first_digit_pos = positions[i * digits_per_box].item()
@@ -231,14 +256,24 @@ class CompositeLoss:
                     label_id = tid
                     break
                 lbl_ids.append(label_id)  # keep -1 for 'no class'
+                lbl_pos.append(j)
 
             labels = logits_row.new_tensor(lbl_ids, dtype=torch.long)
+            positions_cls = logits_row.new_tensor(lbl_pos, dtype=torch.long)
 
             # Drop boxes where we could not identify a class label (label == -1)
             keep = labels >= 0
-            return coord_vals[: n_boxes * 4].view(-1, 4)[keep], labels[keep]
+            return (
+                coord_vals[: n_boxes * 4].view(-1, 4)[keep],
+                labels[keep],
+                positions_cls[keep],
+            )
 
-        return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long)
+        return (
+            logits_row.new_zeros((0, 4)),
+            logits_row.new_zeros((0,), dtype=torch.long),
+            logits_row.new_zeros((0,), dtype=torch.long),
+        )
 
     # ---------------- helper: parse coords per sample ----------------
 
@@ -252,7 +287,7 @@ class CompositeLoss:
         # Reset counter for this step
         self.last_pred_boxes = 0
 
-        diff_preds: List[tuple[torch.Tensor, torch.Tensor]] = [
+        diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = [
             self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
 
@@ -266,7 +301,7 @@ class CompositeLoss:
         max_gt   = max(gt_lens)   if gt_lens else 0
 
         if max_pred == 0 or max_gt == 0:
-            return logits.new_tensor(0.0), 0.0
+            return logits.new_tensor(0.0), 0.0, logits.new_tensor(0.0)
 
         # --------------------------------------------------------------
         # Allocate / grow a persistent cost buffer once to reduce
@@ -281,18 +316,22 @@ class CompositeLoss:
             or self._cost_buf.dtype != logits.dtype
             or self._cost_buf.device != logits.device
         ):
-            self._cost_buf = logits.new_empty((B, max_pred, max_gt))
+            # Grow dimensions by 1.5× to cut realloc frequency
+            new_B = max(B, int((self._cost_buf.size(0) if self._cost_buf is not None else 0) * 1.5))
+            new_P = max(max_pred, int((self._cost_buf.size(1) if self._cost_buf is not None else 0) * 1.5))
+            new_G = max(max_gt, int((self._cost_buf.size(2) if self._cost_buf is not None else 0) * 1.5))
+            self._cost_buf = logits.new_empty((new_B, new_P, new_G))
 
         cost_batch = self._cost_buf[:B, :max_pred, :max_gt]
         cost_batch.fill_(1e6)  # prohibitively high cost for cross-class pairs
 
         # Caches for filtered boxes so we don't recompute in the second
         # loop.
-        cached_pred: list[tuple[torch.Tensor, torch.Tensor]] = []
+        cached_pred: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
         cached_gt:   list[tuple[torch.Tensor, torch.Tensor]] = []
 
         for b in range(B):
-            pred, pred_lbl_full = diff_preds[b]
+            pred, pred_lbl_full, pred_pos_full = diff_preds[b]
 
             # Ground-truth may come as (boxes, labels) tuple or just boxes
             gt_entry = gt_boxes[b]
@@ -317,7 +356,8 @@ class CompositeLoss:
             gt_f   = gt[valid_gt]
             gt_lbl = gt_lbl_full[valid_gt] if gt_lbl_full.numel() else gt_lbl_full.new_zeros((0,))
 
-            cached_pred.append((pred_f, pred_lbl))
+            pred_pos = pred_pos_full[valid_pred]
+            cached_pred.append((pred_f, pred_lbl, pred_pos))
             cached_gt.append((gt_f, gt_lbl))
 
             self.last_pred_boxes += int(pred_f.size(0))
@@ -353,10 +393,12 @@ class CompositeLoss:
 
         pm_list, gm_list = [], []
         matched, total = 0, 0
+        cls_loss_accum = 0.0
+        cls_count = 0
 
         for b in range(B):
             # Retrieve cached filtered tensors (computed in the first loop)
-            pred_f, pred_lbl = cached_pred[b]
+            pred_f, pred_lbl, pred_pos = cached_pred[b]
             gt_f, gt_lbl = cached_gt[b]
 
             P, G = pred_f.size(0), gt_f.size(0)
@@ -385,6 +427,12 @@ class CompositeLoss:
             if keep_pred_mask.any():
                 pm_list.append(pred_f[keep_pred_mask])            # (K,4)
                 gm_list.append(gt_f[assign_vec[keep_pred_mask]])   # (K,4)
+                # -------- class CE accumulation ------------------
+                cls_logits = logits[b, pred_pos[keep_pred_mask], :]  # (K,V)
+                cls_targets = gt_lbl[assign_vec[keep_pred_mask]]      # (K,)
+                cls_loss_sum = F.cross_entropy(cls_logits, cls_targets, reduction="sum")
+                cls_loss_accum += cls_loss_sum
+                cls_count += cls_targets.numel()
 
                 iou_mat = iou_matrix_xywh(pred_f, gt_f)
                 ious_sel = iou_mat[torch.arange(P, device=pred_f.device)[keep_pred_mask], assign_vec[keep_pred_mask]]
@@ -402,7 +450,9 @@ class CompositeLoss:
             iou_loss = logits.new_tensor(0.0)
 
         match_rate = matched / total if total else 0.0
-        return iou_loss, match_rate
+        # Average class loss if any
+        cls_loss = cls_loss_accum / cls_count if cls_count > 0 else logits.new_tensor(0.0)
+        return iou_loss, match_rate, cls_loss
 
     # -------------------- callable -----------------------------
     def __call__(self, outputs, labels, **kw):
@@ -410,12 +460,39 @@ class CompositeLoss:
         lm_labels = labels
         gt_boxes = kw.get("target_boxes", getattr(outputs, "target_boxes", None))
         if gt_boxes is None:
-            gt_boxes = [torch.zeros((0, 4), device=logits.device, dtype=logits.dtype) for _ in range(logits.size(0))]
+            # Create geometry-only placeholder tuples so downstream code can
+            # treat every entry uniformly.
+            empty_box = torch.zeros((0, 4), device=logits.device, dtype=logits.dtype)
+            empty_lbl = torch.zeros((0,), device=logits.device, dtype=torch.long)
+            gt_boxes = [(empty_box, empty_lbl) for _ in range(logits.size(0))]
         vocab = logits.size(-1)
+
+        # ---------------- order-agnostic CE on punctuation only --------------
+        # Build a mask that ignores:
+        #   • digit tokens 0-9
+        #   • any non-punctuation tokens that appear *inside* a <bbob>…</bbob>
+        #     span and before the first ':'  ⇒ these are the class words.
+
+        masked_lbl = lm_labels.clone()
+
+        digit_mask = (masked_lbl.unsqueeze(-1) == self._digit_ids_on(masked_lbl.device)).any(-1)
+
+        B, S = masked_lbl.shape
+        for b in range(B):
+            row = masked_lbl[b]
+            inside = self._inside_mask(row)
+
+            # For positions inside, mark non-punctuation tokens (not digit, comma, dot, colon) to ignore
+            row_tokens = row
+            punct_mask = (row_tokens == self._id_colon) | (row_tokens == self._id_comma) | (row_tokens == self._id_dot)
+            class_mask = inside & ~digit_mask[b] & ~punct_mask
+
+            ignore_mask_row = digit_mask[b] | class_mask
+            masked_lbl[b][ignore_mask_row] = -100
 
         lm_loss = F.cross_entropy(
             logits[..., :-1, :].contiguous().view(-1, vocab),
-            lm_labels[..., 1:].contiguous().view(-1),
+            masked_lbl[..., 1:].contiguous().view(-1),
             ignore_index=-100,
         )
         if not torch.isfinite(lm_loss):
@@ -438,7 +515,7 @@ class CompositeLoss:
         # (CE dominates) and steeper close to convergence where detection
         # feedback is most useful.
 
-        ratio = self.lm_target / max(self.lm_loss_ema, 1e-4)
+        ratio = self.lm_target / max(self.lm_loss_ema, 1e-6)
         progress = min(1.0, ratio)  # 0 → far from target, 1 → reached target
 
         # Map progress ∈ [0,1] ↦ det_scale ∈ [1, det_scale_max] using
@@ -446,17 +523,19 @@ class CompositeLoss:
         # so that f(0)=1, f(1)=M, and growth accelerates as x→1.
         det_scale = 1.0 + (self.det_scale_max - 1.0) * math.log10(1.0 + 9.0 * progress)
 
-        iou_loss, match_rate = self._detection_loss(logits, gt_boxes)
+        iou_loss, match_rate, cls_loss = self._detection_loss(logits, gt_boxes)
 
         # Make sure all loss components share the same dtype to avoid implicit
         # casts when mixed-precision / autocast is enabled (saves memory and
         # keeps gradient scaling straightforward).
         if torch.is_tensor(iou_loss) and iou_loss.dtype != lm_loss.dtype:
             iou_loss = iou_loss.to(lm_loss.dtype)
+        if torch.is_tensor(cls_loss) and cls_loss.dtype != lm_loss.dtype:
+            cls_loss = cls_loss.to(lm_loss.dtype)
 
         match_pen = self.lambda_match * (1.0 - match_rate)
         det_loss = self.lambda_iou * iou_loss + match_pen
-        total_loss = lm_loss + (self.lambda_det * det_scale) * det_loss
+        total_loss = lm_loss + self.lambda_cls * cls_loss + (self.lambda_det * det_scale) * det_loss
 
         if self.logger and self.step % (self.log_interval * 4) == 0:
             sample_pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
@@ -468,6 +547,7 @@ class CompositeLoss:
                 "step": self.step,
                 "loss": self._val(total_loss),
                 "lm loss": self._val(lm_loss),
+                "cls loss": self._val(cls_loss),
                 "iou loss": self._val(iou_loss),
                 "pred boxes": self.last_pred_boxes,
                 "match rate": round(match_rate, 4),

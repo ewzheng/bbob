@@ -150,6 +150,7 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
     pixel_values = torch.stack(processed, 0)
 
     merged_input_ids, merged_labels = [], []
+    boxes_batch, labels_batch = [], []
 
     for item in batch:
         if "input_ids" in item:
@@ -185,16 +186,43 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
         merged_input_ids.append(input_ids)
         merged_labels.append(labels)
 
+        # ------------------------------------------------------------------
+        # Detection targets – pass through raw so the loss function can use
+        # them without re-parsing the text.  Expected shapes:
+        #   target_boxes  : List[List[float]]  per object xywh (0‥1)
+        #   target_labels : List[int]          per object class id
+        # If these keys are missing we simply do not include them in the
+        # batch; the loss code will fall back to geometry-only behaviour.
+        # ------------------------------------------------------------------
+
+        if "target_boxes" in item:
+            boxes_batch.append(torch.as_tensor(item["target_boxes"], dtype=torch.float32))
+            if "target_labels" in item:
+                labels_batch.append(torch.as_tensor(item["target_labels"], dtype=torch.long))
+            else:
+                labels_batch.append(None)
+
     input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
     labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=-100)
     attention_mask = (input_ids_padded != pad_token_id).long()
 
-    return {
+    batch_out = {
         "images": pixel_values,
         "input_ids": input_ids_padded,
         "attention_mask": attention_mask,
         "labels": labels_padded,
     }
+
+    if boxes_batch:
+        tgt = []
+        for bx, lb in zip(boxes_batch, labels_batch):
+            if lb is not None:
+                tgt.append((bx, lb))
+            else:
+                tgt.append(bx)
+        batch_out["target_boxes"] = tgt
+
+    return batch_out
 
 
 # ----------------------------------------------------------------------

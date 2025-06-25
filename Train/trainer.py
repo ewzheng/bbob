@@ -168,7 +168,10 @@ class BBOBTrainer(Trainer):
                 guidance_loss = factor * base_loss
 
         if self._loss_func is not None:
-            loss = self._loss_func(outputs, labels)
+            extra_kw = {}
+            if "target_boxes" in inputs:
+                extra_kw["target_boxes"] = inputs["target_boxes"]
+            loss = self._loss_func(outputs, labels, **extra_kw)
             if guidance_loss is not None:
                 loss = loss + guidance_loss
         else:
