@@ -492,12 +492,17 @@ class CompositeLoss:
             row = masked_lbl[b]
             inside = self._inside_mask(row)
 
-            # For positions inside, mark non-punctuation tokens (not digit, comma, dot, colon) to ignore
+            # Split inside/outside masks
             row_tokens = row
             punct_mask = (row_tokens == self._id_colon) | (row_tokens == self._id_comma) | (row_tokens == self._id_dot)
-            class_mask = inside & ~digit_mask[b] & ~punct_mask
 
-            ignore_mask_row = digit_mask[b] | class_mask
+            # Inside the detection span:
+            #   • mask digits (handled by CIoU)
+            #   • mask class words (class CE)
+            digit_inside  = inside & digit_mask[b]
+            class_mask    = inside & ~digit_mask[b] & ~punct_mask
+
+            ignore_mask_row = digit_inside | class_mask
             masked_lbl[b][ignore_mask_row] = -100
 
         lm_loss = F.cross_entropy(
