@@ -338,13 +338,23 @@ class CompositeLoss:
             if isinstance(gt_entry, tuple):
                 gt, gt_lbl_full = gt_entry
                 if isinstance(gt, list):
-                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+                    if len(gt) == 0:
+                        gt = torch.empty((0, 4), device=logits.device, dtype=logits.dtype)
+                    elif isinstance(gt[0], torch.Tensor):
+                        gt = torch.stack([g.to(logits.device, logits.dtype) for g in gt])
+                    else:
+                        gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
                 if isinstance(gt_lbl_full, list):
                     gt_lbl_full = torch.tensor(gt_lbl_full, device=logits.device, dtype=torch.long)
             else:
                 gt = gt_entry
                 if isinstance(gt, list):
-                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+                    if len(gt) == 0:
+                        gt = torch.empty((0, 4), device=logits.device, dtype=logits.dtype)
+                    elif isinstance(gt[0], torch.Tensor):
+                        gt = torch.stack([g.to(logits.device, logits.dtype) for g in gt])
+                    else:
+                        gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
                 gt_lbl_full = torch.full((gt.size(0),), -1, device=logits.device, dtype=torch.long)
 
             # Filter non-degenerate boxes and propagate class labels
