@@ -74,6 +74,11 @@ class CompositeLoss:
         self._pow10: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
         self.tau_start, self.tau_end, self.tau_steps = 5.0, 0.1, 50_000
 
+        # Maximum multiplier applied to the detection loss once the language
+        # modelling branch has converged.  15 keeps previous behaviour
+        #   (λ_det≈0.15  × 15 ≈ 2.25 effective weight).
+        self.det_scale_max: float = 15.0
+
     # ------------- straight-through digit expectation ----------------
     def _st_expect(self, logits_slice: torch.Tensor) -> torch.Tensor:
         device, dtype = logits_slice.device, logits_slice.dtype
@@ -344,13 +349,20 @@ class CompositeLoss:
                 + (1.0 - self.smoothing) * lm_loss.detach().item()
             )
 
-        # When the EMA of LM loss falls to the `lm_target` value we want the
-        # detection branch to carry *15 ×* its base weight (so that
-        #   effective_det_weight = lambda_det * det_scale ≈ 0.15 × 15 = 2.25).
-        # Earlier in training (lm_loss_ema > lm_target) the scale grows
-        # linearly from 1 → 15 and saturates there.
+        # ---------------- logarithmic growth of detection scale ----------------
+        # Let   ratio = lm_target / lm_loss_ema   ∈ (0, +∞)
+        # Clamp to 0‥1 so that the scale saturates once the CE loss reaches
+        # the target.  A logarithmic mapping makes the curve flatter early on
+        # (CE dominates) and steeper close to convergence where detection
+        # feedback is most useful.
+
         ratio = self.lm_target / max(self.lm_loss_ema, 1e-4)
-        det_scale = max(1.0, min(10.0, 10.0 * ratio))
+        progress = min(1.0, ratio)  # 0 → far from target, 1 → reached target
+
+        # Map progress ∈ [0,1] ↦ det_scale ∈ [1, det_scale_max] using
+        #   f(x) = 1 + (M-1) * log10(1 + 9x)
+        # so that f(0)=1, f(1)=M, and growth accelerates as x→1.
+        det_scale = 1.0 + (self.det_scale_max - 1.0) * math.log10(1.0 + 9.0 * progress)
 
         iou_loss, match_rate = self._detection_loss(logits, gt_boxes)
 
@@ -378,7 +390,7 @@ class CompositeLoss:
                 "pred boxes": self.last_pred_boxes,
                 "match rate": round(match_rate, 4),
                 "match penalty": round(match_pen.item() if torch.is_tensor(match_pen) else match_pen, 6),
-                "det_scale": round(det_scale, 3),
+                "det_scale": round(det_scale * self.lambda_det, 3),
             }
             if self._dangling_total > 0:
                 log_dict["dangling_coords"] = int(self._dangling_total)
