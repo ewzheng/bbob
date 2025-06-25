@@ -84,6 +84,17 @@ class CompositeLoss:
         # ------------------------------------------------------------------
         self._cost_buf: torch.Tensor | None = None  # (B, P_max, G_max)
 
+        # Punctuation tokens used inside <bbob> snippets.  If the tokenizer
+        # does not contain a dedicated token we store -1 and simply skip the
+        # check when scanning.
+        def _get_id(tok: str) -> int:
+            tid = tokenizer.convert_tokens_to_ids(tok)
+            return tid if tid is not None else -1
+
+        self._id_colon = _get_id(":")
+        self._id_comma = _get_id(",")
+        self._id_dot   = _get_id(".")
+
     # ------------- straight-through digit expectation ----------------
     def _st_expect(self, logits_slice: torch.Tensor) -> torch.Tensor:
         device, dtype = logits_slice.device, logits_slice.dtype
@@ -118,7 +129,7 @@ class CompositeLoss:
         return self._pow10[key]
 
     # ---------------- helper: parse coordinates from one sample ----------------
-    def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> torch.Tensor:
+    def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Vectorised extraction of `(N, 4)` *xywh* boxes from one sample.
 
         Compared to the previous Python-loop implementation this version:
@@ -165,7 +176,7 @@ class CompositeLoss:
             # Not enough digits for a single coordinate – return empty tensor
             if total_digits > 0:
                 self._dangling_total += total_digits
-            return logits_row.new_zeros((0, 4))
+            return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long)
 
         # Discard dangling digits that don't fit into full NUM_DIGITS groups
         num_complete = total_digits // NUM_DIGITS
@@ -192,9 +203,42 @@ class CompositeLoss:
         # ------------------------------------------------------------------
         if coord_vals.numel() >= 4:
             n_boxes = coord_vals.numel() // 4
-            return coord_vals[: n_boxes * 4].view(-1, 4)
 
-        return logits_row.new_zeros((0, 4))
+            # ---------------- label extraction -----------------------
+            # Heuristic: take the first *non-punctuation, non-digit* token
+            # that appears to the *left* of the first digit of each box.
+            # This matches the typical   "<bbob> cat : 0 0 1 1 ..."  layout.
+
+            lbl_ids: list[int] = []
+            digits_per_box = NUM_DIGITS * 4
+            for i in range(n_boxes):
+                first_digit_pos = positions[i * digits_per_box].item()
+                j = first_digit_pos - 1
+                label_id = -1
+                while j >= 0:
+                    tid = token_row[j].item()
+                    # Skip punctuation and digit tokens
+                    if (
+                        tid in self.digit_set
+                        or tid == self._id_dot
+                        or tid == self._id_comma
+                        or tid == self._id_colon
+                        or tid == id_open
+                        or tid == id_close
+                    ):
+                        j -= 1
+                        continue
+                    label_id = tid
+                    break
+                lbl_ids.append(label_id)  # keep -1 for 'no class'
+
+            labels = logits_row.new_tensor(lbl_ids, dtype=torch.long)
+
+            # Drop boxes where we could not identify a class label (label == -1)
+            keep = labels >= 0
+            return coord_vals[: n_boxes * 4].view(-1, 4)[keep], labels[keep]
+
+        return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long)
 
     # ---------------- helper: parse coords per sample ----------------
 
@@ -208,152 +252,151 @@ class CompositeLoss:
         # Reset counter for this step
         self.last_pred_boxes = 0
 
-        diff_preds: List[torch.Tensor] = [
+        diff_preds: List[tuple[torch.Tensor, torch.Tensor]] = [
             self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
 
         # --------------------------------------------------------------
         # Fast path – use torch_linear_assignment in batch on GPU
         # --------------------------------------------------------------
-        if _use_tla:
-            pred_lens = [p.size(0) for p in diff_preds]
-            gt_lens   = [len(g) if isinstance(g, list) else g.size(0) for g in gt_boxes]
+        pred_lens = [p[0].size(0) for p in diff_preds]
+        gt_lens   = [len(g) if isinstance(g, list) else g.size(0) for g in gt_boxes]
 
-            max_pred = max(pred_lens) if pred_lens else 0
-            max_gt   = max(gt_lens)   if gt_lens else 0
+        max_pred = max(pred_lens) if pred_lens else 0
+        max_gt   = max(gt_lens)   if gt_lens else 0
 
-            if max_pred == 0 or max_gt == 0:
-                return logits.new_tensor(0.0), 0.0
+        if max_pred == 0 or max_gt == 0:
+            return logits.new_tensor(0.0), 0.0
 
-            # --------------------------------------------------------------
-            # Allocate / grow a persistent cost buffer once to reduce
-            # allocation overhead.  Keep dtype identical to `logits` so that
-            # mixed-precision runs avoid implicit casting.
-            # --------------------------------------------------------------
-            if (
-                self._cost_buf is None
-                or self._cost_buf.size(0) < B
-                or self._cost_buf.size(1) < max_pred
-                or self._cost_buf.size(2) < max_gt
-                or self._cost_buf.dtype != logits.dtype
-                or self._cost_buf.device != logits.device
-            ):
-                self._cost_buf = logits.new_empty((B, max_pred, max_gt))
+        # --------------------------------------------------------------
+        # Allocate / grow a persistent cost buffer once to reduce
+        # allocation overhead.  Keep dtype identical to `logits` so that
+        # mixed-precision runs avoid implicit casting.
+        # --------------------------------------------------------------
+        if (
+            self._cost_buf is None
+            or self._cost_buf.size(0) < B
+            or self._cost_buf.size(1) < max_pred
+            or self._cost_buf.size(2) < max_gt
+            or self._cost_buf.dtype != logits.dtype
+            or self._cost_buf.device != logits.device
+        ):
+            self._cost_buf = logits.new_empty((B, max_pred, max_gt))
 
-            cost_batch = self._cost_buf[:B, :max_pred, :max_gt]
-            cost_batch.fill_(1.0)
+        cost_batch = self._cost_buf[:B, :max_pred, :max_gt]
+        cost_batch.fill_(1e6)  # prohibitively high cost for cross-class pairs
 
-            # Caches for filtered boxes so we don't recompute in the second
-            # loop.
-            cached_pred: list[torch.Tensor] = []
-            cached_gt:   list[torch.Tensor] = []
+        # Caches for filtered boxes so we don't recompute in the second
+        # loop.
+        cached_pred: list[tuple[torch.Tensor, torch.Tensor]] = []
+        cached_gt:   list[tuple[torch.Tensor, torch.Tensor]] = []
 
-            for b in range(B):
-                pred = diff_preds[b]
-                gt = gt_boxes[b]
+        for b in range(B):
+            pred, pred_lbl_full = diff_preds[b]
+
+            # Ground-truth may come as (boxes, labels) tuple or just boxes
+            gt_entry = gt_boxes[b]
+            if isinstance(gt_entry, tuple):
+                gt, gt_lbl_full = gt_entry
                 if isinstance(gt, list):
                     gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
-
-                # Filter non-degenerate boxes and count them for logging
-                pred_f = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-                gt_f   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
-
-                cached_pred.append(pred_f)
-                cached_gt.append(gt_f)
-
-                self.last_pred_boxes += int(pred_f.size(0))
-
-                # Build cost matrix using FILTERED boxes
-                cost_batch[b, : pred_f.size(0), : gt_f.size(0)] = 1.0 - iou_matrix_xywh(pred_f, gt_f)
-
-            assignment = batch_linear_assignment(cost_batch)
-            rows, cols = assignment_to_indices(assignment)  # shape (B, K)
-
-            pm_list, gm_list = [], []
-            matched, total = 0, 0
-
-            for b in range(B):
-                # Retrieve cached filtered tensors (computed in the first loop)
-                pred_f = cached_pred[b]
-                gt_f   = cached_gt[b]
-
-                P, G = pred_f.size(0), gt_f.size(0)
-                if P == 0 or G == 0:
-                    total += G  # still count GT objects even if no prediction passes
-                    continue
-
-                # ----------------------------------------------------------
-                # NEW: pair *every* prediction with the nearest GT box so
-                # CIoU delivers a gradient even when IoU=0.  We still keep
-                # Hungarian above to measure proper matches; unmatched preds
-                # fall back to centre-distance pairing here.
-                # ----------------------------------------------------------
-                if G == 0 or P == 0:
-                    total += G
-                    continue
-
-                # (P,G) centre-distance matrix, cheap vs IoU on GPU
-                dist = torch.cdist(pred_f[:, :2], gt_f[:, :2])
-                nearest = dist.argmin(dim=1)  # (P,)
-
-                pm_list.append(pred_f)                    # (P,4)
-                gm_list.append(gt_f[nearest])             # (P,4)
-
-                # Count matched predictions (IoU>0) for logging
-                ious_sel = iou_matrix_xywh(pred_f, gt_f)[torch.arange(P), nearest]
-                matched += int((ious_sel > 0).sum().item())
-                total += G
-
-            if pm_list:
-                pm_all = torch.cat(pm_list, dim=0)
-                gm_all = torch.cat(gm_list, dim=0)
-                iou_loss = complete_box_iou_loss(
-                    xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="mean"
-                ).mean()
+                if isinstance(gt_lbl_full, list):
+                    gt_lbl_full = torch.tensor(gt_lbl_full, device=logits.device, dtype=torch.long)
             else:
-                iou_loss = logits.new_tensor(0.0)
+                gt = gt_entry
+                if isinstance(gt, list):
+                    gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+                gt_lbl_full = torch.full((gt.size(0),), -1, device=logits.device, dtype=torch.long)
 
-            match_rate = matched / total if total else 0.0
-            return iou_loss, match_rate
+            # Filter non-degenerate boxes and propagate class labels
+            valid_pred = (pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)
+            pred_f = pred[valid_pred]
+            pred_lbl = pred_lbl_full[valid_pred] if pred_lbl_full.numel() else pred_lbl_full.new_zeros((0,))
 
-        # --------------------------------------------------------------
-        # Slow fallback – per-sample SciPy/Torch helper
-        # --------------------------------------------------------------
+            valid_gt = (gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)
+            gt_f   = gt[valid_gt]
+            gt_lbl = gt_lbl_full[valid_gt] if gt_lbl_full.numel() else gt_lbl_full.new_zeros((0,))
 
-        pm_list: list[torch.Tensor] = []
-        gm_list: list[torch.Tensor] = []
+            cached_pred.append((pred_f, pred_lbl))
+            cached_gt.append((gt_f, gt_lbl))
+
+            self.last_pred_boxes += int(pred_f.size(0))
+
+            if pred_f.numel() and gt_f.numel():
+                # Pre-compute IoU and distance matrices
+                iou_mat = iou_matrix_xywh(pred_f, gt_f)              # (P,G)
+                dist_norm = torch.cdist(pred_f[:, :2], gt_f[:, :2])  # (P,G)
+                dist_norm = (dist_norm / math.sqrt(2.0)).clamp_(max=1.0)
+
+                # Fill cost matrix per class to forbid cross-class matches
+                unique_classes = torch.unique(torch.cat([pred_lbl, gt_lbl]))
+                for cls_id in unique_classes.tolist():
+                    p_mask = pred_lbl == cls_id
+                    g_mask = gt_lbl == cls_id
+                    if not p_mask.any() or not g_mask.any():
+                        continue
+                    p_idx = p_mask.nonzero(as_tuple=False).squeeze(1)
+                    g_idx = g_mask.nonzero(as_tuple=False).squeeze(1)
+
+                    sub_iou = iou_mat[p_idx][:, g_idx]
+                    sub_dist = dist_norm[p_idx][:, g_idx]
+
+                    sub_cost = torch.where(
+                        sub_iou > 0,
+                        1.0 - sub_iou,
+                        0.99 + sub_dist * 0.009,
+                    )
+
+                    cost_batch[b][p_idx[:, None], g_idx[None, :]] = sub_cost
+
+        assignment = batch_linear_assignment(cost_batch)  # (B, max_pred)
+
+        pm_list, gm_list = [], []
         matched, total = 0, 0
 
         for b in range(B):
-            pred = diff_preds[b]
-            gt = gt_boxes[b]
-            if isinstance(gt, list):
-                gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
+            # Retrieve cached filtered tensors (computed in the first loop)
+            pred_f, pred_lbl = cached_pred[b]
+            gt_f, gt_lbl = cached_gt[b]
 
-            # keep only non-degenerate boxes and count them for logging
-            pred = pred[(pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)]
-            self.last_pred_boxes += int(pred.size(0))
-            gt   = gt[(gt[:, 2] > EPSILON) & (gt[:, 3] > EPSILON)]
-            if gt.size(0) == 0 or pred.size(0) == 0:
-                total += gt.size(0)
+            P, G = pred_f.size(0), gt_f.size(0)
+            if P == 0 or G == 0:
+                total += G  # still count GT objects even if no prediction passes
                 continue
 
-            # Pair every prediction with nearest GT by centre distance
-            dist = torch.cdist(pred[:, :2], gt[:, :2])
-            nearest = dist.argmin(dim=1)  # (P,)
+            # (P,G) centre-distance matrix (re-use later for fallback)
+            dist = torch.cdist(pred_f[:, :2], gt_f[:, :2])  # (P,G)
 
-            pm_list.append(pred)
-            gm_list.append(gt[nearest])
+            assign_vec = assignment[b, :P].clone()  # (P,) each ∈ [0,G-1] or −1
 
-            ious_sel = iou_matrix_xywh(pred, gt)[torch.arange(pred.size(0)), nearest]
-            matched += int((ious_sel > 0).sum().item())
-            total += gt.size(0)
+            # -------- nearest fallback restricted to same-class ----------
+            for pi in (assign_vec == -1).nonzero(as_tuple=False).flatten():
+                cls_id = pred_lbl[pi]
+                mask_same = gt_lbl == cls_id
+                if mask_same.any():
+                    g_candidates = torch.nonzero(mask_same, as_tuple=False).squeeze(1)
+                    nearest_idx = g_candidates[dist[pi, g_candidates].argmin()]
+                    assign_vec[pi] = nearest_idx
+                else:
+                    # No GT of same class → drop this prediction from loss
+                    assign_vec[pi] = -1
+
+            keep_pred_mask = assign_vec >= 0
+            if keep_pred_mask.any():
+                pm_list.append(pred_f[keep_pred_mask])            # (K,4)
+                gm_list.append(gt_f[assign_vec[keep_pred_mask]])   # (K,4)
+
+                iou_mat = iou_matrix_xywh(pred_f, gt_f)
+                ious_sel = iou_mat[torch.arange(P, device=pred_f.device)[keep_pred_mask], assign_vec[keep_pred_mask]]
+                cls_match = pred_lbl[keep_pred_mask] == gt_lbl[assign_vec[keep_pred_mask]]
+                matched += int(((ious_sel > 0) & cls_match).sum().item())
+            total += G
 
         if pm_list:
             pm_all = torch.cat(pm_list, dim=0)
             gm_all = torch.cat(gm_list, dim=0)
             iou_loss = complete_box_iou_loss(
-                xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="none"
+                xywh_to_xyxy(pm_all), xywh_to_xyxy(gm_all), reduction="mean"
             ).mean()
         else:
             iou_loss = logits.new_tensor(0.0)
