@@ -60,7 +60,6 @@ class CompositeLoss:
         self.log_interval = max(1, log_interval)
         self.step = 0
         self.lm_loss_ema: float | None = None
-        self.is_eval = False
         self._dangling_total = 0  # aggregate counter for malformed coord digits
         self.last_pred_boxes: int = 0  # number of predicted boxes after filtering per step
 
@@ -376,7 +375,7 @@ class CompositeLoss:
         det_loss = self.lambda_iou * iou_loss + match_pen
         total_loss = lm_loss + (self.lambda_det * det_scale) * det_loss
 
-        if self.logger and self.is_eval and self.step % self.log_interval == 0:
+        if self.logger and self.step % (self.log_interval * 4) == 0:
             sample_pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
             sample_gt_ids = lm_labels[0].detach().cpu()
             pred_str, gt_str = decode_pred_gt(sample_pred_ids, sample_gt_ids, self.tok)
