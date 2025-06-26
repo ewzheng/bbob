@@ -427,11 +427,16 @@ class CompositeLoss:
             # ----------------------------------------------------------------
             seq_len = logits.size(1)
             valid_pos_mask = (pred_pos >= 0) & (pred_pos < seq_len)
-            # Detect any invalid indices among the predictions we plan to use
-            if (~valid_pos_mask[keep_pred_mask]).any():
-                # Drop predictions with invalid positions from *all*
-                # downstream computations in this iteration.
-                keep_pred_mask = keep_pred_mask & valid_pos_mask
+
+            # Guard against assignment indices outside the GT range
+            valid_assign_mask = (assign_vec >= 0) & (assign_vec < G)
+
+            # Combine all validity checks
+            keep_pred_mask = keep_pred_mask & valid_pos_mask & valid_assign_mask
+
+            # If *any* invalid combination existed we silently skip them. This
+            # is strictly defensive and should be extremely rare once the
+            # model starts producing sensible outputs.
 
             # Nothing left once we removed the invalid positions
             if keep_pred_mask.any():
