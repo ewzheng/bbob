@@ -27,11 +27,9 @@ from .loss_helpers import (
     COORD_SCALE,
 )
 
-try:
-    from torch_linear_assignment import batch_linear_assignment, assignment_to_indices  # type: ignore
-    _use_tla = True
-except ImportError:  # pragma: no cover
-    _use_tla = False
+
+from torch_linear_assignment import batch_linear_assignment, assignment_to_indices  # type: ignore
+
 
 # -----------------------------------------------------------------------------
 # Composite loss – vectorised implementation
@@ -415,6 +413,26 @@ class CompositeLoss:
                     assign_vec[pi] = -1
 
             keep_pred_mask = assign_vec >= 0
+
+            # ----------------------------------------------------------------
+            # Guard against rare cases where the cached `pred_pos` indices are
+            # out of the valid \[0, seq_len) range due to upstream token
+            # truncation or mis-alignment.  Using such indices with advanced
+            # indexing on the logits tensor would trigger a CUDA assert
+            # ("index out of bounds") which is hard to debug once it bubbles
+            # up from inside the ATen kernels.  We proactively mask them out
+            # so training can continue seamlessly while still keeping IoU /
+            # matching statistics intact.
+            # ----------------------------------------------------------------
+            seq_len = logits.size(1)
+            valid_pos_mask = (pred_pos >= 0) & (pred_pos < seq_len)
+            # Detect any invalid indices among the predictions we plan to use
+            if (~valid_pos_mask[keep_pred_mask]).any():
+                # Drop predictions with invalid positions from *all*
+                # downstream computations in this iteration.
+                keep_pred_mask = keep_pred_mask & valid_pos_mask
+
+            # Nothing left once we removed the invalid positions
             if keep_pred_mask.any():
                 pm_list.append(pred_f[keep_pred_mask])            # (K,4)
                 gm_list.append(gt_f[assign_vec[keep_pred_mask]])   # (K,4)
