@@ -443,7 +443,8 @@ class CompositeLoss:
                 pm_list.append(pred_f[keep_pred_mask])            # (K,4)
                 gm_list.append(gt_f[assign_vec[keep_pred_mask]])   # (K,4)
                 # -------- class CE accumulation ------------------
-                cls_logits = logits[b, pred_pos[keep_pred_mask], :]  # (K,V)
+                safe_pos = pred_pos[keep_pred_mask].clamp(min=0, max=seq_len - 1)
+                cls_logits = logits[b].index_select(0, safe_pos)  # (K,V)
                 cls_targets = gt_lbl[assign_vec[keep_pred_mask]]      # (K,)
                 cls_loss_sum = F.cross_entropy(cls_logits, cls_targets, reduction="sum")
                 cls_loss_accum += cls_loss_sum
