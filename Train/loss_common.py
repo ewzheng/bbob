@@ -360,6 +360,10 @@ class CompositeLoss:
             gt_lbl = gt_lbl_full[valid_gt] if gt_lbl_full.numel() else gt_lbl_full.new_zeros((0,))
 
             pred_pos = pred_pos_full[valid_pred]
+
+            if pred_pos_seq:
+                valid_idx = valid_pred.nonzero(as_tuple=False).squeeze(1).tolist()
+                pred_pos_seq = [pred_pos_seq[i] for i in valid_idx]
             cached_pred.append((pred_f, pred_lbl, pred_pos, pred_pos_seq, iou_matrix_xywh(pred_f, gt_f) if pred_f.numel() and gt_f.numel() else None))
             cached_gt.append((gt_f, gt_lbl))
 
@@ -468,7 +472,16 @@ class CompositeLoss:
                 sel = torch.arange(P, device=pred_f.device)[keep_pred_mask]
                 if sel.numel():
                     pos_tensors = [torch.tensor(pred_pos_seq[i], device=pred_f.device, dtype=torch.long)
+                                    # Keep only token positions that fall inside the current
+                                    # sequence length to avoid CUDA out-of-bounds asserts.
                                     for i in sel if pred_pos_seq[i]]
+                    # Remove out-of-range values from each tensor *before* we concatenate –
+                    # this is cheaper than building one big mask afterwards and guards
+                    # against empty tensors producing shape mismatches.
+                    if pos_tensors:
+                        seq_len_b = logits.size(1)
+                        pos_tensors = [pt[(pt >= 0) & (pt < seq_len_b)] for pt in pos_tensors if pt.numel()]
+                        pos_tensors = [pt for pt in pos_tensors if pt.numel()]
                     if pos_tensors:
                         pos_tensor = torch.cat(pos_tensors)  # (M,)
                         logits_seq = logits[b].index_select(0, pos_tensor)  # (M, V)
