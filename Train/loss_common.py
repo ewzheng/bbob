@@ -374,6 +374,8 @@ class CompositeLoss:
                 # Fill cost matrix per class to forbid cross-class matches
                 unique_classes = torch.unique(torch.cat([pred_lbl, gt_lbl]))
                 for cls_id in unique_classes.tolist():
+                    if cls_id < 0:
+                        continue  # skip placeholder / invalid class ids
                     p_idx = (pred_lbl == cls_id).nonzero(as_tuple=False).squeeze(1)
                     g_idx = (gt_lbl == cls_id).nonzero(as_tuple=False).squeeze(1)
                     if p_idx.numel() == 0 or g_idx.numel() == 0:
