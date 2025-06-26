@@ -152,7 +152,7 @@ class CompositeLoss:
         return inside & ~(open_mask | close_mask)
 
     # ---------------- helper: parse coordinates from one sample ----------------
-    def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]:
         """Vectorised extraction of `(N, 4)` *xywh* boxes from one sample.
 
         Compared to the previous Python-loop implementation this version:
@@ -199,7 +199,7 @@ class CompositeLoss:
             # Not enough digits for a single coordinate – return empty tensor
             if total_digits > 0:
                 self._dangling_total += total_digits
-            return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long), logits_row.new_zeros((0,), dtype=torch.long)
+            return logits_row.new_zeros((0, 4)), logits_row.new_zeros((0,), dtype=torch.long), logits_row.new_zeros((0,), dtype=torch.long), []
 
         # Discard dangling digits that don't fit into full NUM_DIGITS groups
         num_complete = total_digits // NUM_DIGITS
@@ -233,12 +233,14 @@ class CompositeLoss:
             # This matches the typical   "<bbob> cat : 0 0 1 1 ..."  layout.
 
             lbl_ids: list[int] = []
-            lbl_pos: list[int] = []
+            lbl_pos: list[int] = []          # last token pos per class (for scalar id)
+            lbl_pos_seq: list[list[int]] = []  # full token-position list per box
             digits_per_box = NUM_DIGITS * 4
             for i in range(n_boxes):
                 first_digit_pos = positions[i * digits_per_box].item()
                 j = first_digit_pos - 1
                 label_id = -1
+                pos_seq: list[int] = []
                 while j >= 0:
                     tid = token_row[j].item()
                     # Skip punctuation and digit tokens
@@ -252,26 +254,34 @@ class CompositeLoss:
                     ):
                         j -= 1
                         continue
+                    # collect positions (we'll reverse later)
+                    pos_seq.append(j)
                     label_id = tid
                     break
                 lbl_ids.append(label_id)  # keep -1 for 'no class'
                 lbl_pos.append(j)
+                pos_seq.reverse()  # left->right order
+                lbl_pos_seq.append(pos_seq)
 
             labels = logits_row.new_tensor(lbl_ids, dtype=torch.long)
             positions_cls = logits_row.new_tensor(lbl_pos, dtype=torch.long)
 
             # Drop boxes where we could not identify a class label (label == -1)
             keep = labels >= 0
+            kept_positions_seq = [p for k, p in zip(keep.tolist(), lbl_pos_seq) if k]
+
             return (
                 coord_vals[: n_boxes * 4].view(-1, 4)[keep],
                 labels[keep],
                 positions_cls[keep],
+                kept_positions_seq,
             )
 
         return (
             logits_row.new_zeros((0, 4)),
             logits_row.new_zeros((0,), dtype=torch.long),
             logits_row.new_zeros((0,), dtype=torch.long),
+            [],
         )
 
     # ---------------- helper: parse coords per sample ----------------
@@ -286,7 +296,7 @@ class CompositeLoss:
         # Reset counter for this step
         self.last_pred_boxes = 0
 
-        diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = [
+        diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]] = [
             self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
 
@@ -326,11 +336,11 @@ class CompositeLoss:
 
         # Caches for filtered boxes so we don't recompute in the second
         # loop.
-        cached_pred: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+        cached_pred: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]], torch.Tensor | None]] = []
         cached_gt:   list[tuple[torch.Tensor, torch.Tensor]] = []
 
         for b in range(B):
-            pred, pred_lbl_full, pred_pos_full = diff_preds[b]
+            pred, pred_lbl_full, pred_pos_full, pred_pos_seq = diff_preds[b]
 
             # Ground-truth may come as (boxes, labels) tuple or just boxes
             gt, gt_lbl_full = gt_boxes[b]  # collator guarantees tuple of tensors
@@ -347,7 +357,7 @@ class CompositeLoss:
             gt_lbl = gt_lbl_full[valid_gt] if gt_lbl_full.numel() else gt_lbl_full.new_zeros((0,))
 
             pred_pos = pred_pos_full[valid_pred]
-            cached_pred.append((pred_f, pred_lbl, pred_pos))
+            cached_pred.append((pred_f, pred_lbl, pred_pos, pred_pos_seq, iou_matrix_xywh(pred_f, gt_f) if pred_f.numel() and gt_f.numel() else None))
             cached_gt.append((gt_f, gt_lbl))
 
             self.last_pred_boxes += int(pred_f.size(0))
@@ -388,7 +398,7 @@ class CompositeLoss:
 
         for b in range(B):
             # Retrieve cached filtered tensors (computed in the first loop)
-            pred_f, pred_lbl, pred_pos = cached_pred[b]
+            pred_f, pred_lbl, pred_pos, pred_pos_seq, iou_mat = cached_pred[b]
             gt_f, gt_lbl = cached_gt[b]
 
             P, G = pred_f.size(0), gt_f.size(0)
@@ -442,15 +452,27 @@ class CompositeLoss:
             if keep_pred_mask.any():
                 pm_list.append(pred_f[keep_pred_mask])            # (K,4)
                 gm_list.append(gt_f[assign_vec[keep_pred_mask]])   # (K,4)
-                # -------- class CE accumulation ------------------
-                safe_pos = pred_pos[keep_pred_mask].clamp(min=0, max=seq_len - 1)
-                cls_logits = logits[b].index_select(0, safe_pos)  # (K,V)
-                cls_targets = gt_lbl[assign_vec[keep_pred_mask]]      # (K,)
-                cls_loss_sum = F.cross_entropy(cls_logits, cls_targets, reduction="sum")
-                cls_loss_accum += cls_loss_sum
-                cls_count += cls_targets.numel()
+                # -------- gather logits & targets for *all* class tokens ----
+                sel = torch.arange(P, device=pred_f.device)[keep_pred_mask]
+                if sel.numel():
+                    pos_tensor = torch.cat([torch.tensor(pred_pos_seq[i], device=pred_f.device, dtype=torch.long)
+                                            for i in sel])
 
-                iou_mat = iou_matrix_xywh(pred_f, gt_f)
+                    if pos_tensor.numel():
+                        logits_seq = logits[b].index_select(0, pos_tensor)  # (M,V)
+                        tgt_tensor = self._lm_labels_batch[b].index_select(0, pos_tensor)
+
+                    # Filter out padding / ignored ids (shouldn't normally occur)
+                    valid_mask = (tgt_tensor >= 0) & (tgt_tensor < logits.size(-1))
+                    if valid_mask.any():
+                        cls_loss_sum = F.cross_entropy(logits_seq[valid_mask], tgt_tensor[valid_mask], reduction="sum")
+                        cls_loss_accum += cls_loss_sum
+                        cls_count += int(valid_mask.sum().item())
+                # If *no* valid class targets remain we skip CE for this sample
+                # but still keep IoU / match stats (they are unaffected).
+
+                if iou_mat is None:
+                    iou_mat = iou_matrix_xywh(pred_f, gt_f)
                 ious_sel = iou_mat[torch.arange(P, device=pred_f.device)[keep_pred_mask], assign_vec[keep_pred_mask]]
                 cls_match = pred_lbl[keep_pred_mask] == gt_lbl[assign_vec[keep_pred_mask]]
                 matched += int(((ious_sel > 0) & cls_match).sum().item())
@@ -474,6 +496,9 @@ class CompositeLoss:
     def __call__(self, outputs, labels, **kw):
         logits = outputs.logits
         lm_labels = labels
+        # Store a detached copy of labels so _detection_loss can access
+        # ground-truth class tokens without worrying about masking.
+        self._lm_labels_batch = lm_labels.detach()
         gt_boxes = kw.get("target_boxes", getattr(outputs, "target_boxes", None))
         if gt_boxes is None:
             self.logger.info("No ground truth boxes found, creating empty placeholder")

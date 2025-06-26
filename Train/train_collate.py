@@ -190,7 +190,7 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
         # Detection targets – pass through raw so the loss function can use
         # them without re-parsing the text.  Expected shapes:
         #   target_boxes  : List[List[float]]  per object xywh (0‥1)
-        #   target_labels : List[int]          per object class id
+        #   target_labels : List[str]          per object class
         # If these keys are missing we simply do not include them in the
         # batch; the loss code will fall back to geometry-only behaviour.
         # ------------------------------------------------------------------
