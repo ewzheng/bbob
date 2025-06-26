@@ -486,7 +486,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size})",
-        load_from_cache_file=False
+        load_from_cache_file=True
     )
 
     return dataset

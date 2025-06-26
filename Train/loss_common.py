@@ -464,13 +464,13 @@ class CompositeLoss:
                                     for i in sel if pred_pos_seq[i]]
                     if pos_tensors:
                         pos_tensor = torch.cat(pos_tensors)  # (M,)
+                        logits_seq = logits[b].index_select(0, pos_tensor)  # (M, V)
                         tgt_tensor = self._lm_labels_batch[b].index_select(0, pos_tensor)  # (M,)
 
                         # Filter valid vocabulary targets
                         valid_mask = (tgt_tensor >= 0) & (tgt_tensor < logits.size(-1))
                         if valid_mask.any():
-                            # Store ready-to-use logits slice to avoid batch-offset issues
-                            cls_logits_all.append(logits[b][valid_mask])
+                            cls_logits_all.append(logits_seq[valid_mask])
                             cls_tgt_all.append(tgt_tensor[valid_mask])
                 # If *no* valid class targets remain we skip CE for this sample
                 # but still keep IoU / match stats (they are unaffected).
