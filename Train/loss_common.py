@@ -374,15 +374,20 @@ class CompositeLoss:
                 # Fill cost matrix per class to forbid cross-class matches
                 unique_classes = torch.unique(torch.cat([pred_lbl, gt_lbl]))
                 for cls_id in unique_classes.tolist():
-                    p_mask = pred_lbl == cls_id
-                    g_mask = gt_lbl == cls_id
-                    if not p_mask.any() or not g_mask.any():
-                        continue
-                    p_idx = p_mask.nonzero(as_tuple=False).squeeze(1)
-                    g_idx = g_mask.nonzero(as_tuple=False).squeeze(1)
+                    p_idx = (pred_lbl == cls_id).nonzero(as_tuple=False).squeeze(1)
+                    g_idx = (gt_lbl == cls_id).nonzero(as_tuple=False).squeeze(1)
+                    if p_idx.numel() == 0 or g_idx.numel() == 0:
+                        continue  # nothing to match for this class
 
-                    sub_iou = iou_mat[p_idx][:, g_idx]
-                    sub_dist = dist_norm[p_idx][:, g_idx]
+                    # Compute IoU/dist only for the selected rows/columns to
+                    # guarantee shape alignment regardless of earlier
+                    # filtering.
+                    sub_pred = pred_f[p_idx]
+                    sub_gt   = gt_f[g_idx]
+
+                    sub_iou  = iou_matrix_xywh(sub_pred, sub_gt)               # (P',G')
+                    sub_dist = torch.cdist(sub_pred[:, :2], sub_gt[:, :2])      # (P',G')
+                    sub_dist = (sub_dist / math.sqrt(2.0)).clamp_(max=1.0)
 
                     sub_cost = torch.where(
                         sub_iou > 0,
