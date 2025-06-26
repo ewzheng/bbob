@@ -345,8 +345,6 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
                     bbox = bbox.tolist()
                 sample_boxes.append(bbox)
                 sample_labels.append(category)
-            result["target_boxes"].append(sample_boxes)
-            result["target_labels"].append(sample_labels)
 
             # -------------------------------------------------------------
             # Build detection target string: <bbob>class:bbox</bbob>
@@ -389,10 +387,13 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
                 detection_text = ""
                 ids = []
 
+            # ---------------- update boxes/labels to kept subset ----------
+            kept_n = len(current) if detection_fragments else 0
+            result.setdefault("target_boxes", []).append(sample_boxes[:kept_n])
+            result.setdefault("target_labels", []).append(sample_labels[:kept_n])
+
             # store per-sample
-            if "target_text" not in result:
-                result["target_text"] = []
-            result["target_text"].append(ids)
+            result.setdefault("target_text", []).append(ids)
 
     if "sentences" in batch and "target_text" not in result:
         target_texts = []

@@ -196,11 +196,13 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
         # ------------------------------------------------------------------
 
         if "target_boxes" in item:
-            boxes_batch.append(torch.as_tensor(item["target_boxes"], dtype=torch.float32))
+            bx = torch.as_tensor(item["target_boxes"], dtype=torch.float32)
             if "target_labels" in item:
-                labels_batch.append(torch.as_tensor(item["target_labels"], dtype=torch.long))
+                lb = torch.as_tensor(item["target_labels"], dtype=torch.long)
             else:
-                labels_batch.append(None)
+                lb = torch.full((bx.size(0),), -1, dtype=torch.long)
+            boxes_batch.append(bx)
+            labels_batch.append(lb)
 
     input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
     labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=-100)
@@ -214,13 +216,7 @@ def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
     }
 
     if boxes_batch:
-        tgt = []
-        for bx, lb in zip(boxes_batch, labels_batch):
-            if lb is not None:
-                tgt.append((bx, lb))
-            else:
-                tgt.append(bx)
-        batch_out["target_boxes"] = tgt
+        batch_out["target_boxes"] = [(bx, lb) for bx, lb in zip(boxes_batch, labels_batch)]
 
     return batch_out
 
