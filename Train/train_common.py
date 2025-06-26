@@ -337,47 +337,34 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
                 dtype = dtype,
             )
             sample_boxes = []
-            sample_labels = []
+            sample_label_ids = []   # canonical token ids (for matching)
+            sample_label_strs = []  # human-readable strings (for text)
             for bbox, category in zip(bboxes, sample["category"]):
-                # convert tensors to plain python lists to prevent Arrow encoding errors
+                # Convert tensors to plain python lists
                 if isinstance(bbox, torch.Tensor):
                     bbox = bbox.tolist()
-                sample_boxes.append(bbox)
 
-                # ---------------------------------------------------------
-                # Convert dataset category → canonical token id.
-                # 1) Use label_lookup for int classes when available.
-                # 2) Fallback: string form of the category.
-                # 3) Tokenise without special tokens and take the *last*
-                #    sub-token so that the id matches the loss parser's
-                #    heuristic (token immediately left of the colon).
-                # 4) Map tokenizer.unk_token_id to −1 so loss can ignore
-                #    truly unknown classes.
-                # ---------------------------------------------------------
-
+                # --- map category to string --------------------------------
                 if isinstance(category, int):
                     label_str = label_lookup.get(category, str(category)) if label_lookup else str(category)
                 else:
                     label_str = str(category)
 
+                # --- tokenise & choose *last* sub-token --------------------
                 sub_tok_ids = tokenizer(label_str, add_special_tokens=False)["input_ids"]
                 cls_id = sub_tok_ids[-1] if sub_tok_ids else -1
                 if cls_id == tokenizer.unk_token_id:
                     cls_id = -1
 
-                sample_labels.append(cls_id)
+                sample_boxes.append(bbox)
+                sample_label_ids.append(cls_id)
+                sample_label_strs.append(label_str)
 
             # -------------------------------------------------------------
             # Build detection target string: <bbob>class:bbox</bbob>
             # -------------------------------------------------------------
-            if label_lookup is None:
-                label_lookup = {}
-
             detection_fragments = []
-            for bbox, cat in zip(sample_boxes, sample_labels):
-                # Using lookup when possible; fallback = str(cat)
-                label = label_lookup.get(cat, str(cat)) if isinstance(cat, int) else str(cat)
-
+            for bbox, label in zip(sample_boxes, sample_label_strs):
                 # bbox components are already 0-1; keep them as 3-decimal floats
                 bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
                 detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
@@ -419,7 +406,7 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
             # ---------------- boxes / labels -----------------------
             # Slice to *kept_n* so geometric targets match the text.
             result.setdefault("target_boxes", []).append(sample_boxes[:kept_n])
-            result.setdefault("target_labels", []).append(sample_labels[:kept_n])
+            result.setdefault("target_labels", []).append(sample_label_ids[:kept_n])
 
             # ---------------- store token ids ----------------------
             result.setdefault("target_text", []).append(ids)

@@ -44,7 +44,7 @@ class CompositeLoss:
         lambda_detection: float = 0.2,
         lambda_cls: float = 1.0,
         lambda_match_penalty: float = 0.5,
-        lm_target: float = 2,
+        lm_target: float = 1.5,
         smoothing_factor: float = 0.95,
         logger=None,
         log_interval: int = 100,
@@ -87,21 +87,24 @@ class CompositeLoss:
         # Cache digit-id tensor per device to avoid `.to(device)` every step
         self._digit_ids_cache: dict[torch.device, torch.Tensor] = {}
 
-        # Punctuation tokens used inside <bbob> snippets.  If the tokenizer
-        # does not contain a dedicated token we store -1 and simply skip the
-        # check when scanning.
-        def _get_id(tok: str) -> int:
-            tid = tokenizer.convert_tokens_to_ids(tok)
-            return tid if tid is not None else -1
-
-        self._id_colon = _get_id(":")
-        self._id_comma = _get_id(",")
-        self._id_dot   = _get_id(".")
+        self._id_colon = self._get_id(":")
+        self._id_comma = self._get_id(",")
+        self._id_dot   = self._get_id(".")
+        self._id_lbr = self._get_id("[")
+        self._id_rbr = self._get_id("]")
+        self._id_space = self._get_id(" ")
 
         # Tag token IDs – needed by __call__ masking before any forward pass
         self._id_open = tokenizer.convert_tokens_to_ids(TAG_OPEN)
         self._id_close = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
 
+    # Punctuation tokens used inside <bbob> snippets.  If the tokenizer
+    # does not contain a dedicated token we store -1 and simply skip the
+    # check when scanning.
+    def _get_id(self, tok: str) -> int:
+        tid = self.tok.convert_tokens_to_ids(tok)
+        return tid if tid is not None else -1
+    
     # ------------- straight-through digit expectation ----------------
     def _st_expect(self, logits_slice: torch.Tensor) -> torch.Tensor:
         device, dtype = logits_slice.device, logits_slice.dtype
@@ -393,8 +396,10 @@ class CompositeLoss:
 
         pm_list, gm_list = [], []
         matched, total = 0, 0
-        cls_loss_accum = 0.0
-        cls_count = 0
+        # Accumulate class-token positions & targets for *all* samples so we
+        # can run one large gather/CE call instead of many small ones.
+        cls_pos_all: list[torch.Tensor] = []
+        cls_tgt_all: list[torch.Tensor] = []
 
         for b in range(B):
             # Retrieve cached filtered tensors (computed in the first loop)
@@ -455,19 +460,17 @@ class CompositeLoss:
                 # -------- gather logits & targets for *all* class tokens ----
                 sel = torch.arange(P, device=pred_f.device)[keep_pred_mask]
                 if sel.numel():
-                    pos_tensor = torch.cat([torch.tensor(pred_pos_seq[i], device=pred_f.device, dtype=torch.long)
-                                            for i in sel])
+                    pos_tensors = [torch.tensor(pred_pos_seq[i], device=pred_f.device, dtype=torch.long)
+                                    for i in sel if pred_pos_seq[i]]
+                    if pos_tensors:
+                        pos_tensor = torch.cat(pos_tensors)  # (M,)
+                        tgt_tensor = self._lm_labels_batch[b].index_select(0, pos_tensor)  # (M,)
 
-                    if pos_tensor.numel():
-                        logits_seq = logits[b].index_select(0, pos_tensor)  # (M,V)
-                        tgt_tensor = self._lm_labels_batch[b].index_select(0, pos_tensor)
-
-                    # Filter out padding / ignored ids (shouldn't normally occur)
-                    valid_mask = (tgt_tensor >= 0) & (tgt_tensor < logits.size(-1))
-                    if valid_mask.any():
-                        cls_loss_sum = F.cross_entropy(logits_seq[valid_mask], tgt_tensor[valid_mask], reduction="sum")
-                        cls_loss_accum += cls_loss_sum
-                        cls_count += int(valid_mask.sum().item())
+                        # Filter valid vocabulary targets
+                        valid_mask = (tgt_tensor >= 0) & (tgt_tensor < logits.size(-1))
+                        if valid_mask.any():
+                            cls_pos_all.append(pos_tensor[valid_mask])
+                            cls_tgt_all.append(tgt_tensor[valid_mask])
                 # If *no* valid class targets remain we skip CE for this sample
                 # but still keep IoU / match stats (they are unaffected).
 
@@ -488,8 +491,19 @@ class CompositeLoss:
             iou_loss = logits.new_tensor(0.0)
 
         match_rate = matched / total if total else 0.0
-        # Average class loss if any
-        cls_loss = cls_loss_accum / cls_count if cls_count > 0 else logits.new_tensor(0.0)
+        # ---------------- compute class CE once for the whole batch -------------
+        if cls_pos_all:
+            pos_all = torch.cat(cls_pos_all)                 # (T,)
+            tgt_all = torch.cat(cls_tgt_all)                 # (T,)
+
+            logits_flat = logits.view(-1, logits.size(-1))
+            cls_loss_sum = F.cross_entropy(
+                logits_flat.index_select(0, pos_all), tgt_all, reduction="sum"
+            )
+            cls_loss = cls_loss_sum / tgt_all.numel()
+        else:
+            cls_loss = logits.new_tensor(0.0)
+
         return iou_loss, match_rate, cls_loss
 
     # -------------------- callable -----------------------------
@@ -526,7 +540,16 @@ class CompositeLoss:
 
             # Split inside/outside masks
             row_tokens = row
-            punct_mask = (row_tokens == self._id_colon) | (row_tokens == self._id_comma) | (row_tokens == self._id_dot)
+            punct_mask = (
+                (row_tokens == self._id_colon)
+                | (row_tokens == self._id_comma)
+                | (row_tokens == self._id_dot)
+                | (row_tokens == self._id_lbr)
+                | (row_tokens == self._id_rbr)
+                | (row_tokens == self._id_space)
+                | (row_tokens == self._id_open)
+                | (row_tokens == self._id_close)
+            )
 
             # Inside the detection span:
             #   • mask digits (handled by CIoU)
