@@ -334,28 +334,9 @@ class CompositeLoss:
             pred, pred_lbl_full, pred_pos_full = diff_preds[b]
 
             # Ground-truth may come as (boxes, labels) tuple or just boxes
-            gt_entry = gt_boxes[b]
-            if isinstance(gt_entry, tuple):
-                gt, gt_lbl_full = gt_entry
-                if isinstance(gt, list):
-                    if len(gt) == 0:
-                        gt = torch.empty((0, 4), device=logits.device, dtype=logits.dtype)
-                    elif isinstance(gt[0], torch.Tensor):
-                        gt = torch.stack([g.to(logits.device, logits.dtype) for g in gt])
-                    else:
-                        gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
-                if isinstance(gt_lbl_full, list):
-                    gt_lbl_full = torch.tensor(gt_lbl_full, device=logits.device, dtype=torch.long)
-            else:
-                gt = gt_entry
-                if isinstance(gt, list):
-                    if len(gt) == 0:
-                        gt = torch.empty((0, 4), device=logits.device, dtype=logits.dtype)
-                    elif isinstance(gt[0], torch.Tensor):
-                        gt = torch.stack([g.to(logits.device, logits.dtype) for g in gt])
-                    else:
-                        gt = torch.tensor(gt, device=logits.device, dtype=logits.dtype)
-                gt_lbl_full = torch.full((gt.size(0),), -1, device=logits.device, dtype=torch.long)
+            gt, gt_lbl_full = gt_boxes[b]  # collator guarantees tuple of tensors
+            gt = gt.to(device=logits.device, dtype=logits.dtype)
+            gt_lbl_full = gt_lbl_full.to(device=logits.device, dtype=torch.long)
 
             # Filter non-degenerate boxes and propagate class labels
             valid_pred = (pred[:, 2] > EPSILON) & (pred[:, 3] > EPSILON)

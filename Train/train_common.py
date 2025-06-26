@@ -362,37 +362,45 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
                 detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
 
             # ---------------------------------------------------------
-            # Join the fragments but ensure *whole* boxes fit within the
-            # max-length budget.  If the tokenised string exceeds the
-            # limit, drop entire fragments from the END until it fits so
-            # we never cut a <|bbob|> … </|bbob|> pair in half.
+            # Build the textual target *and* decide how many detections
+            # can be kept so that text, boxes and labels stay in sync.
             # ---------------------------------------------------------
 
-            if detection_fragments:
-                current = detection_fragments.copy()
-                while current:
-                    candidate_text = " ".join(current)
-                    t_ids = tokenizer(candidate_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
-                    if t_ids.size(0) <= MAX_TARGET_TEXT_LENGTH:
-                        detection_text = candidate_text
-                        ids = t_ids.tolist()
-                        break
-                    # drop the last fragment and try again
-                    current.pop()
-                else:
-                    # Even the first fragment is too long – fallback to hard truncation
-                    single = detection_fragments[0]
-                    ids = tokenizer(single, return_tensors="pt", truncation=True, max_length=MAX_TARGET_TEXT_LENGTH)["input_ids"].squeeze(0).tolist()
-            else:
-                detection_text = ""
-                ids = []
+            kept_n: int = 0  # how many objects remain after truncation
+            ids: list[int]
 
-            # ---------------- update boxes/labels to kept subset ----------
-            kept_n = len(current) if detection_fragments else 0
+            if detection_fragments:
+                frags = detection_fragments  # alias for brevity
+
+                # Try dropping fragments from the *end* until the encoded
+                # length fits.  This guarantees that we always keep a
+                # prefix of the object list, so slicing boxes / labels with
+                # kept_n is safe.
+                while frags:
+                    candidate = " ".join(frags)
+                    enc = tokenizer(candidate, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+                    if enc.size(0) <= MAX_TARGET_TEXT_LENGTH:
+                        ids = enc.tolist()
+                        kept_n = len(frags)
+                        break
+                    frags.pop()  # drop last <bbob>… fragment and retry
+                else:
+                    # Even the first fragment does not fit – encode the
+                    # first one with hard truncation, keep_n = 1
+                    first = detection_fragments[0]
+                    ids = tokenizer(first, return_tensors="pt", truncation=True,
+                                     max_length=MAX_TARGET_TEXT_LENGTH)["input_ids"].squeeze(0).tolist()
+                    kept_n = 1
+            else:
+                ids = []
+                kept_n = 0
+
+            # ---------------- boxes / labels -----------------------
+            # Slice to *kept_n* so geometric targets match the text.
             result.setdefault("target_boxes", []).append(sample_boxes[:kept_n])
             result.setdefault("target_labels", []).append(sample_labels[:kept_n])
 
-            # store per-sample
+            # ---------------- store token ids ----------------------
             result.setdefault("target_text", []).append(ids)
 
     if "sentences" in batch and "target_text" not in result:
@@ -470,7 +478,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size})",
-        load_from_cache_file=True
+        load_from_cache_file=False
     )
 
     return dataset
