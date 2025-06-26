@@ -42,6 +42,7 @@ class CompositeLoss:
         *,
         lambda_iou: float = 1.5,
         lambda_detection: float = 0.2,
+        lambda_cls: float = 1.0,
         lambda_match_penalty: float = 0.5,
         lm_target: float = 2,
         smoothing_factor: float = 0.95,
@@ -52,7 +53,7 @@ class CompositeLoss:
         self.lambda_iou = lambda_iou
         self.lambda_det = lambda_detection
         self.lambda_match = lambda_match_penalty
-        self.lambda_cls = 1.0
+        self.lambda_cls = lambda_cls
         self.lm_target = lm_target
         self.smoothing = smoothing_factor
         self.logger = logger
@@ -469,6 +470,7 @@ class CompositeLoss:
         lm_labels = labels
         gt_boxes = kw.get("target_boxes", getattr(outputs, "target_boxes", None))
         if gt_boxes is None:
+            self.logger.info("No ground truth boxes found, creating empty placeholder")
             # Create geometry-only placeholder tuples so downstream code can
             # treat every entry uniformly.
             empty_box = torch.zeros((0, 4), device=logits.device, dtype=logits.dtype)
