@@ -32,6 +32,7 @@ import psutil
 
 # Image augmentations
 from .train_augments import apply_batch_augmentations
+from Utils import init_from_labels, get_id
 
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
@@ -337,7 +338,7 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
                 dtype = dtype,
             )
             sample_boxes = []
-            sample_label_ids = []   # canonical token ids (for matching)
+            sample_label_ids = []   # canonical integer IDs (multi-token aware)
             sample_label_strs = []  # human-readable strings (for text)
             for bbox, category in zip(bboxes, sample["category"]):
                 # Convert tensors to plain python lists
@@ -350,11 +351,9 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
                 else:
                     label_str = str(category)
 
-                # --- tokenise & choose *last* sub-token --------------------
+                # --- tokenise *whole* phrase and map to deterministic ID --
                 sub_tok_ids = tokenizer(label_str, add_special_tokens=False)["input_ids"]
-                cls_id = sub_tok_ids[-1] if sub_tok_ids else -1
-                if cls_id == tokenizer.unk_token_id:
-                    cls_id = -1
+                cls_id = get_id(sub_tok_ids)
 
                 sample_boxes.append(bbox)
                 sample_label_ids.append(cls_id)
@@ -647,6 +646,17 @@ def load_and_prepare_dataset(
                 label_lookup = {idx: name for name, idx in name_to_idx.items()}
             except Exception:
                 print("No labels found – bounding box text will use numeric IDs.")
+
+        # ----------------------------------------------------------
+        # Build deterministic *token-sequence → integer* map once so
+        # both dataset preprocessing *and* runtime loss can convert
+        # multi-token class phrases into a single ID.
+        # ----------------------------------------------------------
+        if label_lookup is not None:
+            try:
+                init_from_labels(label_lookup, tokenizer)
+            except Exception as e:
+                print(f"[WARN] Could not initialise class-id map: {e}")
 
         print("Preprocessing train dataset…")
         train = preprocess_dataset(

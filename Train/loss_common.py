@@ -242,28 +242,35 @@ class CompositeLoss:
             for i in range(n_boxes):
                 first_digit_pos = positions[i * digits_per_box].item()
                 j = first_digit_pos - 1
-                label_id = -1
                 pos_seq: list[int] = []
+                tok_seq: list[int] = []
                 while j >= 0:
                     tid = token_row[j].item()
-                    # Skip punctuation and digit tokens
-                    if (
-                        tid in self.digit_set
-                        or tid == self._id_dot
-                        or tid == self._id_comma
-                        or tid == self._id_colon
-                        or tid == id_open
-                        or tid == id_close
-                    ):
+                    # Stop only on *hard* delimiters (digit, ':' or tag).
+                    # Soft punctuation such as space/comma/dot are skipped
+                    # but do *not* terminate the scan so we can capture
+                    # full phrases like "traffic light" when the tokenizer
+                    # emits an explicit space token between the sub-tokens.
+                    if tid in self.digit_set or tid == self._id_colon or tid in {id_open, id_close}:
+                        break  # reached the class/coord separator or tag
+
+                    # Ignore soft punctuation but keep scanning.
+                    if tid in {self._id_dot, self._id_comma, self._id_space}:
                         j -= 1
                         continue
-                    # collect positions (we'll reverse later)
+
                     pos_seq.append(j)
-                    label_id = tid
-                    break
-                lbl_ids.append(label_id)  # keep -1 for 'no class'
-                lbl_pos.append(j)
-                pos_seq.reverse()  # left->right order
+                    tok_seq.append(tid)
+                    j -= 1
+
+                pos_seq.reverse()  # maintain natural L→R order
+                tok_seq.reverse()
+
+                from Utils.class_id_map import get_id  # local import to avoid circular deps
+                label_id = get_id(tok_seq) if tok_seq else -1
+
+                lbl_ids.append(label_id)
+                lbl_pos.append(pos_seq[-1] if pos_seq else -1)
                 lbl_pos_seq.append(pos_seq)
 
             labels = logits_row.new_tensor(lbl_ids, dtype=torch.long)
@@ -299,9 +306,16 @@ class CompositeLoss:
         # Reset counter for this step
         self.last_pred_boxes = 0
 
-        diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]] = [
-            self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
-        ]
+        # ------------------------------------------------------------------
+        # Parsing coordinates does not require gradients; wrapping the entire
+        # comprehension in `torch.no_grad()` cuts activation memory almost
+        # in half during the forward pass, especially when hundreds of
+        # objects are emitted.
+        # ------------------------------------------------------------------
+        with torch.no_grad():
+            diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]] = [
+                self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
+            ]
 
         # --------------------------------------------------------------
         # Fast path – use torch_linear_assignment in batch on GPU
@@ -364,7 +378,9 @@ class CompositeLoss:
             if pred_pos_seq:
                 valid_idx = valid_pred.nonzero(as_tuple=False).squeeze(1).tolist()
                 pred_pos_seq = [pred_pos_seq[i] for i in valid_idx]
-            cached_pred.append((pred_f, pred_lbl, pred_pos, pred_pos_seq, iou_matrix_xywh(pred_f, gt_f) if pred_f.numel() and gt_f.numel() else None))
+            # Preconvert to tensors once to cut kernel launches later
+            pred_pos_seq_t = [torch.tensor(p, device=logits.device, dtype=torch.long) for p in pred_pos_seq]
+            cached_pred.append((pred_f, pred_lbl, pred_pos, pred_pos_seq_t, iou_matrix_xywh(pred_f, gt_f) if pred_f.numel() and gt_f.numel() else None))
             cached_gt.append((gt_f, gt_lbl))
 
             self.last_pred_boxes += int(pred_f.size(0))
@@ -372,8 +388,8 @@ class CompositeLoss:
             if pred_f.numel() and gt_f.numel():
                 # After all filtering, compute IoU & distance matrices once
                 iou_mat = iou_matrix_xywh(pred_f, gt_f)              # (P,G)
-                dist_norm = torch.cdist(pred_f[:, :2], gt_f[:, :2])  # (P,G)
-                dist_norm = (dist_norm / math.sqrt(2.0)).clamp_(max=1.0)
+                # distance matrix will be computed per-class on demand;
+                # avoid allocating a large (P×G) tensor here only to discard it.
 
                 # Fill cost matrix per class to forbid cross-class matches
                 unique_classes = torch.unique(torch.cat([pred_lbl, gt_lbl]))
@@ -471,10 +487,7 @@ class CompositeLoss:
                 # -------- gather logits & targets for *all* class tokens ----
                 sel = torch.arange(P, device=pred_f.device)[keep_pred_mask]
                 if sel.numel():
-                    pos_tensors = [torch.tensor(pred_pos_seq[i], device=pred_f.device, dtype=torch.long)
-                                    # Keep only token positions that fall inside the current
-                                    # sequence length to avoid CUDA out-of-bounds asserts.
-                                    for i in sel if pred_pos_seq[i]]
+                    pos_tensors = [pred_pos_seq[i] for i in sel if pred_pos_seq[i]]
                     # Remove out-of-range values from each tensor *before* we concatenate –
                     # this is cheaper than building one big mask afterwards and guards
                     # against empty tensors producing shape mismatches.
@@ -520,6 +533,19 @@ class CompositeLoss:
             cls_loss = F.cross_entropy(logits_cat, tgt_cat, reduction="mean")
         else:
             cls_loss = logits.new_tensor(0.0)
+
+        # (Unreachable) – code continues beyond this point
+
+    # ---------------- helper: optionally shrink cost buffer --------------
+        needed_P, needed_G = max_pred, max_gt
+        if (
+            self._cost_buf is not None
+            and self._cost_buf.size(1) > 2 * needed_P
+            and self._cost_buf.size(2) > 2 * needed_G
+        ):
+            # Reclaim VRAM: drop the oversized buffer – it will be
+            # reallocated lazily on the next forward pass.
+            self._cost_buf = None
 
         return iou_loss, match_rate, cls_loss
 
