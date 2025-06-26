@@ -398,7 +398,7 @@ class CompositeLoss:
         matched, total = 0, 0
         # Accumulate class-token positions & targets for *all* samples so we
         # can run one large gather/CE call instead of many small ones.
-        cls_pos_all: list[torch.Tensor] = []
+        cls_logits_all: list[torch.Tensor] = []
         cls_tgt_all: list[torch.Tensor] = []
 
         for b in range(B):
@@ -469,7 +469,8 @@ class CompositeLoss:
                         # Filter valid vocabulary targets
                         valid_mask = (tgt_tensor >= 0) & (tgt_tensor < logits.size(-1))
                         if valid_mask.any():
-                            cls_pos_all.append(pos_tensor[valid_mask])
+                            # Store ready-to-use logits slice to avoid batch-offset issues
+                            cls_logits_all.append(logits[b][valid_mask])
                             cls_tgt_all.append(tgt_tensor[valid_mask])
                 # If *no* valid class targets remain we skip CE for this sample
                 # but still keep IoU / match stats (they are unaffected).
@@ -492,15 +493,11 @@ class CompositeLoss:
 
         match_rate = matched / total if total else 0.0
         # ---------------- compute class CE once for the whole batch -------------
-        if cls_pos_all:
-            pos_all = torch.cat(cls_pos_all)                 # (T,)
-            tgt_all = torch.cat(cls_tgt_all)                 # (T,)
+        if cls_logits_all:
+            logits_cat = torch.cat(cls_logits_all, dim=0)
+            tgt_cat    = torch.cat(cls_tgt_all,  dim=0)
 
-            logits_flat = logits.view(-1, logits.size(-1))
-            cls_loss_sum = F.cross_entropy(
-                logits_flat.index_select(0, pos_all), tgt_all, reduction="sum"
-            )
-            cls_loss = cls_loss_sum / tgt_all.numel()
+            cls_loss = F.cross_entropy(logits_cat, tgt_cat, reduction="mean")
         else:
             cls_loss = logits.new_tensor(0.0)
 
