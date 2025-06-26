@@ -366,7 +366,7 @@ class CompositeLoss:
             self.last_pred_boxes += int(pred_f.size(0))
 
             if pred_f.numel() and gt_f.numel():
-                # Pre-compute IoU and distance matrices
+                # After all filtering, compute IoU & distance matrices once
                 iou_mat = iou_matrix_xywh(pred_f, gt_f)              # (P,G)
                 dist_norm = torch.cdist(pred_f[:, :2], gt_f[:, :2])  # (P,G)
                 dist_norm = (dist_norm / math.sqrt(2.0)).clamp_(max=1.0)
