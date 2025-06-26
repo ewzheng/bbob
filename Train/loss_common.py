@@ -392,7 +392,10 @@ class CompositeLoss:
                 # avoid allocating a large (P×G) tensor here only to discard it.
 
                 # Fill cost matrix per class to forbid cross-class matches
-                unique_classes = torch.unique(torch.cat([pred_lbl, gt_lbl]))
+                # Iterate only over GT classes to avoid scanning the whole
+                # vocabulary when the model emits spurious class IDs that do
+                # not appear in the ground truth.
+                unique_classes = torch.unique(gt_lbl)
                 for cls_id in unique_classes.tolist():
                     if cls_id < 0:
                         continue  # skip placeholder / invalid class ids
