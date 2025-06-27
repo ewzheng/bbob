@@ -84,18 +84,6 @@ class BBOBCollator:  # noqa: N801
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
-        # Ensure per-worker deterministic NumPy / Python RNG seeded from the
-        # DataLoader worker's torch seed so jitter & shuffling differ across
-        # workers but remain reproducible.
-        try:
-            info = tud.get_worker_info()
-            if info is not None:
-                seed = torch.initial_seed() % 2**32
-                np.random.seed(seed)
-                random.seed(seed)
-        except Exception:
-            pass  # fallback – keep whatever RNG state
-
         return self._make_batch(
             batch,
             pad_token_id=self.pad_id,

@@ -17,6 +17,15 @@ import math
 import random
 import torch
 import torch.nn.functional as F
+import numpy as np
+import torch.utils.data as tud
+
+
+def _seed_worker(worker_id: int):
+    """Seed NumPy and Python RNG inside each DataLoader worker."""
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
 
 
 class BBOBTrainer(Trainer):
@@ -98,7 +107,8 @@ class BBOBTrainer(Trainer):
             self._train_collator.train()
         dl = super().get_train_dataloader()
         dl.collate_fn = self._train_collator  # make sure
-        # Ensure loss function is in *train* mode
+        # Inject worker_init_fn for deterministic per-worker RNG
+        dl.worker_init_fn = _seed_worker
         return dl
 
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:  # noqa: D401
