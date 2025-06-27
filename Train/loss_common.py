@@ -629,6 +629,15 @@ class CompositeLoss:
         if not torch.isfinite(lm_loss):
             raise RuntimeError("NaN/Inf in LM loss")
 
+        # ---------------- maintain EMA of LM loss ----------------------
+        if self.lm_loss_ema is None:
+            self.lm_loss_ema = lm_loss.detach().item()
+        else:
+            self.lm_loss_ema = (
+                self.smoothing * self.lm_loss_ema
+                + (1.0 - self.smoothing) * lm_loss.detach().item()
+            )
+
         # ---------------- adaptive detection weighting -----------------
         # Let   ratio = lm_target / lm_loss_ema   ∈ (0, +∞)
         # Clamp to 0‥1 so that the scale saturates once the CE loss reaches
