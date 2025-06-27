@@ -592,31 +592,9 @@ class CompositeLoss:
             gt_boxes = [(empty_box, empty_lbl) for _ in range(logits.size(0))]
         vocab = logits.size(-1)
 
-        # ---------------- order-agnostic CE on punctuation only --------------
-        # Build a mask that ignores:
-        #   • digit tokens 0-9
-        #   • any non-punctuation tokens that appear *inside* a <bbob>…</bbob>
-        #     span and before the first ':'  ⇒ these are the class words.
-
-        masked_lbl = lm_labels.clone()
-
-        digit_mask = (masked_lbl.unsqueeze(-1) == self._digit_ids_on(masked_lbl.device)).any(-1)
-
-        B, S = masked_lbl.shape
-        for b in range(B):
-            row = masked_lbl[b]
-            inside = self._inside_mask(row)
-
-            # Inside the detection span:
-            #   • mask digits (handled by CIoU)
-            digit_inside  = inside & digit_mask[b]
-
-            ignore_mask_row = digit_inside
-            masked_lbl[b][ignore_mask_row] = -100
-
         lm_loss = F.cross_entropy(
             logits[..., :-1, :].contiguous().view(-1, vocab),
-            masked_lbl[..., 1:].contiguous().view(-1),
+            lm_labels[..., 1:].contiguous().view(-1),
             ignore_index=-100,
         )
         if not torch.isfinite(lm_loss):
@@ -659,7 +637,15 @@ class CompositeLoss:
 
         match_pen = self.lambda_match * (1.0 - match_rate)
         det_loss = self.lambda_iou * iou_loss + match_pen
-        total_loss = lm_loss + self.lambda_cls * cls_loss + (self.lambda_det * det_scale) * det_loss
+
+        # ------------------------------------------------------------------
+        # Dynamically balance LM ↔ detection:  lm_loss weight = 1/det_scale
+        # – Early training:   det_scale≈1  ⇒ lm_loss keeps full strength.
+        # – Late training:    det_scale→det_scale_max  ⇒ lm_loss fades while
+        #                      detection gets amplified (λ_det·det_scale).
+        # ------------------------------------------------------------------
+        lm_weight = 1.0 / det_scale
+        total_loss = lm_weight * lm_loss + self.lambda_cls * cls_loss + (self.lambda_det * det_scale) * det_loss
 
         if self.logger and self.step % (self.log_interval * 4) == 0:
             sample_pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
@@ -677,6 +663,7 @@ class CompositeLoss:
                 "match rate": round(match_rate, 4),
                 "match penalty": round(match_pen.item() if torch.is_tensor(match_pen) else match_pen, 6),
                 "det_scale": round(det_scale * self.lambda_det, 3),
+                "lm_scale": round(lm_weight, 3),
             }
             if self._dangling_total > 0:
                 log_dict["dangling_coords"] = int(self._dangling_total)
