@@ -9,12 +9,22 @@ import torch
 import argparse
 from datetime import datetime
 import os, math, multiprocess as mp
+import random
+import numpy as np
 
 from transformers import TrainingArguments
 
 from Utils import get_logger, LoggingCallback, create_metrics_functions, model_size_breakdown
 from Model import build_BBOB
 from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn, create_compute_loss_func, BBOBTrainer
+
+
+def _seed_worker(worker_id):
+    # Ensure each DataLoader worker gets a unique NumPy/Python seed derived
+    # from its Torch seed so box jitter and other NumPy-based augmentations
+    # differ across workers but remain deterministic w.r.t the global seed.
+    np.random.seed(torch.initial_seed() % 2**32)
+    random.seed(torch.initial_seed() % 2**32)
 
 
 def train(
@@ -81,6 +91,7 @@ def train(
         warmup_ratio=warmup_ratio,
         lr_scheduler_kwargs={"num_cycles": epochs},
         include_num_input_tokens_seen=True,
+        dataloader_worker_init_fn=lambda worker_id: _seed_worker(worker_id),
     )
 
     tokenizer = model.get_tokenizer()
