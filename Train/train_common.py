@@ -32,7 +32,7 @@ import psutil
 
 # Image augmentations
 from .train_augments import apply_batch_augmentations
-from Utils import init_from_labels, get_id
+from Utils.class_id_map import init_from_labels, get_id
 
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
