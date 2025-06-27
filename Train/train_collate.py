@@ -21,6 +21,7 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from torchvision.transforms.functional import pil_to_tensor
+from .loss_helpers import TAG_OPEN, TAG_CLOSE
 
 # Constants (kept in sync with Train.train_common)
 VIS_TOKENS: int = 64           # number of visual tokens the model prepends
@@ -74,10 +75,14 @@ class BBOBCollator:  # noqa: N801
         else:
             self.placeholder_id = pad_token_id
 
+        self.open_id = tokenizer.convert_tokens_to_ids(TAG_OPEN)
+        self.close_id = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
+        self.space_id = tokenizer.convert_tokens_to_ids(" ")
+
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
-        return _make_batch(
+        return self._make_batch(
             batch,
             pad_token_id=self.pad_id,
             tokenizer=self.tokenizer,
@@ -91,139 +96,181 @@ class BBOBCollator:  # noqa: N801
     def train(self):
         self.is_eval = False
 
+    def _shuffle_fragments(self, ids: torch.Tensor) -> torch.Tensor:
+        """Return a copy with <bbob> … </bbob> snippets shuffled."""
+        if self.open_id == -1 or self.close_id == -1:
+            return ids  # tags not in vocab → nothing to shuffle
 
-# ----------------------------------------------------------------------
-# Internal functional implementation (splitting for reuse between class
-# and legacy make_collate_fn)
-# ----------------------------------------------------------------------
+        seq = ids.tolist()
+        # Find first <bbob>
+        ptr = 0
+        prefix = []
+        while ptr < len(seq) and seq[ptr] != self.open_id:
+            prefix.append(seq[ptr])
+            ptr += 1
+
+        if ptr == len(seq):
+            return ids  # no fragments
+
+        fragments: list[list[int]] = []
+        while ptr < len(seq):
+            if seq[ptr] != self.open_id:
+                break
+            start = ptr
+            depth = 1
+            ptr += 1
+            while ptr < len(seq) and depth > 0:
+                if seq[ptr] == self.open_id:
+                    depth += 1
+                elif seq[ptr] == self.close_id:
+                    depth -= 1
+                ptr += 1
+            frag = seq[start:ptr]
+            fragments.append(frag)
+            # skip whitespace between fragments (kept as single space later)
+            while ptr < len(seq) and seq[ptr] == self.space_id:
+                ptr += 1
+
+        suffix = seq[ptr:]
+
+        if len(fragments) <= 1:
+            return ids  # nothing to shuffle
+
+        random.shuffle(fragments)
+
+        new_seq = prefix[:]
+        first = True
+        for frag in fragments:
+            if not first and self.space_id != -1:
+                new_seq.append(self.space_id)
+            new_seq.extend(frag)
+            first = False
+        new_seq.extend(suffix)
+        return torch.tensor(new_seq, dtype=torch.long)
 
 
-def _make_batch(batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
-    """Core functional routine"""
+    def _make_batch(self, batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
+        """Core functional routine"""
 
-    # 1) locate image field
-    img_key = None
-    for cand in ("images", "image", "pixel_values"):
-        if cand in batch[0]:
-            img_key = cand
-            break
-    if img_key is None:
-        raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
+        # 1) locate image field
+        img_key = None
+        for cand in ("images", "image", "pixel_values"):
+            if cand in batch[0]:
+                img_key = cand
+                break
+        if img_key is None:
+            raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
-    device = "cpu"
+        device = "cpu"
 
-    processed = []
-    for img in (item[img_key] for item in batch):
-        if isinstance(img, torch.Tensor):
-            t = img.to(dtype=torch.float32).div_(255.0)
-        elif isinstance(img, np.ndarray):
-            t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
-        elif isinstance(img, list):
-            t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32).div_(255.0)
-        else:
-            t = pil_to_tensor(img).float().div_(255.0).to(device)
-
-        if t.dim() == 2:
-            t = t.unsqueeze(0).expand(3, -1, -1)
-        elif t.dim() == 3 and t.shape[0] not in (1, 3):
-            t = t.permute(2, 0, 1)
-            if t.shape[0] == 1:
-                t = t.expand(3, -1, -1)
-        elif t.dim() != 3:
-            raise RuntimeError(f"Unsupported image tensor dim {t.dim()}")
-
-        _, H, W = t.shape
-        if (H, W) != TARGET_SIZE:
-            scale = min(TARGET_SIZE[1] / H, TARGET_SIZE[0] / W)
-            nh = max(1, int(H * scale))
-            nw = max(1, int(W * scale))
-            t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
-
-            canvas = 0.5 * torch.ones(3, *TARGET_SIZE)
-            dh = (TARGET_SIZE[1] - nh) // 2
-            dw = (TARGET_SIZE[0] - nw) // 2
-            canvas[:, dh : dh + nh, dw : dw + nw] = t
-            t = canvas
-
-        processed.append(t)
-
-    pixel_values = torch.stack(processed, 0)
-
-    merged_input_ids, merged_labels = [], []
-    boxes_batch, labels_batch = [], []
-
-    for item in batch:
-        if "input_ids" in item:
-            instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
-        else:
-            text = item.get("text", "")
-            max_txt_len = tokenizer.model_max_length - VIS_TOKENS
-            tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
-            instr_ids = tokens["input_ids"].squeeze(0)
-
-        tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
-
-        instr_ids = instr_ids[instr_ids != pad_token_id]
-        tgt_ids = tgt_ids[tgt_ids != pad_token_id]
-
-        max_txt_len = tokenizer.model_max_length - VIS_TOKENS
-        if instr_ids.size(0) > max_txt_len:
-            instr_ids = instr_ids[-max_txt_len:]
-            tgt_ids = torch.tensor([], dtype=torch.long)
-        else:
-            remaining = max_txt_len - instr_ids.size(0)
-            if tgt_ids.size(0) > remaining:
-                tgt_ids = tgt_ids[:remaining]
-
-        placeholder_ids = torch.full((tgt_ids.size(0),), placeholder_id, dtype=torch.long)
-        input_ids = torch.cat([instr_ids, placeholder_ids], dim=0)
-
-        visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
-        lbl_text = torch.cat([instr_ids.clone(), tgt_ids.clone()], dim=0)
-        labels = torch.cat([visual_ignore, lbl_text])
-        labels[: VIS_TOKENS + instr_ids.size(0)] = -100
-
-        merged_input_ids.append(input_ids)
-        merged_labels.append(labels)
-
-        # ------------------------------------------------------------------
-        # Detection targets – pass through raw so the loss function can use
-        # them without re-parsing the text.  Expected shapes:
-        #   target_boxes  : List[List[float]]  per object xywh (0‥1)
-        #   target_labels : List[str]          per object class
-        # If these keys are missing we simply do not include them in the
-        # batch; the loss code will fall back to geometry-only behaviour.
-        # ------------------------------------------------------------------
-
-        if "target_boxes" in item:
-            bx = torch.as_tensor(item["target_boxes"], dtype=torch.float32)
-            if "target_labels" in item:
-                lb = torch.as_tensor(item["target_labels"], dtype=torch.long)
+        processed = []
+        for img in (item[img_key] for item in batch):
+            if isinstance(img, torch.Tensor):
+                t = img.to(dtype=torch.float32).div_(255.0)
+            elif isinstance(img, np.ndarray):
+                t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
+            elif isinstance(img, list):
+                t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32).div_(255.0)
             else:
-                lb = torch.full((bx.size(0),), -1, dtype=torch.long)
-            boxes_batch.append(bx)
-            labels_batch.append(lb)
+                t = pil_to_tensor(img).float().div_(255.0).to(device)
 
-    input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
-    labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=-100)
-    attention_mask = (input_ids_padded != pad_token_id).long()
+            if t.dim() == 2:
+                t = t.unsqueeze(0).expand(3, -1, -1)
+            elif t.dim() == 3 and t.shape[0] not in (1, 3):
+                t = t.permute(2, 0, 1)
+                if t.shape[0] == 1:
+                    t = t.expand(3, -1, -1)
+            elif t.dim() != 3:
+                raise RuntimeError(f"Unsupported image tensor dim {t.dim()}")
 
-    batch_out = {
-        "images": pixel_values,
-        "input_ids": input_ids_padded,
-        "attention_mask": attention_mask,
-        "labels": labels_padded,
-    }
+            _, H, W = t.shape
+            if (H, W) != TARGET_SIZE:
+                scale = min(TARGET_SIZE[1] / H, TARGET_SIZE[0] / W)
+                nh = max(1, int(H * scale))
+                nw = max(1, int(W * scale))
+                t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
 
-    if boxes_batch:
-        batch_out["target_boxes"] = [(bx, lb) for bx, lb in zip(boxes_batch, labels_batch)]
+                canvas = 0.5 * torch.ones(3, *TARGET_SIZE)
+                dh = (TARGET_SIZE[1] - nh) // 2
+                dw = (TARGET_SIZE[0] - nw) // 2
+                canvas[:, dh : dh + nh, dw : dw + nw] = t
+                t = canvas
 
-    return batch_out
+            processed.append(t)
 
+        pixel_values = torch.stack(processed, 0)
 
-# ----------------------------------------------------------------------
-# Back-compat shim: previous helper returning a simple collate callable.
-# ----------------------------------------------------------------------
+        merged_input_ids, merged_labels = [], []
+        boxes_batch, labels_batch = [], []
+
+        for item in batch:
+            if "input_ids" in item:
+                instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
+            else:
+                text = item.get("text", "")
+                max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+                tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
+                instr_ids = tokens["input_ids"].squeeze(0)
+
+            tgt_ids_raw = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
+            tgt_ids = self._shuffle_fragments(tgt_ids_raw)
+
+            instr_ids = instr_ids[instr_ids != pad_token_id]
+            tgt_ids = tgt_ids[tgt_ids != pad_token_id]
+
+            max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+            if instr_ids.size(0) > max_txt_len:
+                instr_ids = instr_ids[-max_txt_len:]
+                tgt_ids = torch.tensor([], dtype=torch.long)
+            else:
+                remaining = max_txt_len - instr_ids.size(0)
+                if tgt_ids.size(0) > remaining:
+                    tgt_ids = tgt_ids[:remaining]
+
+            placeholder_ids = torch.full((tgt_ids.size(0),), placeholder_id, dtype=torch.long)
+            input_ids = torch.cat([instr_ids, placeholder_ids], dim=0)
+
+            visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long)
+            lbl_text = torch.cat([instr_ids.clone(), tgt_ids.clone()], dim=0)
+            labels = torch.cat([visual_ignore, lbl_text])
+            labels[: VIS_TOKENS + instr_ids.size(0)] = -100
+
+            merged_input_ids.append(input_ids)
+            merged_labels.append(labels)
+
+            # ------------------------------------------------------------------
+            # Detection targets – pass through raw so the loss function can use
+            # them without re-parsing the text.  Expected shapes:
+            #   target_boxes  : List[List[float]]  per object xywh (0‥1)
+            #   target_labels : List[str]          per object class
+            # If these keys are missing we simply do not include them in the
+            # batch; the loss code will fall back to geometry-only behaviour.
+            # ------------------------------------------------------------------
+
+            if "target_boxes" in item:
+                bx = torch.as_tensor(item["target_boxes"], dtype=torch.float32)
+                if "target_labels" in item:
+                    lb = torch.as_tensor(item["target_labels"], dtype=torch.long)
+                else:
+                    lb = torch.full((bx.size(0),), -1, dtype=torch.long)
+                boxes_batch.append(bx)
+                labels_batch.append(lb)
+
+        input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
+        labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=-100)
+        attention_mask = (input_ids_padded != pad_token_id).long()
+
+        batch_out = {
+            "images": pixel_values,
+            "input_ids": input_ids_padded,
+            "attention_mask": attention_mask,
+            "labels": labels_padded,
+        }
+
+        if boxes_batch:
+            batch_out["target_boxes"] = [(bx, lb) for bx, lb in zip(boxes_batch, labels_batch)]
+
+        return batch_out
 
 
 def make_collate_fn(pad_token_id: int, tokenizer, **kwargs):
