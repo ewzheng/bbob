@@ -513,10 +513,13 @@ class CompositeLoss:
                 # -------- gather logits & targets for *all* class tokens ----
                 sel = torch.arange(P, device=pred_f.device)[keep_pred_mask]
                 if sel.numel():
-                    pos_tensors = [pred_pos_seq[i] for i in sel if pred_pos_seq[i]]
-                    # Remove out-of-range values from each tensor *before* we concatenate –
-                    # this is cheaper than building one big mask afterwards and guards
-                    # against empty tensors producing shape mismatches.
+                    # Build list of position tensors, skipping empty ones.
+                    pos_tensors = []
+                    for idx in sel.tolist():
+                        pt = pred_pos_seq[idx]
+                        if isinstance(pt, torch.Tensor) and pt.numel() > 0:
+                            pos_tensors.append(pt)
+                    # Remove out-of-range values from each tensor before concatenating
                     if pos_tensors:
                         seq_len_b = logits.size(1)
                         pos_tensors = [pt[(pt >= 0) & (pt < seq_len_b)] for pt in pos_tensors if pt.numel()]
