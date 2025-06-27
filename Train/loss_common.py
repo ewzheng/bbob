@@ -319,9 +319,18 @@ class CompositeLoss:
         y_soft = F.gumbel_softmax(logits.clamp(-10, 10), tau=tau, hard=False, dim=-1)
         idx    = y_soft.argmax(-1, keepdim=True)                 # (B,S,1)
         y_hard = torch.zeros_like(y_soft).scatter_(-1, idx, 1.0) # hard sample
-        logits = y_hard - y_soft.detach() + y_soft               # ST trick
 
         token_ids = idx.squeeze(-1)                              # (B,S) hard IDs
+
+        # --------------------------------------------------------------
+        # Restrict gradient-carrying path to tokens *inside* <bbob> spans
+        # --------------------------------------------------------------
+        inside_masks = [self._inside_mask(token_ids[b]) for b in range(B)]
+        inside_mask  = torch.stack(inside_masks, dim=0)          # (B,S) bool
+        mask_f       = inside_mask.unsqueeze(-1).type_as(logits) # broadcast to vocab dim
+
+        # ST trick limited to inside tokens; outside we keep pure hard one-hot
+        logits = y_hard - mask_f * y_soft.detach() + mask_f * y_soft
 
         # Reset counter for this step
         self.last_pred_boxes = 0
@@ -598,22 +607,8 @@ class CompositeLoss:
             row = masked_lbl[b]
             inside = self._inside_mask(row)
 
-            # Split inside/outside masks
-            row_tokens = row
-            punct_mask = (
-                (row_tokens == self._id_colon)
-                | (row_tokens == self._id_comma)
-                | (row_tokens == self._id_dot)
-                | (row_tokens == self._id_lbr)
-                | (row_tokens == self._id_rbr)
-                | (row_tokens == self._id_space)
-                | (row_tokens == self._id_open)
-                | (row_tokens == self._id_close)
-            )
-
             # Inside the detection span:
             #   • mask digits (handled by CIoU)
-            #   • mask class words (class CE)
             digit_inside  = inside & digit_mask[b]
 
             ignore_mask_row = digit_inside
