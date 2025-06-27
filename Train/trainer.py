@@ -106,9 +106,6 @@ class BBOBTrainer(Trainer):
             self._eval_collator.eval()
         dl = super().get_eval_dataloader(eval_dataset)
         dl.collate_fn = self._eval_collator
-        # Switch loss function to *eval* mode for correct logging behaviour
-        if self._loss_func is not None and hasattr(self._loss_func, "is_eval"):
-            self._loss_func.is_eval = True
         return dl
 
     # Same treatment for prediction

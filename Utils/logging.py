@@ -6,7 +6,9 @@ import torch.nn.functional as F
 
 from transformers import TrainerCallback
 
-def create_metrics_functions(tokenizer):
+from .detection_metrics import detection_metrics_batch
+
+def create_metrics_functions(tokenizer, do_detection_metrics=False):
     """
     Factory that returns `(compute_metrics, preprocess_logits_for_metrics)` with **shared**
     state.  Added basic detection metrics (parse-rate, mean IoU) on top of the existing
@@ -132,13 +134,32 @@ def create_metrics_functions(tokenizer):
         pred_target_sim_sum   = 0.0
         pred_target_sim_count = 0
         
-        return {
+        metrics_out = {
             "exact_token_accuracy": mean_token_accuracy,
             "top3_token_accuracy": mean_top3_accuracy,
             "top5_token_accuracy": mean_top5_accuracy,
             "sequence_accuracy": mean_sequence_accuracy,
             "prediction_target_similarity": mean_prediction_target_similarity,
         }
+
+        # -------------------------------------------------------
+        # Detection metrics (Hungarian IoU / recall)
+        # -------------------------------------------------------
+        if do_detection_metrics:
+            det_metrics: dict[str, float] = {}
+            try:
+                det_metrics = detection_metrics_batch(
+                    torch.as_tensor(predictions),
+                    torch.as_tensor(labels),
+                    tokenizer,
+                )
+            except Exception as e:
+                print(f"Warning: detection metric computation failed – {e}")
+
+            # merge detection metrics (if any)
+            metrics_out.update(det_metrics)
+
+        return metrics_out
     
     return compute_metrics_impl, preprocess_logits_for_metrics_impl
 
