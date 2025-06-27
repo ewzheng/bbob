@@ -30,6 +30,8 @@ def train(
     logger=None,
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
+    total_tf_ratio: int = 1,
+    total_gd_ratio: int = 0.1
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
@@ -43,7 +45,8 @@ def train(
     batches_per_epoch = max(math.ceil(len(train_dataset) / batch_size), 1)
     optim_steps_per_epoch = max(math.ceil(batches_per_epoch / grad_acc_steps), 1)
     total_optim_steps = epochs * optim_steps_per_epoch
-    total_tf_steps = int(warmup_ratio * total_optim_steps)
+    total_tf_steps = int(total_optim_steps) * total_tf_ratio
+    total_gd_steps = int(total_optim_steps) * total_gd_ratio
 
     # Keep the old variable name for backward-compatibility
     steps_per_epoch = optim_steps_per_epoch
@@ -105,8 +108,9 @@ def train(
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
         tf_start_p=1.0,
-        tf_end_p=0.3,
+        tf_end_p=0.35,
         total_tf_steps=total_tf_steps,
+        total_gd_steps=total_gd_steps,
         tf_schedule="linear",
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
@@ -132,6 +136,8 @@ def main():
     parser.add_argument("--num_workers", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
+    parser.add_argument("--total_tf_ratio", type=int, default=1)
+    parser.add_argument("--total_gd_ratio", type=int, default=0.1)
     
     args = parser.parse_args()
 
@@ -192,6 +198,8 @@ def main():
         logger=logger,
         num_workers=num_workers,
         warmup_ratio=args.warmup_ratio,
+        total_tf_ratio=args.total_tf_ratio,
+        total_gd_ratio=args.total_gd_ratio
     )
 
     logger.info("Vision training complete. Model saved.")

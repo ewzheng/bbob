@@ -56,6 +56,7 @@ class BBOBTrainer(Trainer):
         tf_start_p: float = 1.0,
         tf_end_p: float = 0.0,
         total_tf_steps: int = 0,
+        total_gd_steps: int = 0,
         tf_schedule: str = "cosine",
         compute_loss_func: Optional[Any] = None,
         guidance_strength: float = 1.5,
@@ -84,7 +85,7 @@ class BBOBTrainer(Trainer):
         self._tf_sched   = tf_schedule
 
         # guided sampling uses the same warm-up length as teacher-forcing
-        self._guidance_steps = self._tf_total
+        self._guidance_steps = total_gd_steps
         self._guidance_strength = guidance_strength
 
     # ------------------------------------------------------------------
@@ -155,8 +156,8 @@ class BBOBTrainer(Trainer):
             logits = outputs.logits  # (B, S, V)
             flat_logits = logits.view(-1, logits.size(-1))
             flat_labels = labels.view(-1)
-            digit_ids = self._loss_func.digit_ids.to(flat_labels.device)
-            mask = (flat_labels >= 0) & torch.isin(flat_labels, digit_ids)
+            digit_or_punct = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids]).to(flat_labels.device)
+            mask = (flat_labels >= 0) & torch.isin(flat_labels, digit_or_punct)
             if mask.any():
                 idx = mask.nonzero(as_tuple=False).squeeze(1)
                 correct = flat_labels[idx]
@@ -165,10 +166,7 @@ class BBOBTrainer(Trainer):
                 guidance_loss = factor * base_loss
 
         if self._loss_func is not None:
-            extra_kw = {}
-            if "target_boxes" in inputs:
-                extra_kw["target_boxes"] = inputs["target_boxes"]
-            loss = self._loss_func(outputs, labels, **extra_kw)
+            loss = self._loss_func(outputs, labels)
             if guidance_loss is not None:
                 loss = loss + guidance_loss
         else:

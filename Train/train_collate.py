@@ -96,6 +96,39 @@ class BBOBCollator:  # noqa: N801
     def train(self):
         self.is_eval = False
 
+    def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.05):
+        """Jitter *normalised* (x,y,w,h) boxes in 0‥1 space.
+
+        Each box is perturbed independently:
+        – centre moved by up to ``jitter_ratio × w/h``
+        – width/height scaled by ±``jitter_ratio``.
+        The result is clamped so that the box stays inside 0…1 and keeps
+        ``w,h ≥ 0``.
+        """
+        if isinstance(bboxes, torch.Tensor):
+            bboxes = bboxes.clone().detach().float().cpu().numpy()
+
+        out: list[list[float]] = []
+        for x, y, w, h in bboxes:
+            # centre coords
+            cx, cy = x + w * 0.5, y + h * 0.5
+
+            # random jitter on centre and size
+            cx += np.random.uniform(-jitter_ratio, jitter_ratio) * w
+            cy += np.random.uniform(-jitter_ratio, jitter_ratio) * h
+            w  *= 1 + np.random.uniform(-jitter_ratio, jitter_ratio)
+            h  *= 1 + np.random.uniform(-jitter_ratio, jitter_ratio)
+
+            # convert back to top-left origin and clamp
+            x_new = max(0.0, cx - w * 0.5)
+            y_new = max(0.0, cy - h * 0.5)
+            w  = max(0.0, min(w, 1.0 - x_new))
+            h  = max(0.0, min(h, 1.0 - y_new))
+
+            out.append([x_new, y_new, w, h])
+
+        return torch.tensor(out, dtype=dtype)
+
     def _shuffle_fragments(self, ids: torch.Tensor) -> torch.Tensor:
         """Return a copy with <bbob> … </bbob> snippets shuffled."""
         if self.open_id == -1 or self.close_id == -1:
@@ -212,10 +245,26 @@ class BBOBCollator:  # noqa: N801
                 tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
                 instr_ids = tokens["input_ids"].squeeze(0)
 
-            tgt_ids_raw = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
-            tgt_ids = self._shuffle_fragments(tgt_ids_raw)
+            # Decide ground-truth detection text ----------------------------------
+            if "target_boxes" in item and not self.is_eval:
+                # TRAIN MODE → jitter
+                bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32)
+                bx = self.jitter_bboxes_norm(bx_raw, dtype=torch.float32)
 
-            instr_ids = instr_ids[instr_ids != pad_token_id]
+                # rebuild textual fragments so tokens match jittered coords
+                label_strs = item.get("target_label_strs", ["obj"] * bx.size(0))[: bx.size(0)]
+
+                frags = [f"<|bbob|>{lab}: [{', '.join(f'{v:.3f}' for v in bb)}]</|bbob|>" for bb, lab in zip(bx.tolist(), label_strs)]
+                det_text = " ".join(frags)
+                tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+            else:
+                # EVAL MODE or boxes absent – use stored token list as is
+                tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
+
+            # optional shuffle of <bbob> fragments
+            tgt_ids = self._shuffle_fragments(tgt_ids)
+
+            #------ now same instr truncation logic uses tgt_ids variable ----
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
 
             max_txt_len = tokenizer.model_max_length - VIS_TOKENS
@@ -238,24 +287,6 @@ class BBOBCollator:  # noqa: N801
             merged_input_ids.append(input_ids)
             merged_labels.append(labels)
 
-            # ------------------------------------------------------------------
-            # Detection targets – pass through raw so the loss function can use
-            # them without re-parsing the text.  Expected shapes:
-            #   target_boxes  : List[List[float]]  per object xywh (0‥1)
-            #   target_labels : List[str]          per object class
-            # If these keys are missing we simply do not include them in the
-            # batch; the loss code will fall back to geometry-only behaviour.
-            # ------------------------------------------------------------------
-
-            if "target_boxes" in item:
-                bx = torch.as_tensor(item["target_boxes"], dtype=torch.float32)
-                if "target_labels" in item:
-                    lb = torch.as_tensor(item["target_labels"], dtype=torch.long)
-                else:
-                    lb = torch.full((bx.size(0),), -1, dtype=torch.long)
-                boxes_batch.append(bx)
-                labels_batch.append(lb)
-
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
         labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=-100)
         attention_mask = (input_ids_padded != pad_token_id).long()
@@ -266,9 +297,6 @@ class BBOBCollator:  # noqa: N801
             "attention_mask": attention_mask,
             "labels": labels_padded,
         }
-
-        if boxes_batch:
-            batch_out["target_boxes"] = [(bx, lb) for bx, lb in zip(boxes_batch, labels_batch)]
 
         return batch_out
 

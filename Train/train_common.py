@@ -38,56 +38,12 @@ from Utils.class_id_map import init_from_labels, get_id
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
 DEFAULT_TARGET_SIZE = (256, 256)
 MAX_TARGET_TEXT_LENGTH = 256
-DEFAULT_BBOX_JITTER_RATIO = 0.05
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
 MAX_BATCH_SIZE = 4096
 GPU_MEMORY_PER_SAMPLE = 16 * 1024 * 1024  # 16 MB heuristic (was 4 MB)
 MAX_PREPROC_GPU_BATCH = 256
 CPU_MEMORY_PER_SAMPLE = 6 * 1024 * 1024  # 6 MB heuristic
-
-def jitter_bboxes(bboxes, img_width, img_height, dtype, jitter_ratio=DEFAULT_BBOX_JITTER_RATIO):
-    """
-    Randomly jitter bounding boxes by a fraction of their size (COCO format).
-    Args:
-        bboxes: Tensor or list of [N, 4] boxes (x, y, w, h) (COCO format)
-        img_width: Width of the image
-        img_height: Height of the image
-        jitter_ratio: Max fraction of box size to jitter (default 5%)
-    Returns:
-        Jittered bboxes (same shape/type as input, COCO format)
-    """
-    if isinstance(bboxes, torch.Tensor):
-        bboxes = bboxes.clone().detach().float().cpu().numpy()
-    bboxes_jittered = []
-    
-    for box in bboxes:
-        x, y, w, h = box  # COCO format
-        # Convert to corners
-        x1 = x
-        y1 = y
-        x2 = x + w
-        y2 = y + h
-        cx = (x1 + x2) / 2
-        cy = (y1 + y2) / 2
-        # Jitter center and size
-        jitter_cx = cx + np.random.uniform(-jitter_ratio, jitter_ratio) * w
-        jitter_cy = cy + np.random.uniform(-jitter_ratio, jitter_ratio) * h
-        jitter_w = w * (1 + np.random.uniform(-jitter_ratio, jitter_ratio))
-        jitter_h = h * (1 + np.random.uniform(-jitter_ratio, jitter_ratio))
-        # Clamp to image bounds
-        new_x1 = np.clip(jitter_cx - jitter_w / 2, 0, img_width - 1)
-        new_y1 = np.clip(jitter_cy - jitter_h / 2, 0, img_height - 1)
-        new_x2 = np.clip(jitter_cx + jitter_w / 2, 0, img_width - 1)
-        new_y2 = np.clip(jitter_cy + jitter_h / 2, 0, img_height - 1)
-        # Convert back to COCO format
-        new_x = new_x1
-        new_y = new_y1
-        new_w = new_x2 - new_x1
-        new_h = new_y2 - new_y1
-        bboxes_jittered.append([new_x, new_y, new_w, new_h])
-
-    return torch.tensor(bboxes_jittered, dtype=dtype)
 
 def normalize_coco_bboxes(bboxes, img_width, img_height, dtype):
     """
@@ -193,7 +149,7 @@ def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.flo
 
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAULT_BBOX_JITTER_RATIO, training=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
+def preprocess_batch(batch, tokenizer, image_processor, training=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
     '''
     build vision-language features for one raw dataset batch.
 
@@ -203,8 +159,6 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
         - batch (dict): incoming dataset slice.
         - tokenizer (PreTrainedTokenizer): hf tokenizer.
         - image_processor: MobileViTImageProcessor instance for image processing
-        - bbox_jitter_ratio (float): amplitude of bbox noise.
-        - training (bool): enables bbox jitter.
         - target_size (tuple[int,int]): final (w, h) resolution.
         - dtype (torch.dtype): dtype for tensors.
         - label_lookup (dict): mapping from class indices to names
@@ -313,20 +267,7 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
 
             # Fetch a *fresh* copy of the ground-truth boxes so that each
             # augmented view starts from the same coordinates before its own
-            # random jitter.  This prevents the accumulated displacement that
-            # would occur if we re-used already-jittered boxes.
-
             bboxes = torch.as_tensor(sample["bbox"], dtype=dtype).clone()
-
-            # 1) optional jitter in *original* image space
-            if training:
-                bboxes = jitter_bboxes(
-                    bboxes,
-                    img_width=image_sizes[aug_idx][0],
-                    img_height=image_sizes[aug_idx][1],
-                    dtype=dtype,
-                    jitter_ratio=bbox_jitter_ratio,
-                )
 
             # 2) adjust to letter-boxed, padded coordinates then normalise
             ratio, crop_left, crop_top = lb_params[aug_idx]
@@ -406,7 +347,7 @@ def preprocess_batch(batch, tokenizer, image_processor, bbox_jitter_ratio=DEFAUL
             # Slice to *kept_n* so geometric targets match the text.
             result.setdefault("target_boxes", []).append(sample_boxes[:kept_n])
             result.setdefault("target_labels", []).append(sample_label_ids[:kept_n])
-
+            result.setdefault("target_label_strs", []).append(sample_label_strs[:kept_n])
             # ---------------- store token ids ----------------------
             result.setdefault("target_text", []).append(ids)
 
@@ -472,7 +413,6 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         preprocess_batch,
         tokenizer=tokenizer,
         image_processor=image_processor,
-        bbox_jitter_ratio=DEFAULT_BBOX_JITTER_RATIO,
         training=is_training,
         dtype=dtype,
         label_lookup=label_lookup,
