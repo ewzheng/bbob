@@ -91,7 +91,6 @@ def train(
         warmup_ratio=warmup_ratio,
         lr_scheduler_kwargs={"num_cycles": epochs},
         include_num_input_tokens_seen=True,
-        dataloader_worker_init_fn=lambda worker_id: _seed_worker(worker_id),
     )
 
     tokenizer = model.get_tokenizer()

@@ -22,6 +22,8 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from torchvision.transforms.functional import pil_to_tensor
 from .loss_helpers import TAG_OPEN, TAG_CLOSE
+import random
+import torch.utils.data as tud
 
 # Constants (kept in sync with Train.train_common)
 VIS_TOKENS: int = 64           # number of visual tokens the model prepends
@@ -82,6 +84,18 @@ class BBOBCollator:  # noqa: N801
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
+        # Ensure per-worker deterministic NumPy / Python RNG seeded from the
+        # DataLoader worker's torch seed so jitter & shuffling differ across
+        # workers but remain reproducible.
+        try:
+            info = tud.get_worker_info()
+            if info is not None:
+                seed = torch.initial_seed() % 2**32
+                np.random.seed(seed)
+                random.seed(seed)
+        except Exception:
+            pass  # fallback – keep whatever RNG state
+
         return self._make_batch(
             batch,
             pad_token_id=self.pad_id,
