@@ -9,8 +9,8 @@ from Model.model import BBOB, BBOBConfig
 
 def build_BBOB(
     model_path: str,
-    *,
     bnb_config=None,
+    *,
     memory_pct: float = 0.95,
     device_map: str | dict | None = "auto",
     load: bool = False,
