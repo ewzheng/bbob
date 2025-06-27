@@ -98,6 +98,11 @@ class CompositeLoss:
         self._id_open = tokenizer.convert_tokens_to_ids(TAG_OPEN)
         self._id_close = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
 
+        # Cache punctuation IDs as a tensor once so we can use `torch.isin`
+        punct_ids = [tid for tid in (self._id_colon, self._id_comma, self._id_dot,
+                                     self._id_lbr, self._id_rbr, self._id_space) if tid >= 0]
+        self._punct_ids = torch.tensor(punct_ids, dtype=torch.long)
+
     # Punctuation tokens used inside <bbob> snippets.  If the tokenizer
     # does not contain a dedicated token we store -1 and simply skip the
     # check when scanning.
@@ -113,23 +118,20 @@ class CompositeLoss:
             warnings.warn("Digit token IDs exceed vocab range; falling back to uniform random coords and disabling ST path.")
             return torch.rand(logits_slice.shape[:-1], device=device, dtype=dtype)
 
-        dl = logits_slice.index_select(-1, ids)
+        # Digit-only sub-logits.
+        dl = logits_slice.index_select(-1, ids)  # (…, 10)
+
+        # Temperature-annealed *plain* softmax (no Gumbel, no straight-through).
         prog = min(1.0, self.step / max(1, self.tau_steps))
         tau = max(self.tau_end, self.tau_start * (1 - prog))
-        y_soft = F.gumbel_softmax(dl.clamp(-10, 10), tau=tau, hard=False, dim=-1)
-        if not torch.isfinite(y_soft).all():
-            y_soft = torch.softmax(dl / max(tau, 0.1), dim=-1)
+        p_digits = torch.softmax(dl.clamp(-10, 10) / max(tau, 0.1), dim=-1)  # (…,10)
 
-        # Faster straight-through path that avoids host <-> device sync by
-        # staying entirely on GPU and using `scatter_` instead of argmax →
-        # item() extraction.
-        idx = y_soft.argmax(-1, keepdim=True)
-        y_hard = torch.zeros_like(y_soft).scatter_(-1, idx, 1.0)
-        y_st = y_hard - y_soft.detach() + y_soft
+        # Expected numeric value   E[d]  with digits 0-9.
         key = (device, dtype)
         if key not in self._values10:
             self._values10[key] = torch.arange(10, device=device, dtype=dtype)
-        return (y_st * self._values10[key]).sum(-1)
+
+        return (p_digits * self._values10[key]).sum(-1)
 
     # ---------------- helper: cached [10^(n-1) … 10^0] tensor ----------------
     def _pow10_tensor(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -156,6 +158,7 @@ class CompositeLoss:
 
     # ---------------- helper: parse coordinates from one sample ----------------
     def _parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]:
+        """Legacy hard-digit parser (kept for fallback)."""
         """Vectorised extraction of `(N, 4)` *xywh* boxes from one sample.
 
         Compared to the previous Python-loop implementation this version:
@@ -294,50 +297,144 @@ class CompositeLoss:
             [],
         )
 
-    # ---------------- helper: parse coords per sample ----------------
+    # ------------------------------------------------------------------
+    #  New soft-parser that assigns every token a digit probability and
+    #  builds a differentiable xywh tuple irrespective of formatting.
+    # ------------------------------------------------------------------
 
-   # ------------- detection loss (vectorised coords) ----------------
+    def _soft_coord(self, logits_slice: torch.Tensor) -> torch.Tensor:
+        """Return expected value in [0,1] from a logits slice (L,V)."""
+        if logits_slice.numel() == 0:
+            return logits_slice.new_tensor(0.0)
+
+        p = torch.softmax(logits_slice.clamp(-10, 10), dim=-1)              # (L,V)
+        digit_ids = self._digit_ids_on(logits_slice.device)                 # (10,)
+        p_digit = p.index_select(-1, digit_ids).sum(-1)                    # (L,)
+
+        # expected #digits to the left of position i (soft count)
+        dig_left = torch.cumsum(p_digit, dim=0) - p_digit                  # (L,)
+
+        weight = (10.0 ** (3 - dig_left)).clamp_min(0.0) / 1000.0          # (L,)
+
+        values10 = self._pow10_tensor(logits_slice.device, logits_slice.dtype) # unused here but keep cache alive
+
+        exp_d = (p.index_select(-1, digit_ids) * torch.arange(10, device=logits_slice.device, dtype=logits_slice.dtype)).sum(-1)  # (L,)
+
+        coord = (exp_d * weight).sum().clamp(0.0, 1.0)
+        return coord
+
+    def _soft_parse_coords_sample(self, token_row: torch.Tensor, logits_row: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]:
+        """Parse boxes using soft expectations; no hard digit gating."""
+
+        boxes: list[torch.Tensor] = []
+        lbl_ids: list[int] = []
+        lbl_pos: list[int] = []
+        lbl_pos_seq: list[list[int]] = []
+
+        id_lbr, id_rbr = self._id_lbr, self._id_rbr
+
+        # find all '[' positions
+        lbr_pos = (token_row == id_lbr).nonzero(as_tuple=False).flatten().tolist()
+        rbr_pos = (token_row == id_rbr).nonzero(as_tuple=False).flatten().tolist()
+
+        if not lbr_pos or not rbr_pos:
+            return (
+                logits_row.new_zeros((0,4)),
+                logits_row.new_zeros((0,), dtype=torch.long),
+                logits_row.new_zeros((0,), dtype=torch.long),
+                [],
+            )
+
+        rbr_iter = 0
+        for lpos in lbr_pos:
+            # find first rbr that comes after lpos
+            while rbr_iter < len(rbr_pos) and rbr_pos[rbr_iter] < lpos:
+                rbr_iter += 1
+            if rbr_iter >= len(rbr_pos):
+                break
+            rpos = rbr_pos[rbr_iter]
+
+            span_indices = list(range(lpos + 1, rpos))
+            if len(span_indices) < 1:
+                continue
+
+            # split by commas – need 3 commas to get 4 coords
+            comma_tok = self._id_comma
+            commas = [i for i in span_indices if token_row[i].item() == comma_tok]
+            if len(commas) < 3:
+                continue
+            # take first 3 commas
+            c1, c2, c3 = commas[:3]
+            slices = [
+                (lpos + 1, c1),
+                (c1 + 1, c2),
+                (c2 + 1, c3),
+                (c3 + 1, rpos),
+            ]
+
+            coords = []
+            for s,e in slices:
+                logits_slice = logits_row[s:e, :]
+                coord_val = self._soft_coord(logits_slice)
+                coords.append(coord_val)
+
+            if len(coords) == 4:
+                boxes.append(torch.stack(coords))
+
+            # ---------- class label (tokens left of '[' up to colon) ----------
+            colon_id = self._id_colon
+            j = lpos - 1
+            pos_seq: list[int] = []
+            tok_seq: list[int] = []
+            while j >= 0:
+                tid = token_row[j].item()
+                if tid == colon_id or tid == self._id_open or tid == self._id_close or tid in self.digit_set:
+                    break
+                if tid in {self._id_dot, self._id_comma, self._id_space}:
+                    j -= 1
+                    continue
+                pos_seq.append(j)
+                tok_seq.append(tid)
+                j -= 1
+            pos_seq.reverse()
+            tok_seq.reverse()
+            from Utils.class_id_map import get_id
+            label_id = get_id(tok_seq) if tok_seq else -1
+
+            lbl_ids.append(label_id)
+            lbl_pos.append(pos_seq[-1] if pos_seq else -1)
+            lbl_pos_seq.append(pos_seq)
+
+        if boxes:
+            box_t = torch.stack(boxes)
+            labels_t = logits_row.new_tensor(lbl_ids, dtype=torch.long)
+            pos_t = logits_row.new_tensor(lbl_pos, dtype=torch.long)
+            return box_t, labels_t, pos_t, lbl_pos_seq
+        else:
+            return (
+                logits_row.new_zeros((0,4)),
+                logits_row.new_zeros((0,), dtype=torch.long),
+                logits_row.new_zeros((0,), dtype=torch.long),
+                [],
+            )
+
+    # ------------- detection loss (vectorised coords) ----------------
     def _detection_loss(self, logits: torch.Tensor, gt_boxes):
         """Compute IoU loss & match-rate in a batched, GPU-friendly way."""
 
         # ------------------------------------------------------------------
-        # Full-vocabulary straight-through Gumbel-Softmax
+        # Simple hard IDs for syntax parsing; gradients flow through `logits`
+        # via CE and the soft-coordinate path, so the non-differentiability of
+        # argmax is irrelevant.
         # ------------------------------------------------------------------
-        # We replace the hard arg-max with an ST Gumbel sample so that *all*
-        # vocabulary logits inside <bbob> spans receive gradients.  The forward
-        # pass still feeds discrete token IDs to the downstream masking and
-        # coordinate-parsing logic, therefore Hungarian matching & IoU code
-        # remain unchanged.
-
         B = logits.size(0)
-
-        # Anneal the temperature with the same schedule used by _st_expect
-        prog = min(1.0, self.step / max(1, self.tau_steps))
-        tau  = max(self.tau_end, self.tau_start * (1 - prog))
-
-        # (B,S,V) → soft probabilities (back-prop) + hard one-hot (forward)
-        y_soft = F.gumbel_softmax(logits.clamp(-10, 10), tau=tau, hard=False, dim=-1)
-        idx    = y_soft.argmax(-1, keepdim=True)                 # (B,S,1)
-        y_hard = torch.zeros_like(y_soft).scatter_(-1, idx, 1.0) # hard sample
-
-        token_ids = idx.squeeze(-1)                              # (B,S) hard IDs
-
-        # --------------------------------------------------------------
-        # Restrict gradient-carrying path to tokens *inside* <bbob> spans
-        # --------------------------------------------------------------
-        inside_masks = [self._inside_mask(token_ids[b]) for b in range(B)]
-        inside_mask  = torch.stack(inside_masks, dim=0)          # (B,S) bool
-        mask_f       = inside_mask.unsqueeze(-1).type_as(logits) # broadcast to vocab dim
-
-        # ST trick limited to inside tokens; outside we keep pure hard one-hot
-        logits = y_hard - mask_f * y_soft.detach() + mask_f * y_soft
+        token_ids = logits.argmax(dim=-1)  # (B,S)
 
         # Reset counter for this step
         self.last_pred_boxes = 0
 
-   
-        diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]] = [
-            self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
+        diff_preds = [
+            self._soft_parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
         ]
 
         # --------------------------------------------------------------
@@ -596,6 +693,7 @@ class CompositeLoss:
         vocab = logits.size(-1)
 
         # ---------------- run detection first ----------------------------------
+        iou_loss, match_rate, cls_loss = self._detection_loss(logits, gt_boxes)
 
         # ----------- conditional CE masking -----------------------------
         # After we know how many boxes were decoded (`self.last_pred_boxes`),
@@ -608,26 +706,18 @@ class CompositeLoss:
         detection_active = self.last_pred_boxes > 0
 
         if detection_active:
-            punct_ids = {tid for tid in [self._id_colon, self._id_comma, self._id_dot, self._id_lbr, self._id_rbr, self._id_space] if tid >=0}
-            B, S = masked_lbl.shape
-            for b in range(B):
-                row = masked_lbl[b]
-                inside = self._inside_mask(row)
-
-                # punctuation mask inside span
-                punct_mask = torch.zeros_like(row, dtype=torch.bool)
-                if punct_ids:
-                    for pid in punct_ids:
-                        punct_mask |= (row == pid)
-
-                ignore_mask = (inside & ~punct_mask)
-                masked_lbl[b][ignore_mask] = -100
+            # Vectorised masking: keep punctuation tokens inside <bbob> spans
+            inside_batch = torch.stack([self._inside_mask(masked_lbl[b]) for b in range(masked_lbl.size(0))], dim=0)
+            punct_mask_batch = torch.isin(masked_lbl, self._punct_ids.to(masked_lbl.device))
+            ignore_mask = inside_batch & ~punct_mask_batch
+            masked_lbl[ignore_mask] = -100
 
         # ---------------- compute LM loss -------------------------------
         lm_loss = F.cross_entropy(
             logits[..., :-1, :].contiguous().view(-1, vocab),
             masked_lbl[..., 1:].contiguous().view(-1),
             ignore_index=-100,
+            reduction="mean"
         )
         if not torch.isfinite(lm_loss):
             raise RuntimeError("NaN/Inf in LM loss")
@@ -656,8 +746,6 @@ class CompositeLoss:
         # so that f(0)=1, f(1)=M, and growth accelerates as x→1.
         det_scale = 1.0 + (self.det_scale_max - 1.0) * math.log10(1.0 + 9.0 * progress)
 
-        iou_loss, match_rate, cls_loss = self._detection_loss(logits, gt_boxes)
-
         # Make sure all loss components share the same dtype to avoid implicit
         # casts when mixed-precision / autocast is enabled (saves memory and
         # keeps gradient scaling straightforward).
@@ -675,7 +763,7 @@ class CompositeLoss:
         # – Late training:    det_scale→det_scale_max  ⇒ lm_loss fades while
         #                      detection gets amplified (λ_det·det_scale).
         # ------------------------------------------------------------------
-        lm_weight = 1.0  # LM kept at full weight; adjust here if you re-enable scaling.
+        lm_weight = 1.0 / (min(self.lambda_det * det_scale, 1))
         total_loss = lm_weight * lm_loss + (self.lambda_det * det_scale) * det_loss
 
         if self.logger and self.step % (self.log_interval * 4) == 0:
