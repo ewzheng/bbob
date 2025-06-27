@@ -44,7 +44,7 @@ class CompositeLoss:
         lambda_detection: float = 0.2,
         lambda_cls: float = 1.0,
         lambda_match_penalty: float = 0.5,
-        lm_target: float = 2.5,
+        lm_target: float = 2,
         smoothing_factor: float = 0.95,
         logger=None,
         log_interval: int = 100,
@@ -592,25 +592,52 @@ class CompositeLoss:
             gt_boxes = [(empty_box, empty_lbl) for _ in range(logits.size(0))]
         vocab = logits.size(-1)
 
+        # ---------------- run detection first ----------------------------------
+        # Maintain EMA of LM loss to avoid jitter
+        if self.lm_loss_ema is None:
+            self.lm_loss_ema = lm_labels.detach().item()
+        else:
+            self.lm_loss_ema = (
+                self.smoothing * self.lm_loss_ema
+                + (1.0 - self.smoothing) * lm_labels.detach().item()
+            )
+
+        # ----------- conditional CE masking -----------------------------
+        # After we know how many boxes were decoded (`self.last_pred_boxes`),
+        # decide whether to mask non-punctuation tokens.  This keeps full CE
+        # supervision during the bootstrap phase and switches to punctuation-
+        # only once detection begins to fire.
+
+        masked_lbl = lm_labels.clone()
+
+        detection_active = self.last_pred_boxes > 0
+
+        if detection_active:
+            punct_ids = {tid for tid in [self._id_colon, self._id_comma, self._id_dot, self._id_lbr, self._id_rbr, self._id_space] if tid >=0}
+            B, S = masked_lbl.shape
+            for b in range(B):
+                row = masked_lbl[b]
+                inside = self._inside_mask(row)
+
+                # punctuation mask inside span
+                punct_mask = torch.zeros_like(row, dtype=torch.bool)
+                if punct_ids:
+                    for pid in punct_ids:
+                        punct_mask |= (row == pid)
+
+                ignore_mask = (inside & ~punct_mask)
+                masked_lbl[b][ignore_mask] = -100
+
+        # ---------------- compute LM loss -------------------------------
         lm_loss = F.cross_entropy(
             logits[..., :-1, :].contiguous().view(-1, vocab),
-            lm_labels[..., 1:].contiguous().view(-1),
+            masked_lbl[..., 1:].contiguous().view(-1),
             ignore_index=-100,
         )
         if not torch.isfinite(lm_loss):
             raise RuntimeError("NaN/Inf in LM loss")
 
         # ---------------- adaptive detection weighting -----------------
-        # Maintain EMA of LM loss to avoid jitter
-        if self.lm_loss_ema is None:
-            self.lm_loss_ema = lm_loss.detach().item()
-        else:
-            self.lm_loss_ema = (
-                self.smoothing * self.lm_loss_ema
-                + (1.0 - self.smoothing) * lm_loss.detach().item()
-            )
-
-        # ---------------- logarithmic growth of detection scale ----------------
         # Let   ratio = lm_target / lm_loss_ema   ∈ (0, +∞)
         # Clamp to 0‥1 so that the scale saturates once the CE loss reaches
         # the target.  A logarithmic mapping makes the curve flatter early on
@@ -644,7 +671,7 @@ class CompositeLoss:
         # – Late training:    det_scale→det_scale_max  ⇒ lm_loss fades while
         #                      detection gets amplified (λ_det·det_scale).
         # ------------------------------------------------------------------
-        lm_weight = 1.0 / (self.lambda_det * det_scale)
+        lm_weight = 1.0  # LM kept at full weight; adjust here if you re-enable scaling.
         total_loss = lm_weight * lm_loss + (self.lambda_det * det_scale) * det_loss
 
         if self.logger and self.step % (self.log_interval * 4) == 0:
@@ -663,7 +690,7 @@ class CompositeLoss:
                 "match rate": round(match_rate, 4),
                 "match penalty": round(match_pen.item() if torch.is_tensor(match_pen) else match_pen, 6),
                 "det_scale": round(det_scale * self.lambda_det, 3),
-                "lm_scale": round(lm_weight, 3),
+                "lm_weight": round(lm_weight, 3),
             }
             if self._dangling_total > 0:
                 log_dict["dangling_coords"] = int(self._dangling_total)
