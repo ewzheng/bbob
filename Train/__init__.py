@@ -17,6 +17,7 @@ from .trainer import BBOBTrainer
 from .train_augments import apply_batch_augmentations, apply_weather_augmentations, apply_camera_augmentations
 
 from .loss_common import create_compute_loss_func
+from .loss_helpers import decode_pred_gt
 
 __all__ = [
     "jitter_bboxes",
@@ -34,5 +35,6 @@ __all__ = [
     "apply_weather_augmentations",
     "apply_camera_augmentations",
     "create_compute_loss_func", 
+    "decode_pred_gt",
     "BBOBTrainer"
 ]
