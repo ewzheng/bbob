@@ -26,7 +26,6 @@ class BBOBLoss:
         ids.append(tokenizer.convert_tokens_to_ids("."))
         self.digit_ids = torch.tensor(ids, dtype=torch.long)
         self.punct_ids = torch.tensor([tokenizer.convert_tokens_to_ids(TAG_OPEN), tokenizer.convert_tokens_to_ids(TAG_CLOSE), 
-                                       tokenizer.convert_tokens_to_ids(" "), 
                                        tokenizer.convert_tokens_to_ids(","), 
                                        tokenizer.convert_tokens_to_ids(":"),
                                        tokenizer.convert_tokens_to_ids("["),
