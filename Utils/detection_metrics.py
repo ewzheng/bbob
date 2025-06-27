@@ -10,7 +10,7 @@ boxes in the 0‥1 range, and finally run Hungarian matching to compute mean IoU
 and recall.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Sequence
 
 import torch
 
@@ -19,10 +19,7 @@ from Train.loss_helpers import (
     TAG_CLOSE,
     parse_detection_string,
     iou_matrix_xywh,
-    hungarian_match,
 )
-
-__all__ = ["detection_metrics_batch"]
 
 # -----------------------------------------------------------------------------
 # Helper – snippet extraction & conversion
@@ -45,15 +42,26 @@ def _extract_snippets(text: str) -> List[str]:
     return snippets
 
 
-def _snippets_to_boxes(snippets: List[str]) -> torch.Tensor:
-    """Convert list of ``<bbob>`` detection snippets to a (N,4) tensor."""
+def _split_snippet(det: str) -> Tuple[str, List[float]]:
+    """Return *(label, xywh)* for one <bbob> snippet (label lower-cased)."""
+    parts = det.split(":", 1)
+    label = parts[0].strip().lower() if parts else ""
+    xywh, _ = parse_detection_string(det)
+    return label, xywh
+
+
+def _snippets_to_boxes_labels(snippets: List[str]) -> Tuple[torch.Tensor, List[str]]:
+    """Convert list of snippets to tensor boxes and parallel label list."""
     coords: List[List[float]] = []
+    labels: List[str] = []
     for det in snippets:
-        xywh, _ = parse_detection_string(det)
+        lab, xywh = _split_snippet(det)
         coords.append(xywh)
+        labels.append(lab)
+
     if coords:
-        return torch.tensor(coords, dtype=torch.float32)
-    return torch.zeros((0, 4), dtype=torch.float32)
+        return torch.tensor(coords, dtype=torch.float32), labels
+    return torch.zeros((0, 4), dtype=torch.float32), labels
 
 
 # -----------------------------------------------------------------------------
@@ -97,6 +105,7 @@ def detection_metrics_batch(
     batch_size = pred_ids.size(0)
 
     total_gt = 0
+    total_pred = 0
     correct_matches = 0
     iou_sum = 0.0
     iou_count = 0
@@ -117,27 +126,56 @@ def detection_metrics_batch(
         pred_snips = _extract_snippets(pred_str)
         gt_snips = _extract_snippets(gt_str)
 
-        pred_boxes = _snippets_to_boxes(pred_snips).to(device)
-        gt_boxes = _snippets_to_boxes(gt_snips).to(device)
+        pred_boxes, pred_labels = _snippets_to_boxes_labels(pred_snips)
+        gt_boxes, gt_labels = _snippets_to_boxes_labels(gt_snips)
 
         total_gt += gt_boxes.size(0)
+        total_pred += pred_boxes.size(0)
         if pred_boxes.numel() == 0 or gt_boxes.numel() == 0:
             continue  # nothing to match in this sample
 
-        matches = hungarian_match(pred_boxes, gt_boxes)
-        if not matches:
-            continue
+        # -------- greedy label-aware matching --------------------------------
+        used_pred: set[int] = set()
+        used_gt: set[int] = set()
 
-        # Fetch IoUs for the matched pairs
-        ious = iou_matrix_xywh(pred_boxes, gt_boxes)
-        for pi, gi in matches:
-            iou = float(ious[pi, gi])
-            iou_sum += iou
-            iou_count += 1
-            if iou >= iou_thresh:
-                correct_matches += 1
+        if pred_boxes.numel() and gt_boxes.numel():
+            ious = iou_matrix_xywh(pred_boxes, gt_boxes)
+
+            # Build list of candidate pairs (pred, gt, iou) where labels match
+            candidates: List[Tuple[int, int, float]] = []
+            for pi, plab in enumerate(pred_labels):
+                for gi, glab in enumerate(gt_labels):
+                    if plab == glab:
+                        iou_val = float(ious[pi, gi])
+                        if iou_val > 0.0:
+                            candidates.append((pi, gi, iou_val))
+
+            # Sort by IoU descending for greedy assignment
+            candidates.sort(key=lambda x: x[2], reverse=True)
+
+            for pi, gi, iou_val in candidates:
+                if pi in used_pred or gi in used_gt:
+                    continue
+                used_pred.add(pi)
+                used_gt.add(gi)
+
+                iou_sum += iou_val
+                iou_count += 1
+                if iou_val >= iou_thresh:
+                    correct_matches += 1
 
     mean_iou = iou_sum / iou_count if iou_count else 0.0
     recall = correct_matches / total_gt if total_gt else 0.0
+    precision = correct_matches / total_pred if total_pred else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+    # Detection accuracy: TP / (TP + FP + FN)
+    denom = total_pred + total_gt - correct_matches
+    accuracy = correct_matches / denom if denom else 0.0
 
-    return {"mean_iou": mean_iou, "recall": recall} 
+    return {
+        "mean_iou": mean_iou,
+        "recall": recall,
+        "precision": precision,
+        "f1": f1,
+        "accuracy": accuracy,
+    } 
