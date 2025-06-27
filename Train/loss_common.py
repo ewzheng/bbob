@@ -636,7 +636,7 @@ class CompositeLoss:
             cls_loss = cls_loss.to(lm_loss.dtype)
 
         match_pen = self.lambda_match * (1.0 - match_rate)
-        det_loss = self.lambda_iou * iou_loss + match_pen
+        det_loss = self.lambda_iou * iou_loss + self.lambda_cls * cls_loss+ match_pen
 
         # ------------------------------------------------------------------
         # Dynamically balance LM ↔ detection:  lm_loss weight = 1/det_scale
@@ -644,8 +644,8 @@ class CompositeLoss:
         # – Late training:    det_scale→det_scale_max  ⇒ lm_loss fades while
         #                      detection gets amplified (λ_det·det_scale).
         # ------------------------------------------------------------------
-        lm_weight = 1.0 / det_scale
-        total_loss = lm_weight * lm_loss + self.lambda_cls * cls_loss + (self.lambda_det * det_scale) * det_loss
+        lm_weight = 1.0 / (self.lambda_det * det_scale)
+        total_loss = lm_weight * lm_loss + (self.lambda_det * det_scale) * det_loss
 
         if self.logger and self.step % (self.log_interval * 4) == 0:
             sample_pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
