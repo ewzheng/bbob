@@ -593,14 +593,6 @@ class CompositeLoss:
         vocab = logits.size(-1)
 
         # ---------------- run detection first ----------------------------------
-        # Maintain EMA of LM loss to avoid jitter
-        if self.lm_loss_ema is None:
-            self.lm_loss_ema = lm_labels.detach().item()
-        else:
-            self.lm_loss_ema = (
-                self.smoothing * self.lm_loss_ema
-                + (1.0 - self.smoothing) * lm_labels.detach().item()
-            )
 
         # ----------- conditional CE masking -----------------------------
         # After we know how many boxes were decoded (`self.last_pred_boxes`),
