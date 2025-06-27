@@ -1,5 +1,4 @@
 from .train_common import (
-    jitter_bboxes,
     normalize_coco_bboxes,
     letterbox_image,
     adjust_boxes_for_letterbox,
@@ -11,16 +10,15 @@ from .train_common import (
     clean_tokenizer_config,
 )
 
-from .train_collate import make_collate_fn
+from .train_collate import make_collate_fn, BBOBCollator
 from .trainer import BBOBTrainer    
 
 from .train_augments import apply_batch_augmentations, apply_weather_augmentations, apply_camera_augmentations
 
-from .loss_common import create_compute_loss_func
+from .loss_common import create_compute_loss_func, BBOBLoss
 from .loss_helpers import decode_pred_gt
 
 __all__ = [
-    "jitter_bboxes",
     "normalize_coco_bboxes",
     "letterbox_image",
     "adjust_boxes_for_letterbox",
@@ -31,10 +29,12 @@ __all__ = [
     "load_labels_from_yaml",
     "clean_tokenizer_config",
     "make_collate_fn",
+    "BBOBCollator",
     "apply_batch_augmentations",
     "apply_weather_augmentations",
     "apply_camera_augmentations",
-    "create_compute_loss_func", 
+    "create_compute_loss_func",
+    "BBOBLoss",
     "decode_pred_gt",
     "BBOBTrainer"
 ]
