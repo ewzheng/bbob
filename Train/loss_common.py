@@ -300,22 +300,36 @@ class CompositeLoss:
     def _detection_loss(self, logits: torch.Tensor, gt_boxes):
         """Compute IoU loss & match-rate in a batched, GPU-friendly way."""
 
+        # ------------------------------------------------------------------
+        # Full-vocabulary straight-through Gumbel-Softmax
+        # ------------------------------------------------------------------
+        # We replace the hard arg-max with an ST Gumbel sample so that *all*
+        # vocabulary logits inside <bbob> spans receive gradients.  The forward
+        # pass still feeds discrete token IDs to the downstream masking and
+        # coordinate-parsing logic, therefore Hungarian matching & IoU code
+        # remain unchanged.
+
         B = logits.size(0)
-        token_ids = logits.argmax(dim=-1)
+
+        # Anneal the temperature with the same schedule used by _st_expect
+        prog = min(1.0, self.step / max(1, self.tau_steps))
+        tau  = max(self.tau_end, self.tau_start * (1 - prog))
+
+        # (B,S,V) → soft probabilities (back-prop) + hard one-hot (forward)
+        y_soft = F.gumbel_softmax(logits.clamp(-10, 10), tau=tau, hard=False, dim=-1)
+        idx    = y_soft.argmax(-1, keepdim=True)                 # (B,S,1)
+        y_hard = torch.zeros_like(y_soft).scatter_(-1, idx, 1.0) # hard sample
+        logits = y_hard - y_soft.detach() + y_soft               # ST trick
+
+        token_ids = idx.squeeze(-1)                              # (B,S) hard IDs
 
         # Reset counter for this step
         self.last_pred_boxes = 0
 
-        # ------------------------------------------------------------------
-        # Parsing coordinates does not require gradients; wrapping the entire
-        # comprehension in `torch.no_grad()` cuts activation memory almost
-        # in half during the forward pass, especially when hundreds of
-        # objects are emitted.
-        # ------------------------------------------------------------------
-        with torch.no_grad():
-            diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]] = [
-                self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
-            ]
+   
+        diff_preds: List[tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[list[int]]]] = [
+            self._parse_coords_sample(token_ids[b], logits[b]) for b in range(B)
+        ]
 
         # --------------------------------------------------------------
         # Fast path – use torch_linear_assignment in batch on GPU
@@ -601,9 +615,8 @@ class CompositeLoss:
             #   • mask digits (handled by CIoU)
             #   • mask class words (class CE)
             digit_inside  = inside & digit_mask[b]
-            class_mask    = inside & ~digit_mask[b] & ~punct_mask
 
-            ignore_mask_row = digit_inside | class_mask
+            ignore_mask_row = digit_inside
             masked_lbl[b][ignore_mask_row] = -100
 
         lm_loss = F.cross_entropy(
