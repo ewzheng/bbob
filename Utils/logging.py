@@ -90,14 +90,14 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                     except Exception as e:
                         print(f"Error calculating prediction-target similarity: {e}")                        
             
-            # Return only predictions and labels (much smaller than full logits)
-            return pred_ids, labels
+            # Return only predictions; HF evaluation API will pass labels separately
+            return pred_ids
             
         except Exception as e:
             print(f"Error in preprocess_logits_for_metrics: {e}")
             # Fallback: just return argmax predictions
             pred_ids = torch.argmax(logits, dim=-1)
-            return pred_ids, labels
+            return pred_ids
 
     def compute_metrics_impl(eval_pred):
         """
