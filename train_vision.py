@@ -89,7 +89,7 @@ def train(
         save_total_limit=3,
         save_safetensors=True,
         load_best_model_at_end=True,
-        metric_for_best_model="loss",
+        metric_for_best_model="accuracy",
         greater_is_better=False,
         lr_scheduler_type="cosine_with_restarts",
         warmup_ratio=warmup_ratio,

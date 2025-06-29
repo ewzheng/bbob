@@ -148,9 +148,10 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         if do_detection_metrics:
             det_metrics: dict[str, float] = {}
             try:
+                # Ensure int64 dtype to prevent "out of range integral type conversion" errors
                 det_metrics = detection_metrics_batch(
-                    torch.as_tensor(predictions),
-                    torch.as_tensor(labels),
+                    torch.as_tensor(predictions, dtype=torch.long),
+                    torch.as_tensor(labels, dtype=torch.long),
                     tokenizer,
                 )
             except Exception as e:

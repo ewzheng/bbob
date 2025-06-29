@@ -320,6 +320,53 @@ class BBOB(PreTrainedModel):
 
         return lm_outputs
 
+    # ------------------------------------------------------------------
+    # Generation helper -------------------------------------------------
+    # ------------------------------------------------------------------
+
+    def generate(
+        self,
+        *,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        images=None,
+        **generate_kwargs,
+    ):
+        """Wrapper around ``self.language_model.generate`` that supports images.
+
+        Parameters
+        ----------
+        input_ids : LongTensor (B, T)
+            Prompt token IDs (instruction + placeholders).  Mandatory.
+        attention_mask : LongTensor (B, T) | None
+            Standard HF attention mask for *input_ids*.
+        images : list|Tensor|None
+            Raw image(s) or pre-normalised tensor consumed by the vision tower.
+        **generate_kwargs : Any
+            Additional keyword arguments forwarded to ``generate``.
+        """
+
+        if input_ids is None:
+            raise ValueError("generate requires `input_ids` argument")
+
+        # 1) Prepare visual embeddings (may be None)
+        visual_embeds = self._prepare_visual_inputs(images)
+
+        # 2) Text embeddings from the prompt IDs
+        text_embeds = self._embed_tokens(input_ids)
+
+        # 3) Merge and obtain combined attention mask
+        inputs_embeds, combined_mask = self._merge_multimodal_inputs(
+            visual_embeds, text_embeds, attention_mask
+        )
+
+        # 4) Call base language model's generate; we provide *inputs_embeds*
+        #    so tokens are not re-embedded inside the LM.
+        return self.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=combined_mask,
+            **generate_kwargs,
+        )
 
     def save_pretrained(self, output_dir: str, save_full_model: bool = True, **kwargs):
         """Save the complete model for end-to-end training.

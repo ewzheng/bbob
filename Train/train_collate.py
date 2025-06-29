@@ -262,7 +262,7 @@ class BBOBCollator:  # noqa: N801
                 # EVAL MODE or boxes absent – use stored token list as is
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
 
-            # optional shuffle of <bbob> fragments
+            
             tgt_ids = self._shuffle_fragments(tgt_ids)
 
             #------ now same instr truncation logic uses tgt_ids variable ----
