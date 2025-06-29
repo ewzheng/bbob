@@ -77,7 +77,7 @@ class BBOBLoss:
                 tgt_ids  = labels[0].detach().cpu()
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tok)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
-                self.logger.info({"loss": loss.item(), "aux_loss": aux_loss.item()})
+                self.logger.info({"loss": loss.item(), "aux_loss": (self.aux_loss_weight * aux_loss).item()})
 
         self.step += 1
         return loss + self.aux_loss_weight * aux_loss
