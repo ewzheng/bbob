@@ -18,7 +18,6 @@ import random
 import torch
 import torch.nn.functional as F
 import numpy as np
-import torch.utils.data as tud
 
 
 def _seed_worker(worker_id: int):
@@ -131,7 +130,7 @@ class BBOBTrainer(Trainer):
 
     def _tf_prob(self, step: int) -> float:
         """Return teacher-forcing probability at *global* optimiser step."""
-        t = min(step, self._tf_total) / self._tf_total
+        t = min(step, 0.8*self._tf_total) / 0.8*self._tf_total
         if self._tf_sched == "linear":
             return self._tf_start_p + t * (self._tf_end_p - self._tf_start_p)
         if self._tf_sched == "cosine":
@@ -146,13 +145,18 @@ class BBOBTrainer(Trainer):
 
     def prepare_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
         inputs = super().prepare_inputs(inputs)
+        # ------------------------------------------------------------
+        # Scheduled sampling (teacher forcing) – per-token Bernoulli
+        # ------------------------------------------------------------
         if self.model.training and self.state.global_step < self._tf_total:
-            p = self._tf_prob(self.state.global_step)
-            if torch.rand(1, device=inputs["input_ids"].device).item() < p:
-                if "input_ids" in inputs and "labels" in inputs:
+            if "input_ids" in inputs and "labels" in inputs:
+                p = self._tf_prob(self.state.global_step)
+                if p > 0.0:
                     ids = inputs["input_ids"].clone()
                     lbl = inputs["labels"]
-                    mask = lbl != -100
+                    # create Bernoulli mask only where a ground-truth label exists
+                    bern = torch.rand_like(lbl, dtype=torch.float, device=lbl.device) < p
+                    mask = (lbl != -100) & bern
                     ids[mask] = lbl[mask]
                     inputs["input_ids"] = ids
         return inputs 

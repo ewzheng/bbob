@@ -236,7 +236,6 @@ class BBOBCollator:  # noqa: N801
         pixel_values = torch.stack(processed, 0)
 
         merged_input_ids, merged_labels = [], []
-        boxes_batch, labels_batch = [], []
 
         for item in batch:
             if "input_ids" in item:
@@ -277,6 +276,20 @@ class BBOBCollator:  # noqa: N801
                 remaining = max_txt_len - instr_ids.size(0)
                 if tgt_ids.size(0) > remaining:
                     tgt_ids = tgt_ids[:remaining]
+
+                # --- ensure a single EOS token terminates the target sequence ---
+                eos_id = getattr(tokenizer, "eos_token_id", None)
+                if eos_id is not None:
+                    if tgt_ids.numel() == 0:
+                        # create sequence containing only <eos>
+                        tgt_ids = torch.tensor([eos_id], dtype=torch.long)
+                    elif tgt_ids[-1] != eos_id:
+                        # append or replace last token with <eos> depending on space
+                        if tgt_ids.size(0) >= tokenizer.model_max_length - instr_ids.size(0):
+                            # no room left – overwrite last token
+                            tgt_ids[-1] = eos_id
+                        else:
+                            tgt_ids = torch.cat([tgt_ids, torch.tensor([eos_id], dtype=torch.long)])
 
             placeholder_ids = torch.full((tgt_ids.size(0),), placeholder_id, dtype=torch.long)
             input_ids = torch.cat([instr_ids, placeholder_ids], dim=0)
