@@ -51,6 +51,8 @@ class BBOBTrainer(Trainer):
         is used.
     guidance_strength : float
         Strength of guided sampling.
+    tf_ramp_ratio : float
+        Ramp ratio for teacher-forcing schedule.
     All other positional / keyword arguments are forwarded to
     ``transformers.Trainer``.
     """
@@ -66,6 +68,7 @@ class BBOBTrainer(Trainer):
         total_tf_steps: int = 0,
         total_gd_steps: int = 0,
         tf_schedule: str = "cosine",
+        tf_ramp_ratio: float = 0.8,
         compute_loss_func: Optional[Any] = None,
         guidance_strength: float = 1.5,
         **kwargs: Any,
@@ -91,6 +94,9 @@ class BBOBTrainer(Trainer):
         self._tf_end_p   = float(tf_end_p)
         self._tf_total   = int(total_tf_steps) if total_tf_steps > 0 else 1
         self._tf_sched   = tf_schedule
+
+        # store ramp ratio (fraction of steps used for linear/other decay)
+        self._tf_ramp = max(1e-6, float(tf_ramp_ratio))
 
         # guided sampling uses the same warm-up length as teacher-forcing
         self._guidance_steps = total_gd_steps
@@ -130,7 +136,11 @@ class BBOBTrainer(Trainer):
 
     def _tf_prob(self, step: int) -> float:
         """Return teacher-forcing probability at *global* optimiser step."""
-        t = min(step, 0.8*self._tf_total) / 0.8*self._tf_total
+        # Normalised progress (0‥1) with 80 % ramp window — parentheses are
+        # critical: without them division precedes multiplication leading to
+        # wildly out-of-range values.
+        denom = self._tf_ramp * self._tf_total
+        t = min(step, denom) / denom
         if self._tf_sched == "linear":
             return self._tf_start_p + t * (self._tf_end_p - self._tf_start_p)
         if self._tf_sched == "cosine":

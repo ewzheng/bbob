@@ -123,10 +123,11 @@ def train(
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
         tf_start_p=1.0,
-        tf_end_p=0.35,
+        tf_end_p=0.15,
         total_tf_steps=total_tf_steps,
         total_gd_steps=total_gd_steps,
-        tf_schedule="linear",
+        tf_schedule="cosine",
+        tf_ramp_ratio=0.75,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,
