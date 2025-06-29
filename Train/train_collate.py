@@ -277,6 +277,20 @@ class BBOBCollator:  # noqa: N801
                 if tgt_ids.size(0) > remaining:
                     tgt_ids = tgt_ids[:remaining]
 
+                # --- ensure a single BOS token starts the instruction sequence ---
+                bos_id = getattr(tokenizer, "bos_token_id", None)
+                if bos_id is not None:
+                    if instr_ids.numel() == 0:
+                        # create sequence containing only <bos>
+                        instr_ids = torch.tensor([bos_id], dtype=torch.long)
+                    elif instr_ids[0] != bos_id:
+                        # prepend or replace first token with <bos> depending on space
+                        if instr_ids.size(0) >= tokenizer.model_max_length - tgt_ids.size(0):
+                            # no room left – overwrite first token
+                            instr_ids[0] = bos_id
+                        else:
+                            instr_ids = torch.cat([torch.tensor([bos_id], dtype=torch.long), instr_ids])
+
                 # --- ensure a single EOS token terminates the target sequence ---
                 eos_id = getattr(tokenizer, "eos_token_id", None)
                 if eos_id is not None:
