@@ -360,12 +360,14 @@ class BBOBCollator:  # noqa: N801
         return batch_out
 
 
-def make_collate_fn(pad_token_id: int, tokenizer, **kwargs):
+def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
     """Create a collator – all teacher-forcing args are ignored for back-compat."""
 
     return BBOBCollator(
         pad_token_id,
         tokenizer,
+        image_processor,
+        on_the_fly=kwargs.get("on_the_fly", False),
         logger=kwargs.get("logger"),
         log_interval=kwargs.get("log_interval", 0),
     ) 

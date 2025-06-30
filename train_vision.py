@@ -108,7 +108,7 @@ def train(
     logger.info("Preparing dataset …")
 
     # Collator always hides targets; TF decision moved to BBOBTrainer
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, on_the_fly=False)
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer=tokenizer, image_processor=model.get_image_processor(), on_the_fly=False)
     # Composite loss callable
     compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size * grad_acc_steps, 1))  
 
