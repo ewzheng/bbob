@@ -113,12 +113,12 @@ def detection_metrics_batch(
     # Iterate over samples; decoding on CPU for efficiency
     for b in range(batch_size):
         # ---------- decode prediction & GT strings ---------------------------
-        pred_str = [int(t) for t in pred_ids[b].tolist() if t != ignore_index]
+        pred_filtered = [t for t in pred_ids[b].tolist() if t != ignore_index]
         pred_str = tokenizer.decode(
-            pred_ids[b].tolist(), skip_special_tokens=False, clean_up_tokenization_spaces=True
+            pred_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
         )
         # Filter ignore_index before decoding GT
-        gt_filtered = [int(t) for t in gt_ids[b].tolist() if t != ignore_index]
+        gt_filtered = [t for t in gt_ids[b].tolist() if t != ignore_index]
         gt_str = tokenizer.decode(
             gt_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
         )

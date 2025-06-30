@@ -30,6 +30,13 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
     pred_target_sim_sum   = 0.0  # summed cosine similarities
     pred_target_sim_count = 0     # number of token positions contributing
 
+    # Detection-metric accumulators (filled only when do_detection_metrics=True)
+    det_iou_vals: list[float]       = []
+    det_recall_vals: list[float]    = []
+    det_prec_vals: list[float]      = []
+    det_f1_vals: list[float]        = []
+    det_acc_vals: list[float]       = []
+
     def preprocess_logits_for_metrics_impl(logits, labels):
         """
         Memory-efficient preprocessing to avoid OOM during evaluation.
@@ -38,6 +45,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
         nonlocal pred_target_sim_sum, pred_target_sim_count
+        nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
@@ -87,6 +95,23 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
 
                             pred_target_sim_sum   += cos_sim.sum().item()
                             pred_target_sim_count += cos_sim.numel()
+
+                            # ----------------- detection metrics ----------------------
+                            if do_detection_metrics:
+                                try:
+                                    det_metrics = detection_metrics_batch(
+                                        pred_ids_valid = pred_ids.masked_fill(~mask, -100)
+                                        torch.as_tensor(pred_ids_valid, dtype=torch.long),
+                                        torch.as_tensor(labels,   dtype=torch.long),
+                                        tokenizer,
+                                    )
+                                    det_iou_vals.append(det_metrics.get("mean_iou", 0.0))
+                                    det_recall_vals.append(det_metrics.get("recall", 0.0))
+                                    det_prec_vals.append(det_metrics.get("precision", 0.0))
+                                    det_f1_vals.append(det_metrics.get("f1", 0.0))
+                                    det_acc_vals.append(det_metrics.get("accuracy", 0.0))
+                                except Exception as e:
+                                    print(f"Warning: per-batch detection metric failed – {e}")
                     except Exception as e:
                         print(f"Error calculating prediction-target similarity: {e}")                        
             
@@ -107,6 +132,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
         nonlocal pred_target_sim_sum, pred_target_sim_count
+        nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
@@ -142,24 +168,28 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             "prediction_target_similarity": mean_prediction_target_similarity,
         }
 
-        # -------------------------------------------------------
-        # Detection metrics (Hungarian IoU / recall)
-        # -------------------------------------------------------
+        # -------------------- aggregate detection metrics --------------------
         if do_detection_metrics:
-            det_metrics: dict[str, float] = {}
-            try:
-                # Ensure int64 dtype to prevent "out of range integral type conversion" errors
-                det_metrics = detection_metrics_batch(
-                    torch.as_tensor(predictions, dtype=torch.long),
-                    torch.as_tensor(labels, dtype=torch.long),
-                    tokenizer,
-                )
-            except Exception as e:
-                det_metrics = {"accuracy": 0.0}
-                print(f"Warning: detection metric computation failed – {e}")
+            mean_iou     = sum(det_iou_vals)     / len(det_iou_vals)     if det_iou_vals else 0.0
+            mean_recall  = sum(det_recall_vals)  / len(det_recall_vals)  if det_recall_vals else 0.0
+            mean_prec    = sum(det_prec_vals)    / len(det_prec_vals)    if det_prec_vals else 0.0
+            mean_f1      = sum(det_f1_vals)      / len(det_f1_vals)      if det_f1_vals else 0.0
+            mean_acc     = sum(det_acc_vals)     / len(det_acc_vals)     if det_acc_vals else 0.0
 
-            # merge detection metrics (if any)
-            metrics_out.update(det_metrics)
+            metrics_out.update({
+                "mean_iou": mean_iou,
+                "recall": mean_recall,
+                "precision": mean_prec,
+                "f1": mean_f1,
+                "accuracy": mean_acc,
+            })
+
+            # Reset detection accumulators AFTER metrics have been computed
+            det_iou_vals.clear()
+            det_recall_vals.clear()
+            det_prec_vals.clear()
+            det_f1_vals.clear()
+            det_acc_vals.clear()
 
         return metrics_out
     
