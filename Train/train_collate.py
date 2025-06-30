@@ -56,18 +56,22 @@ class BBOBCollator:  # noqa: N801
         self,
         pad_token_id: int,
         tokenizer,
+        image_processor,
         *,
         logger=None,
         log_interval=128,
+        on_the_fly=False,
         **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
         self.pad_id = pad_token_id
         self.tokenizer = tokenizer
+        self.processor = image_processor
         self.logger = logger
 
         # teacher-forcing parameters removed – keep placeholders for API compat
         self.log_interval = log_interval
         self.is_eval = False
+        self.on_the_fly = on_the_fly
 
         # Pre-compute placeholder id differing from pad id.
         if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != pad_token_id:
@@ -87,8 +91,8 @@ class BBOBCollator:  # noqa: N801
         return self._make_batch(
             batch,
             pad_token_id=self.pad_id,
-            tokenizer=self.tokenizer,
             placeholder_id=self.placeholder_id,
+            on_the_fly=self.on_the_fly,
         )
 
     # BBOBTrainer toggles these; keep as no-ops
@@ -184,7 +188,7 @@ class BBOBCollator:  # noqa: N801
         return torch.tensor(new_seq, dtype=torch.long)
 
 
-    def _make_batch(self, batch, *, pad_token_id: int, tokenizer, placeholder_id: int):
+    def _make_batch(self, batch, *, pad_token_id: int, placeholder_id: int, on_the_fly=False):
         """Core functional routine"""
 
         # 1) locate image field
@@ -197,43 +201,69 @@ class BBOBCollator:  # noqa: N801
             raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
         device = "cpu"
+        if on_the_fly:
+            processed = []
+            for img in (item[img_key] for item in batch):
+                try:
+                    pv = self.processor(img, return_tensors="pt")["pixel_values"][0]  # (3,256,256) float32 0-1
+                    processed.append(pv)
+                    continue  # success – skip manual fallback
+                except Exception:
+                    # Fallback to legacy manual branch for rare failures
+                    pass
 
-        processed = []
-        for img in (item[img_key] for item in batch):
-            if isinstance(img, torch.Tensor):
-                t = img.to(dtype=torch.float32).div_(255.0)
-            elif isinstance(img, np.ndarray):
-                t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
-            elif isinstance(img, list):
-                t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32).div_(255.0)
-            else:
-                t = pil_to_tensor(img).float().div_(255.0).to(device)
+                # ---------------- manual fallback -------------------
+                if isinstance(img, torch.Tensor):
+                    t = img.to(dtype=torch.float32).div_(255.0)
+                elif isinstance(img, np.ndarray):
+                    t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
+                elif isinstance(img, list):
+                    t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32).div_(255.0)
+                else:
+                    t = pil_to_tensor(img).float().div_(255.0).to(device)
 
-            if t.dim() == 2:
-                t = t.unsqueeze(0).expand(3, -1, -1)
-            elif t.dim() == 3 and t.shape[0] not in (1, 3):
-                t = t.permute(2, 0, 1)
-                if t.shape[0] == 1:
-                    t = t.expand(3, -1, -1)
-            elif t.dim() != 3:
-                raise RuntimeError(f"Unsupported image tensor dim {t.dim()}")
+                # channel / shape normalisation (same as old code)
+                if t.dim() == 2:
+                    t = t.unsqueeze(0).expand(3, -1, -1)
+                elif t.dim() == 3 and t.shape[0] not in (1, 3):
+                    t = t.permute(2, 0, 1)
+                    if t.shape[0] == 1:
+                        t = t.expand(3, -1, -1)
+                elif t.dim() != 3:
+                    raise RuntimeError(f"Unsupported image tensor dim {t.dim()}")
 
-            _, H, W = t.shape
-            if (H, W) != TARGET_SIZE:
-                scale = min(TARGET_SIZE[1] / H, TARGET_SIZE[0] / W)
-                nh = max(1, int(H * scale))
-                nw = max(1, int(W * scale))
-                t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
+                _, H, W = t.shape
+                if (H, W) != TARGET_SIZE:
+                    scale = min(TARGET_SIZE[1] / H, TARGET_SIZE[0] / W)
+                    nh = max(1, int(H * scale))
+                    nw = max(1, int(W * scale))
+                    t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
 
-                canvas = 0.5 * torch.ones(3, *TARGET_SIZE)
-                dh = (TARGET_SIZE[1] - nh) // 2
-                dw = (TARGET_SIZE[0] - nw) // 2
-                canvas[:, dh : dh + nh, dw : dw + nw] = t
-                t = canvas
+                    canvas = 0.5 * torch.ones(3, *TARGET_SIZE)
+                    dh = (TARGET_SIZE[1] - nh) // 2
+                    dw = (TARGET_SIZE[0] - nw) // 2
+                    canvas[:, dh : dh + nh, dw : dw + nw] = t
+                    t = canvas
 
-            processed.append(t)
+                processed.append(t)
 
-        pixel_values = torch.stack(processed, 0)
+            pixel_values = torch.stack(processed, 0)
+        else:
+            # -------------------------------------------------------------
+            # Fast-path: images were pre-processed upstream (e.g. by
+            # Train.train_common.preprocess_batch) and are stored under
+            # `images` / `pixel_values` in CHW format.  We simply stack and
+            # normalise.
+            # -------------------------------------------------------------
+            img_tensors = [torch.as_tensor(item[img_key]) for item in batch]
+
+            # Ensure float32 + 0‥1 range once for the whole list (cheap).
+            ref = img_tensors[0]
+            needs_cast = ref.dtype != torch.float32 or ref.max() > 1.1
+            if needs_cast:
+                img_tensors = [t.to(dtype=torch.float32).div_(255.0) for t in img_tensors]
+
+            pixel_values = torch.stack(img_tensors, 0)
 
         merged_input_ids, merged_labels = [], []
 
@@ -242,8 +272,8 @@ class BBOBCollator:  # noqa: N801
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
             else:
                 text = item.get("text", "")
-                max_txt_len = tokenizer.model_max_length - VIS_TOKENS
-                tokens = tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
+                max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
+                tokens = self.tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
                 instr_ids = tokens["input_ids"].squeeze(0)
 
             # Decide ground-truth detection text ----------------------------------
@@ -268,7 +298,7 @@ class BBOBCollator:  # noqa: N801
             #------ now same instr truncation logic uses tgt_ids variable ----
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
 
-            max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+            max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
             if instr_ids.size(0) > max_txt_len:
                 instr_ids = instr_ids[-max_txt_len:]
                 tgt_ids = torch.tensor([], dtype=torch.long)
@@ -278,28 +308,28 @@ class BBOBCollator:  # noqa: N801
                     tgt_ids = tgt_ids[:remaining]
 
                 # --- ensure a single BOS token starts the instruction sequence ---
-                bos_id = getattr(tokenizer, "bos_token_id", None)
+                bos_id = getattr(self.tokenizer, "bos_token_id", None)
                 if bos_id is not None:
                     if instr_ids.numel() == 0:
                         # create sequence containing only <bos>
                         instr_ids = torch.tensor([bos_id], dtype=torch.long)
                     elif instr_ids[0] != bos_id:
                         # prepend or replace first token with <bos> depending on space
-                        if instr_ids.size(0) >= tokenizer.model_max_length - tgt_ids.size(0):
+                        if instr_ids.size(0) >= self.tokenizer.model_max_length - tgt_ids.size(0):
                             # no room left – overwrite first token
                             instr_ids[0] = bos_id
                         else:
                             instr_ids = torch.cat([torch.tensor([bos_id], dtype=torch.long), instr_ids])
 
                 # --- ensure a single EOS token terminates the target sequence ---
-                eos_id = getattr(tokenizer, "eos_token_id", None)
+                eos_id = getattr(self.tokenizer, "eos_token_id", None)
                 if eos_id is not None:
                     if tgt_ids.numel() == 0:
                         # create sequence containing only <eos>
                         tgt_ids = torch.tensor([eos_id], dtype=torch.long)
                     elif tgt_ids[-1] != eos_id:
                         # append or replace last token with <eos> depending on space
-                        if tgt_ids.size(0) >= tokenizer.model_max_length - instr_ids.size(0):
+                        if tgt_ids.size(0) >= self.tokenizer.model_max_length - instr_ids.size(0):
                             # no room left – overwrite last token
                             tgt_ids[-1] = eos_id
                         else:

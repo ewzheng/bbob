@@ -110,7 +110,7 @@ def train(
 
     logger.info(model_size_breakdown(model))
     # custom collator that injects labels based on *target_text*
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer)
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer, on_the_fly=True)
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics

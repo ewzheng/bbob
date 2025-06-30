@@ -110,19 +110,27 @@ def detection_metrics_batch(
     iou_sum = 0.0
     iou_count = 0
 
-    # Iterate over samples; decoding on CPU for efficiency
-    for b in range(batch_size):
-        # ---------- decode prediction & GT strings ---------------------------
-        pred_filtered = [t for t in pred_ids[b].tolist() if t != ignore_index]
-        pred_str = tokenizer.decode(
-            pred_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
-        )
-        # Filter ignore_index before decoding GT
-        gt_filtered = [t for t in gt_ids[b].tolist() if t != ignore_index]
-        gt_str = tokenizer.decode(
-            gt_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
-        )
+    # ------------------------------------------------------------------
+    # 1. Batch-decode all samples in one tokenizer call (much faster than
+    #    decoding each sequence separately, especially for large batches).
+    # ------------------------------------------------------------------
+    pred_filtered: List[List[int]] = [
+        [int(t) for t in row.tolist() if t != ignore_index] for row in pred_ids
+    ]
+    gt_filtered: List[List[int]] = [
+        [int(t) for t in row.tolist() if t != ignore_index] for row in gt_ids
+    ]
 
+    # `batch_decode` accepts empty lists fine and returns "" for them.
+    pred_strs: List[str] = tokenizer.batch_decode(
+        pred_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
+    )
+    gt_strs: List[str] = tokenizer.batch_decode(
+        gt_filtered,   skip_special_tokens=False, clean_up_tokenization_spaces=True
+    )
+
+    # Iterate over samples; heavy work is now string-processing, not decoding
+    for pred_str, gt_str in zip(pred_strs, gt_strs):
         # ---------- extract detection snippets ------------------------------
         pred_snips = _extract_snippets(pred_str)
         gt_snips = _extract_snippets(gt_str)
