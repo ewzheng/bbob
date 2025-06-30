@@ -100,7 +100,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                             if do_detection_metrics:
                                 try:
                                     det_metrics = detection_metrics_batch(
-                                        torch.as_tensor(pred_ids, dtype=torch.long),
+                                        torch.as_tensor(pred_ids.masked_fill(~mask, -100), dtype=torch.long),
                                         torch.as_tensor(labels,   dtype=torch.long),
                                         tokenizer,
                                     )
