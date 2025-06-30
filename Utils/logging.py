@@ -155,6 +155,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                     tokenizer,
                 )
             except Exception as e:
+                det_metrics = {"accuracy": 0.0}
                 print(f"Warning: detection metric computation failed – {e}")
 
             # merge detection metrics (if any)
