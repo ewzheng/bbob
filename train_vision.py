@@ -33,7 +33,9 @@ def train(
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
     total_tf_ratio: int = 1,
-    total_gd_ratio: int = 0.1
+    total_gd_ratio: int = 0.1,
+    min_tf_p: float = 0.15,
+    max_tf_p: float = 1.0
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
@@ -114,8 +116,8 @@ def train(
         eval_dataset=val_dataset,
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
-        tf_start_p=1.0,
-        tf_end_p=0.15,
+        tf_start_p=max_tf_p,
+        tf_end_p=min_tf_p,
         total_tf_steps=total_tf_steps,
         total_gd_steps=total_gd_steps,
         tf_schedule="linear",
@@ -144,6 +146,8 @@ def main():
     parser.add_argument("--num_workers", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
+    parser.add_argument("--min_tf_p", type=float, default=0.15)
+    parser.add_argument("--max_tf_p", type=float, default=1.0)
     parser.add_argument("--total_tf_ratio", type=int, default=1)
     parser.add_argument("--total_gd_ratio", type=int, default=-1)
     
@@ -166,17 +170,23 @@ def main():
     logger.info(f"Loading model from {args.model}")
     model = build_BBOB(args.model, args.bnb_config, load=True)
 
-    # --------------------------------------------------------------
-    # Ensure the tokenizer knows the special <|bbob|> tags *before*
-    # we encode the dataset so that they are stored as single tokens.
-    # --------------------------------------------------------------
-
+    # Get tokenizer and ensure it has a defined pad token (defaults to EOS).
     tokenizer = model.get_tokenizer()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    special = {"additional_special_tokens": ["<|bbob|>", "</|bbob|>"]}
-    num_added = tokenizer.add_special_tokens(special)
+    # --------------------------------------------------------------
+    # Always add the opening/closing <|bbob|> tags. Optionally add
+    # 1 001 numeric-bin tokens ("0.000" … "1.000") when the user
+    # passes --bin=True.  These are declared as *additional* special
+    # tokens so the tokenizer will treat each string as an atomic
+    # token, never split by the underlying BPE.
+    # --------------------------------------------------------------
+
+    extra_tokens = ["<|bbob|>", "</|bbob|>"] + [f"{i/1000:.3f}" for i in range(1001)]  # 0.000…1.000
+
+    num_added = tokenizer.add_special_tokens({"additional_special_tokens": extra_tokens})
+
     if num_added > 0:
         logger.info(f"Added {num_added} special tokens to tokenizer – resizing model embeddings")
         try:
@@ -210,7 +220,9 @@ def main():
         num_workers=num_workers,
         warmup_ratio=args.warmup_ratio,
         total_tf_ratio=args.total_tf_ratio,
-        total_gd_ratio=args.total_gd_ratio
+        total_gd_ratio=args.total_gd_ratio,
+        min_tf_p=args.min_tf_p,
+        max_tf_p=args.max_tf_p
     )
 
     logger.info("Vision training complete. Model saved.")

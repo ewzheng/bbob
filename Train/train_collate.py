@@ -285,7 +285,13 @@ class BBOBCollator:  # noqa: N801
                 # rebuild textual fragments so tokens match jittered coords
                 label_strs = item.get("target_label_strs", ["obj"] * bx.size(0))[: bx.size(0)]
 
-                frags = [f"<|bbob|>{lab}: [{', '.join(f'{v:.3f}' for v in bb)}]</|bbob|>" for bb, lab in zip(bx.tolist(), label_strs)]
+
+                fmt_coord = lambda v: f"{max(0.0, min(1.0, v)):.3f}"
+
+                frags = [
+                    f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
+                    for bb, lab in zip(bx.tolist(), label_strs)
+                ]
                 det_text = " ".join(frags)
                 tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
             else:
@@ -361,7 +367,8 @@ class BBOBCollator:  # noqa: N801
 
 
 def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
-    """Create a collator – all teacher-forcing args are ignored for back-compat."""
+    """Create a collator.  Pass-through extra kwargs such as
+    `bin_numeric_tokens` for optional features."""
 
     return BBOBCollator(
         pad_token_id,

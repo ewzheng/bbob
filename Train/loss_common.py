@@ -11,7 +11,7 @@ class BBOBLoss:
     guided-sampling helper continues to work unchanged.
     """
 
-    def __init__(self, tokenizer, *, ignore_index: int = -100, logger=None, log_interval: int = 100, aux_loss_weight: float = 0.5, **kwargs):
+    def __init__(self, tokenizer, *, ignore_index: int = -100, logger=None, log_interval: int = 100, aux_loss_weight: float = 0.15, **kwargs):
         self.tok = tokenizer
         self.ignore_index = ignore_index
         self.logger = logger
