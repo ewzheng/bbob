@@ -19,14 +19,6 @@ from Model import build_BBOB
 from Train import load_and_prepare_dataset, clean_tokenizer_config, make_collate_fn, create_compute_loss_func, BBOBTrainer
 
 
-def _seed_worker(worker_id):
-    # Ensure each DataLoader worker gets a unique NumPy/Python seed derived
-    # from its Torch seed so box jitter and other NumPy-based augmentations
-    # differ across workers but remain deterministic w.r.t the global seed.
-    np.random.seed(torch.initial_seed() % 2**32)
-    random.seed(torch.initial_seed() % 2**32)
-
-
 def train(
     model,
     train_dataset,
@@ -126,7 +118,7 @@ def train(
         tf_end_p=0.15,
         total_tf_steps=total_tf_steps,
         total_gd_steps=total_gd_steps,
-        tf_schedule="cosine",
+        tf_schedule="linear",
         tf_ramp_ratio=0.75,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
@@ -153,7 +145,7 @@ def main():
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
     parser.add_argument("--total_tf_ratio", type=int, default=1)
-    parser.add_argument("--total_gd_ratio", type=int, default=0.1)
+    parser.add_argument("--total_gd_ratio", type=int, default=-1)
     
     args = parser.parse_args()
 
@@ -165,6 +157,9 @@ def main():
         num_workers = min(mp.cpu_count() - 4, 8)
     else:
         num_workers = args.num_workers
+
+    if args.total_gd_ratio == -1:
+        args.total_gd_ratio = args.warmup_ratio
 
     logger = get_logger(args.output_dir, "vision_training.log")
 
