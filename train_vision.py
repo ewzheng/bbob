@@ -68,9 +68,9 @@ def train(
         bf16=bf16_supported,
         fp16=cuda and not bf16_supported,
         eval_strategy="steps",
-        eval_steps=max(steps_per_epoch // 4, 1),
+        eval_steps=max(steps_per_epoch // 2, 1),
         save_strategy="steps",
-        save_steps=max(steps_per_epoch // 4, 1),
+        save_steps=max(steps_per_epoch // 2, 1),
         logging_steps=max(batch_size * grad_acc_steps, 1),
         report_to="none",
         remove_unused_columns=False,
@@ -87,7 +87,7 @@ def train(
         warmup_ratio=warmup_ratio,
         lr_scheduler_kwargs={"num_cycles": epochs},
         include_num_input_tokens_seen=True,
-        torch_empty_cache_steps     = max(steps_per_epoch // 4, 1), # flush cache after eval
+        torch_empty_cache_steps     = max(steps_per_epoch // 2, 1), # flush cache after eval
     )
 
     tokenizer = model.get_tokenizer()
