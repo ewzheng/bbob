@@ -353,7 +353,19 @@ class BBOBCollator:  # noqa: N801
             merged_labels.append(labels)
 
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
-        labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=-100)
+
+        # -------------------------------------------------------------
+        # Spam-penalty: positions that are added only by batch padding
+        # now *expect* the first EOS token.  Any non-EOS prediction
+        # therefore incurs cross-entropy, so the model is encouraged to
+        # stop once it has reproduced all ground-truth boxes.
+        # (Visual tokens and instruction prefix remain -100 and are still
+        # ignored by the loss.)
+        # -------------------------------------------------------------
+        eos_id = getattr(self.tokenizer, "eos_token_id", None)
+        pad_value = eos_id if eos_id is not None else -100
+        labels_padded = pad_sequence(merged_labels, batch_first=True, padding_value=pad_value)
+
         attention_mask = (input_ids_padded != pad_token_id).long()
 
         batch_out = {
