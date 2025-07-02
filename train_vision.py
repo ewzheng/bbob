@@ -32,8 +32,9 @@ def train(
     logger=None,
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
-    total_tf_ratio: int = 1,
-    total_gd_ratio: int = 0.1,
+    total_tf_ratio: float = 1,
+    total_gd_ratio: float = 0.1,
+    tf_ramp_ratio: float = 0.75,
     min_tf_p: float = 0.15,
     max_tf_p: float = 1.0
 ):
@@ -121,7 +122,7 @@ def train(
         total_tf_steps=total_tf_steps,
         total_gd_steps=total_gd_steps,
         tf_schedule="linear",
-        tf_ramp_ratio=0.75,
+        tf_ramp_ratio=tf_ramp_ratio,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,
@@ -148,8 +149,9 @@ def main():
     parser.add_argument("--bnb_config", type=str, default=None)
     parser.add_argument("--min_tf_p", type=float, default=0.15)
     parser.add_argument("--max_tf_p", type=float, default=1.0)
-    parser.add_argument("--total_tf_ratio", type=int, default=1)
-    parser.add_argument("--total_gd_ratio", type=int, default=-1)
+    parser.add_argument("--total_tf_ratio", type=float, default=1)
+    parser.add_argument("--tf_ramp_ratio", type=float, default=0.75)
+    parser.add_argument("--total_gd_ratio", type=float, default=-1)
     
     args = parser.parse_args()
 
@@ -220,6 +222,7 @@ def main():
         num_workers=num_workers,
         warmup_ratio=args.warmup_ratio,
         total_tf_ratio=args.total_tf_ratio,
+        tf_ramp_ratio=args.tf_ramp_ratio,
         total_gd_ratio=args.total_gd_ratio,
         min_tf_p=args.min_tf_p,
         max_tf_p=args.max_tf_p
