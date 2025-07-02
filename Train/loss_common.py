@@ -18,13 +18,28 @@ class BBOBLoss:
         self.log_interval = max(1, log_interval)
         self.step = 0
         self.aux_loss_weight = float(aux_loss_weight)
-        # Cache tensor of digit token IDs – needed by BBOBTrainer for the
-        # optional guidance loss in the first ``total_tf_steps``.
-        ids = [tokenizer.convert_tokens_to_ids(str(i)) for i in range(10)]
-        if any(i in (None, tokenizer.unk_token_id, -1) for i in ids):
-            raise ValueError("Tokenizer must contain explicit '0'..'9' tokens")
-        ids.append(tokenizer.convert_tokens_to_ids("."))
-        self.digit_ids = torch.tensor(ids, dtype=torch.long)
+        # ------------------------------------------------------------------
+        # Numeric-bin token IDs  ("0.000" … "1.000", inclusive)
+        # ------------------------------------------------------------------
+        num_tokens = [f"{i/1000:.3f}" for i in range(1001)]  # 1 001 tokens
+        num_ids = []
+        for tok in num_tokens:
+            tid = tokenizer.convert_tokens_to_ids(tok)
+            if tid is not None and tid not in (tokenizer.unk_token_id, -1):
+                num_ids.append(tid)
+
+        if len(num_ids) < 1001:
+            missing = 1001 - len(num_ids)
+            if logger is not None:
+                logger.warning(f"{missing} numeric tokens were not found in the tokenizer vocabulary; aux loss will ignore them")
+
+        self.numeric_ids = torch.tensor(num_ids, dtype=torch.long)
+
+        # For backward-compatibility with Trainer guidance that still refers
+        # to `.digit_ids`, we alias the attribute.  The name remains the same
+        # but now points to the list of *numeric* token IDs.
+        self.digit_ids = self.numeric_ids
+
         self.punct_ids = torch.tensor([tokenizer.convert_tokens_to_ids(TAG_OPEN), tokenizer.convert_tokens_to_ids(TAG_CLOSE), 
                                        tokenizer.convert_tokens_to_ids(","), 
                                        tokenizer.convert_tokens_to_ids(":"),
@@ -59,10 +74,10 @@ class BBOBLoss:
         # Auxiliary loss focused on numeric tokens (0-9 and decimal point)
         flat_logits = logits[..., :-1, :].contiguous().view(-1, vocab)
         flat_labels = labels[..., 1:].contiguous().view(-1)
-        digit_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.digit_ids.to(flat_labels.device))
+        numeric_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.numeric_ids.to(flat_labels.device))
 
-        if digit_mask.any():
-            aux_loss = F.cross_entropy(flat_logits[digit_mask], flat_labels[digit_mask], reduction="mean")
+        if numeric_mask.any():
+            aux_loss = F.cross_entropy(flat_logits[numeric_mask], flat_labels[numeric_mask], reduction="mean")
         else:
             aux_loss = torch.tensor(0.0, device=logits.device)
         
