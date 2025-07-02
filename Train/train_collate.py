@@ -140,9 +140,16 @@ class BBOBCollator:  # noqa: N801
         xy = cxcy - 0.5 * wh
         xy = torch.clamp(xy, 0.0, 1.0)
 
-        # clamp sizes so box stays in frame after xy clamp
-        w_clamped = torch.clamp(wh[:, 0], 0.0, 1.0 - xy[:, 0])
-        h_clamped = torch.clamp(wh[:, 1], 0.0, 1.0 - xy[:, 1])
+        # clamp sizes so that the box remains inside [0,1] after the xy clamp
+        # torch.clamp cannot mix a scalar *min* with a tensor *max* – we therefore
+        # do the operation in two steps: first enforce the lower bound (>=0),
+        # then the upper bound (<= 1 – coordinate).
+
+        w_nonneg = torch.clamp_min(wh[:, 0], 0.0)
+        h_nonneg = torch.clamp_min(wh[:, 1], 0.0)
+
+        w_clamped = torch.minimum(w_nonneg, 1.0 - xy[:, 0])
+        h_clamped = torch.minimum(h_nonneg, 1.0 - xy[:, 1])
         wh = torch.stack([w_clamped, h_clamped], dim=1)
 
         out = torch.cat([xy, wh], dim=1)
