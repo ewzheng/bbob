@@ -111,29 +111,42 @@ class BBOBCollator:  # noqa: N801
         The result is clamped so that the box stays inside 0…1 and keeps
         ``w,h ≥ 0``.
         """
-        if isinstance(bboxes, torch.Tensor):
-            bboxes = bboxes.clone().detach().float().cpu().numpy()
+        # ------------------------------------------------------------------
+        # Fast vectorised implementation (torch-only, no Python loop).
+        # ------------------------------------------------------------------
 
-        out: list[list[float]] = []
-        for x, y, w, h in bboxes:
-            # centre coords
-            cx, cy = x + w * 0.5, y + h * 0.5
+        # Accept list / np.ndarray inputs
+        if not isinstance(bboxes, torch.Tensor):
+            bboxes = torch.as_tensor(bboxes, dtype=dtype)
 
-            # random jitter on centre and size
-            cx += np.random.uniform(-jitter_ratio, jitter_ratio) * w
-            cy += np.random.uniform(-jitter_ratio, jitter_ratio) * h
-            w  *= 1 + np.random.uniform(-jitter_ratio, jitter_ratio)
-            h  *= 1 + np.random.uniform(-jitter_ratio, jitter_ratio)
+        if bboxes.numel() == 0:
+            return bboxes.to(dtype=dtype)
 
-            # convert back to top-left origin and clamp
-            x_new = max(0.0, cx - w * 0.5)
-            y_new = max(0.0, cy - h * 0.5)
-            w  = max(0.0, min(w, 1.0 - x_new))
-            h  = max(0.0, min(h, 1.0 - y_new))
+        bx = bboxes.to(dtype=dtype).clone()
 
-            out.append([x_new, y_new, w, h])
+        # centre (cx,cy) and size (w,h)
+        cxcy = bx[:, :2] + 0.5 * bx[:, 2:]
+        wh   = bx[:, 2:]
 
-        return torch.tensor(out, dtype=dtype)
+        # random jitter on centre: ±jitter_ratio * (w,h)
+        trans_rng = (torch.rand_like(cxcy) * 2.0 - 1.0) * jitter_ratio
+        cxcy = cxcy + trans_rng * wh
+
+        # random scaling on size: ±jitter_ratio
+        scale_rng = (torch.rand_like(wh) * 2.0 - 1.0) * jitter_ratio
+        wh = wh * (1.0 + scale_rng)
+
+        # back to xywh (top-left origin)
+        xy = cxcy - 0.5 * wh
+        xy = torch.clamp(xy, 0.0, 1.0)
+
+        # clamp sizes so box stays in frame after xy clamp
+        w_clamped = torch.clamp(wh[:, 0], 0.0, 1.0 - xy[:, 0])
+        h_clamped = torch.clamp(wh[:, 1], 0.0, 1.0 - xy[:, 1])
+        wh = torch.stack([w_clamped, h_clamped], dim=1)
+
+        out = torch.cat([xy, wh], dim=1)
+        return out
 
     def _shuffle_fragments(self, ids: torch.Tensor) -> torch.Tensor:
         """Return a copy with <bbob> … </bbob> snippets shuffled."""
