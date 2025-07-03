@@ -74,7 +74,7 @@ def train(
         eval_steps=max(steps_per_epoch // 2, 1),
         save_strategy="steps",
         save_steps=max(steps_per_epoch // 2, 1),
-        logging_steps=max(batch_size, 1),
+        logging_steps=1,
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
