@@ -99,10 +99,15 @@ class BBOBCollator:  # noqa: N801
 
     # BBOBTrainer toggles these; keep as no-ops
     def eval(self):
+        self.logger.info("Forked a eval worker")
         self.is_eval = True
 
     def train(self):
+        self.logger.info("Forked a training worker")
         self.is_eval = False
+
+    def reseed(self):
+        self.rngjesus = np.random.default_rng()
 
     def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.05):
         """Jitter *normalised* (x,y,w,h) boxes in 0‥1 space.

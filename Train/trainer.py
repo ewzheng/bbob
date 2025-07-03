@@ -20,13 +20,6 @@ import torch.nn.functional as F
 import numpy as np
 
 
-def _seed_worker(worker_id: int):
-    """Seed NumPy and Python RNG inside each DataLoader worker."""
-    seed = torch.initial_seed() % 2**32
-    np.random.seed(seed)
-    random.seed(seed)
-
-
 class BBOBTrainer(Trainer):
     """Trainer that uses separate collators for train / eval.
 
@@ -110,10 +103,9 @@ class BBOBTrainer(Trainer):
         # Ensure correct mode before workers are spawned
         if hasattr(self._train_collator, "train"):
             self._train_collator.train()
+            self._train_collator.reseed()
         dl = super().get_train_dataloader()
         dl.collate_fn = self._train_collator  # make sure
-        # Inject worker_init_fn for deterministic per-worker RNG
-        dl.worker_init_fn = _seed_worker
         return dl
 
     def get_eval_dataloader(self, eval_dataset=None) -> DataLoader:  # noqa: D401
