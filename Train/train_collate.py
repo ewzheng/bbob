@@ -46,7 +46,7 @@ TARGET_SIZE = (256, 256)       # spatial resolution used by MobileViT-v2
 # ====================================================================
 
 import math
-import random
+import numpy as np
 
 
 class BBOBCollator:  # noqa: N801
@@ -67,6 +67,8 @@ class BBOBCollator:  # noqa: N801
         self.tokenizer = tokenizer
         self.processor = image_processor
         self.logger = logger
+
+        self.rngjesus = np.random.default_rng()
 
         # teacher-forcing parameters removed – keep placeholders for API compat
         self.log_interval = log_interval
@@ -195,7 +197,7 @@ class BBOBCollator:  # noqa: N801
         if len(fragments) <= 1:
             return ids  # nothing to shuffle
 
-        random.shuffle(fragments)
+        self.rngjesus.shuffle(fragments)
 
         new_seq = prefix[:]
         first = True
