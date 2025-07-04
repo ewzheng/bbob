@@ -186,11 +186,21 @@ class BBOBTrainer(Trainer):
             if guidance_loss is not None:
                 loss = loss + guidance_loss
         else:
-            loss = outputs.loss if hasattr(outputs, "loss") else None
+            # Use standard cross-entropy loss when no custom loss function is provided
+            if labels is not None and hasattr(outputs, "logits"):
+                logits = outputs.logits
+                # Shift logits and labels for causal LM loss
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                loss = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                    reduction="mean"
+                )
+            else:
+                loss = outputs.loss if hasattr(outputs, "loss") else None
 
-        # Always return the scalar loss; we do not rely on the optional
-        # (loss, outputs) tuple in core training loop and returning a dict
-        # would break gradient accumulation logic.
         if return_outputs:
             return loss, outputs
         return loss 
