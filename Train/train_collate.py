@@ -321,12 +321,11 @@ class BBOBCollator:  # noqa: N801
                 ]
                 det_text = " ".join(frags)
                 tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+                tgt_ids = self._shuffle_fragments(tgt_ids)
             else:
                 # EVAL MODE or boxes absent – use stored token list as is
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
 
-            
-            tgt_ids = self._shuffle_fragments(tgt_ids)
 
             #------ now same instr truncation logic uses tgt_ids variable ----
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
