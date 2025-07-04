@@ -32,11 +32,11 @@ def train(
     logger=None,
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
-    total_tf_ratio: float = 1,
-    total_gd_ratio: float = 0.1,
-    tf_ramp_ratio: float = 0.75,
-    min_tf_p: float = 0.15,
-    max_tf_p: float = 1.0
+    total_tf_ratio: float = 0,
+    total_gd_ratio: float = 0,
+    tf_ramp_ratio: float = 0,
+    min_tf_p: float = 0,
+    max_tf_p: float = 0
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
@@ -84,7 +84,7 @@ def train(
         save_total_limit=8,
         save_safetensors=True,
         load_best_model_at_end=True,
-        metric_for_best_model="accuracy",
+        metric_for_best_model="loss",
         greater_is_better=False,
         lr_scheduler_type="cosine",
         warmup_ratio=warmup_ratio,
@@ -102,13 +102,12 @@ def train(
     logger.info("Preparing dataset …")
 
     # Collator always hides targets; TF decision moved to BBOBTrainer
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer=tokenizer, image_processor=model.get_image_processor(), logger=logger, on_the_fly=False)
-    # Composite loss callable
-    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size * grad_acc_steps, 1))  
+    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer=tokenizer, image_processor=model.get_image_processor(), logger=logger, on_the_fly=True)
+
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
-    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer, do_detection_metrics=True)
+    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer, do_detection_metrics=False)
 
     trainer = BBOBTrainer(
         model=model,
@@ -124,7 +123,6 @@ def train(
         tf_ramp_ratio=tf_ramp_ratio,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
-        compute_loss_func=compute_loss_fn,
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
     )
@@ -146,11 +144,6 @@ def main():
     parser.add_argument("--num_workers", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--bnb_config", type=str, default=None)
-    parser.add_argument("--min_tf_p", type=float, default=0.15)
-    parser.add_argument("--max_tf_p", type=float, default=1.0)
-    parser.add_argument("--total_tf_ratio", type=float, default=1)
-    parser.add_argument("--tf_ramp_ratio", type=float, default=0.75)
-    parser.add_argument("--total_gd_ratio", type=float, default=-1)
     
     args = parser.parse_args()
 
@@ -163,9 +156,6 @@ def main():
     else:
         num_workers = args.num_workers
 
-    if args.total_gd_ratio == -1:
-        args.total_gd_ratio = args.warmup_ratio
-
     logger = get_logger(args.output_dir, "vision_training.log")
 
     logger.info(f"Loading model from {args.model}")
@@ -175,25 +165,6 @@ def main():
     tokenizer = model.get_tokenizer()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    # --------------------------------------------------------------
-    # Always add the opening/closing <|bbob|> tags. Optionally add
-    # 1 001 numeric-bin tokens ("0.000" … "1.000") when the user
-    # passes --bin=True.  These are declared as *additional* special
-    # tokens so the tokenizer will treat each string as an atomic
-    # token, never split by the underlying BPE.
-    # --------------------------------------------------------------
-
-    extra_tokens = ["<|bbob|>", "</|bbob|>"] + [f"{i/1000:.3f}" for i in range(1001)]  # 0.000…1.000
-
-    num_added = tokenizer.add_special_tokens({"additional_special_tokens": extra_tokens})
-
-    if num_added > 0:
-        logger.info(f"Added {num_added} special tokens to tokenizer – resizing model embeddings")
-        try:
-            model.base_model.resize_token_embeddings(len(tokenizer))
-        except AttributeError:
-            model.resize_token_embeddings(len(tokenizer))
 
     # Sanitize config after modification so Trainer can save it
     clean_tokenizer_config(tokenizer)
@@ -205,7 +176,7 @@ def main():
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
         dtype=model.dtype,
-        on_the_fly=False,
+        on_the_fly=True,
     )
 
     train(
@@ -220,11 +191,6 @@ def main():
         logger=logger,
         num_workers=num_workers,
         warmup_ratio=args.warmup_ratio,
-        total_tf_ratio=args.total_tf_ratio,
-        tf_ramp_ratio=args.tf_ramp_ratio,
-        total_gd_ratio=args.total_gd_ratio,
-        min_tf_p=args.min_tf_p,
-        max_tf_p=args.max_tf_p
     )
 
     logger.info("Vision training complete. Model saved.")

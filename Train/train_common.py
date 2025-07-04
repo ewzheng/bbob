@@ -351,15 +351,6 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, target_s
             # ---------------- store token ids ----------------------
             result.setdefault("target_text", []).append(ids)
 
-    else:
-        # Caption-only data – ensure `target_text` list is replicated to match
-        # the number of augmented image versions.
-        if "target_text" in result:
-            base_targets = result["target_text"]
-            # base_targets has length == len(batch); replicate per augmented variant
-            replicated = [base_targets[idx] for idx in sample_replication]
-            result["target_text"] = replicated
-
     if "sentences" in batch and "target_text" not in result:
         target_texts = []
         for sent_list in batch["sentences"]:
