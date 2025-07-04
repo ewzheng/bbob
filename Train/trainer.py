@@ -188,4 +188,9 @@ class BBOBTrainer(Trainer):
         else:
             loss = outputs.loss if hasattr(outputs, "loss") else None
 
-        return (loss, outputs) if return_outputs else loss 
+        # Always return the scalar loss; we do not rely on the optional
+        # (loss, outputs) tuple in core training loop and returning a dict
+        # would break gradient accumulation logic.
+        if return_outputs:
+            return loss, outputs
+        return loss 
