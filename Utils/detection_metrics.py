@@ -110,6 +110,10 @@ def detection_metrics_batch(
     iou_sum = 0.0
     iou_count = 0
 
+    # class presence stats (IoU-independent)
+    class_total = 0
+    class_correct = 0
+
     # ------------------------------------------------------------------
     # 1. Batch-decode all samples in one tokenizer call (much faster than
     #    decoding each sequence separately, especially for large batches).
@@ -142,6 +146,10 @@ def detection_metrics_batch(
         total_pred += pred_boxes.size(0)
         if pred_boxes.numel() == 0 or gt_boxes.numel() == 0:
             continue  # nothing to match in this sample
+
+        # ---------------- class accuracy -----------------------------
+        class_total += len(gt_labels)
+        class_correct += sum(1 for lab in gt_labels if lab in pred_labels)
 
         # -------- greedy label-aware matching --------------------------------
         used_pred: set[int] = set()
@@ -181,10 +189,168 @@ def detection_metrics_batch(
     denom = total_pred + total_gt - correct_matches
     accuracy = correct_matches / denom if denom else 0.0
 
+    class_accuracy = class_correct / class_total if class_total else 0.0
+
     return {
         "mean_iou": mean_iou,
         "recall": recall,
         "precision": precision,
         "f1": f1,
         "accuracy": accuracy,
-    } 
+        "class_accuracy": class_accuracy,
+    }
+
+# -----------------------------------------------------------------------------
+# Experimental: object-level confidence & AP (Pix2Seq-style)
+# -----------------------------------------------------------------------------
+
+def _object_scores(
+    pred_ids: torch.Tensor,   # (S,)
+    logits: torch.Tensor,     # (S,V) – *pre-softmax* for the same sequence
+    tokenizer,
+    *,
+    ignore_index: int = -100,
+) -> List[Tuple[float, str, List[float]]]:
+    """Return list of *(score, label, xywh)* for one image.
+
+    Score = exp( mean log-prob(token) ) over the tokens inside a single
+    <|bbob|> … </|bbob|> fragment (class + coords + closing tag).
+    """
+
+    # 1. Precompute log-prob of each sampled token
+    logp_tokens = logits.log_softmax(dim=-1)  # (S,V)
+    token_logp = logp_tokens.gather(1, pred_ids.unsqueeze(1)).squeeze(1)  # (S,)
+
+    # 2. Walk through the sequence to find fragments
+    bb_open_id = tokenizer.convert_tokens_to_ids(TAG_OPEN)
+    bb_close_id = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
+
+    objects: List[Tuple[float, str, List[float]]] = []
+    i = 0
+    S = pred_ids.size(0)
+    while i < S:
+        if int(pred_ids[i]) != bb_open_id:
+            i += 1
+            continue
+        # find closing tag index
+        j = i + 1
+        while j < S and int(pred_ids[j]) != bb_close_id:
+            j += 1
+        if j >= S:
+            break  # unmatched
+
+        # Tokens i .. j inclusive form one fragment
+        frag_ids = pred_ids[i + 1 : j]  # exclude <bbob|>, include ':' etc.
+        frag_logp = token_logp[i + 1 : j]
+
+        # Score = exp(mean logp)
+        if frag_logp.numel():
+            score = float(torch.exp(frag_logp.mean()).clamp(0.0, 1.0))
+        else:
+            score = 0.0
+
+        # Convert IDs → text then parse label / box
+        frag_text = tokenizer.decode(frag_ids.tolist(), skip_special_tokens=False)
+        label, xywh = _split_snippet(frag_text)
+        objects.append((score, label, xywh))
+        i = j + 1
+
+    return objects
+
+
+def average_precision(
+    preds: List[Tuple[float, int]],  # (score, is_true_positive)
+    total_gt: int,
+) -> float:
+    """Compute 11-point interpolated AP given TP/FP list sorted by score ↓."""
+    if not preds:
+        return 0.0
+
+    # Cumulate TP/FP
+    tps = torch.tensor([int(tp) for _, tp in preds]).cumsum(0)
+    fps = torch.tensor([1 - int(tp) for _, tp in preds]).cumsum(0)
+    recalls = tps / max(1, total_gt)
+    precisions = tps / (tps + fps)
+
+    # 11-point interpolation (recall 0.0 … 1.0 step 0.1)
+    ap = 0.0
+    for r in torch.linspace(0.0, 1.0, 11):
+        precisions_r = precisions[recalls >= r]
+        p = precisions_r.max() if len(precisions_r) else 0.0
+        ap += p / 11
+    return float(ap)
+
+
+def detection_ap_batch(
+    logits: torch.Tensor,      # (B,S,V)
+    pred_ids: torch.Tensor,    # (B,S)
+    gt_ids: torch.Tensor,      # (B,S)
+    tokenizer,
+    *,
+    iou_thresh: float = 0.5,
+    ignore_index: int = -100,
+) -> Dict[str, float]:
+    """Return AP-style metrics using Pix2Seq confidence scores.
+
+    Note: This is a lightweight approximation (11-point AP at IoU=τ) and
+    does *not* replicate the full COCO metric suite.
+    """
+
+    total_gt_boxes = 0
+    pred_score_tp: List[Tuple[float, int]] = []
+
+    for b in range(pred_ids.size(0)):
+        ids = pred_ids[b]
+        lp = logits[b]
+        gt = gt_ids[b]
+
+        # predicted objects with scores
+        objects = _object_scores(ids, lp, tokenizer, ignore_index=ignore_index)
+
+        preds_boxes = torch.tensor([o[2] for o in objects], dtype=torch.float32)
+        preds_labels = [o[1] for o in objects]
+        preds_scores = [o[0] for o in objects]
+
+        # ground truth objects
+        gt_str = tokenizer.decode([int(t) for t in gt.tolist() if t != ignore_index], skip_special_tokens=False)
+        gt_snips = _extract_snippets(gt_str)
+        gt_boxes, gt_labels = _snippets_to_boxes_labels(gt_snips)
+
+        total_gt_boxes += gt_boxes.size(0)
+
+        matched_gt: set[int] = set()
+        if preds_boxes.numel() and gt_boxes.numel():
+            ious = iou_matrix_xywh(preds_boxes, gt_boxes)
+            # Iterate predictions in *score* order
+            order = sorted(range(len(objects)), key=lambda k: preds_scores[k], reverse=True)
+            for idx in order:
+                box = preds_boxes[idx]
+                label = preds_labels[idx]
+                score = preds_scores[idx]
+
+                # find best matching GT with same label
+                best_iou = 0.0
+                best_gt = -1
+                for gi, (glabel) in enumerate(gt_labels):
+                    if gi in matched_gt or glabel != label:
+                        continue
+                    iou_val = float(ious[idx, gi])
+                    if iou_val > best_iou:
+                        best_iou = iou_val
+                        best_gt = gi
+
+                if best_iou >= iou_thresh:
+                    matched_gt.add(best_gt)
+                    pred_score_tp.append((score, 1))
+                else:
+                    pred_score_tp.append((score, 0))
+        else:
+            # no GT or no preds → all preds are FP
+            for score in preds_scores:
+                pred_score_tp.append((score, 0))
+
+    # sort global list by score desc
+    pred_score_tp.sort(key=lambda x: x[0], reverse=True)
+    ap = average_precision(pred_score_tp, total_gt_boxes)
+
+    return {"ap50": ap, "total_gt": total_gt_boxes, "total_pred": len(pred_score_tp)} 

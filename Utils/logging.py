@@ -36,6 +36,9 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
     det_prec_vals: list[float]      = []
     det_f1_vals: list[float]        = []
     det_acc_vals: list[float]       = []
+    det_recall25_vals: list[float]  = []
+    det_iou25_vals: list[float]     = []
+    det_class_acc_vals: list[float] = []
 
     def preprocess_logits_for_metrics_impl(logits, labels):
         """
@@ -45,7 +48,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
         nonlocal pred_target_sim_sum, pred_target_sim_count
-        nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals
+        nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals, det_recall25_vals, det_iou25_vals, det_class_acc_vals
         
         try:
             # Convert logits to predictions immediately (much smaller memory footprint)
@@ -109,6 +112,17 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                                     det_prec_vals.append(det_metrics.get("precision", 0.0))
                                     det_f1_vals.append(det_metrics.get("f1", 0.0))
                                     det_acc_vals.append(det_metrics.get("accuracy", 0.0))
+                                    det_class_acc_vals.append(det_metrics.get("class_accuracy", 0.0))
+
+                                    # second threshold (IoU 0.25)
+                                    det25 = detection_metrics_batch(
+                                        torch.as_tensor(pred_ids.masked_fill(~mask, -100), dtype=torch.long),
+                                        torch.as_tensor(labels,   dtype=torch.long),
+                                        tokenizer,
+                                        iou_thresh=0.25,
+                                    )
+                                    det_iou25_vals.append(det25.get("mean_iou", 0.0))
+                                    det_recall25_vals.append(det25.get("recall", 0.0))
                                 except Exception as e:
                                     print(f"Warning: per-batch detection metric failed – {e}")
                     except Exception as e:
@@ -131,7 +145,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
         nonlocal pred_target_sim_sum, pred_target_sim_count
-        nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals
+        nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals, det_recall25_vals, det_iou25_vals, det_class_acc_vals
         
         predictions, labels = eval_pred.predictions, eval_pred.label_ids
         
@@ -174,6 +188,9 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             mean_prec    = sum(det_prec_vals)    / len(det_prec_vals)    if det_prec_vals else 0.0
             mean_f1      = sum(det_f1_vals)      / len(det_f1_vals)      if det_f1_vals else 0.0
             mean_acc     = sum(det_acc_vals)     / len(det_acc_vals)     if det_acc_vals else 0.0
+            mean_recall25 = sum(det_recall25_vals) / len(det_recall25_vals) if det_recall25_vals else 0.0
+            mean_iou25    = sum(det_iou25_vals)    / len(det_iou25_vals)    if det_iou25_vals else 0.0
+            mean_class_acc= sum(det_class_acc_vals)/len(det_class_acc_vals) if det_class_acc_vals else 0.0
 
             metrics_out.update({
                 "mean_iou": mean_iou,
@@ -181,6 +198,9 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                 "precision": mean_prec,
                 "f1": mean_f1,
                 "accuracy": mean_acc,
+                "recall_25": mean_recall25,
+                "mean_iou_25": mean_iou25,
+                "class_accuracy": mean_class_acc,
             })
 
             # Reset detection accumulators AFTER metrics have been computed
@@ -189,6 +209,9 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             det_prec_vals.clear()
             det_f1_vals.clear()
             det_acc_vals.clear()
+            det_recall25_vals.clear()
+            det_iou25_vals.clear()
+            det_class_acc_vals.clear()
 
         return metrics_out
     
