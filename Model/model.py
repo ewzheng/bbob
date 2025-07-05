@@ -349,6 +349,11 @@ class BBOB(PreTrainedModel):
         if input_ids is None:
             raise ValueError("generate requires `input_ids` argument")
 
+        # Ensure input_ids are on the correct device
+        input_ids = input_ids.to(self.device)
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(self.device)
+
         # 1) Prepare visual embeddings (may be None)
         visual_embeds = self._prepare_visual_inputs(images)
 
