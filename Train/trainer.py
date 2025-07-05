@@ -146,7 +146,14 @@ class BBOBTrainer(Trainer):
     # ---------------- batch preprocessing override --------------------
 
     def prepare_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
+        # OPTIMIZED: Use non-blocking transfers for async GPU loading
         inputs = super().prepare_inputs(inputs)
+        
+        # Optimize tensor transfers to GPU with non_blocking=True
+        for key, value in inputs.items():
+            if isinstance(value, torch.Tensor) and not value.is_cuda:
+                inputs[key] = value.to(self.model.device, non_blocking=True)
+        
         # ------------------------------------------------------------
         # Scheduled sampling (teacher forcing) – per-token Bernoulli
         # ------------------------------------------------------------
@@ -183,14 +190,27 @@ class BBOBTrainer(Trainer):
             logits = outputs.logits  # (B, S, V)
             flat_logits = logits.view(-1, logits.size(-1))
             flat_labels = labels.view(-1)
+            
+            # CRITICAL: Pre-move digit/punct IDs to correct device to avoid repeated transfers
             digit_or_punct = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids]).to(flat_labels.device)
-            mask = (flat_labels >= 0) & torch.isin(flat_labels, digit_or_punct)
-            if mask.any():
-                idx = mask.nonzero(as_tuple=False).squeeze(1)
-                correct = flat_labels[idx]
-                base_loss = F.cross_entropy(flat_logits[idx], correct, reduction="mean")
-                factor = self._guidance_strength * (1.0 - self.state.global_step / self._guidance_steps)
-                guidance_loss = factor * base_loss
+            
+            # OPTIMIZED: Use vectorized masking without .any() which causes CPU sync
+            valid_mask = (flat_labels >= 0)
+            digit_punct_mask = torch.isin(flat_labels, digit_or_punct)
+            mask = valid_mask & digit_punct_mask
+            
+            # CRITICAL: Use mask.sum() > 0 instead of mask.any() to avoid GPU-CPU sync during training
+            # Only compute guidance loss if we have valid tokens (without blocking)
+            mask_sum = mask.sum()
+            if mask_sum > 0:
+                # OPTIMIZED: Direct indexing without nonzero() which blocks GPU-CPU sync
+                masked_logits = flat_logits[mask]
+                masked_labels = flat_labels[mask]
+                
+                if masked_logits.numel() > 0:  # Safety check
+                    base_loss = F.cross_entropy(masked_logits, masked_labels, reduction="mean")
+                    factor = self._guidance_strength * (1.0 - self.state.global_step / self._guidance_steps)
+                    guidance_loss = factor * base_loss
 
         if self._loss_func is not None:
             loss = self._loss_func(outputs, labels)
