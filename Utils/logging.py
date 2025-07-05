@@ -54,6 +54,33 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             # Convert logits to predictions immediately (much smaller memory footprint)
             pred_ids = torch.argmax(logits, dim=-1)
             
+            # Handle sequence length mismatch due to image token replacement
+            if labels is not None and logits.shape[1] != labels.shape[1]:
+                # Adjust labels to match logits sequence length
+                # This happens when visual tokens are inserted, expanding the sequence
+                batch_size = labels.shape[0]
+                logits_seq_len = logits.shape[1]
+                labels_seq_len = labels.shape[1]
+                
+                # Calculate how many visual tokens were inserted (usually 64)
+                visual_tokens = logits_seq_len - labels_seq_len
+                
+                if visual_tokens > 0:
+                    # Create adjusted labels with IGNORE_INDEX for visual token positions
+                    device = labels.device
+                    adjusted_labels = []
+                    
+                    for batch_idx in range(batch_size):
+                        # Create ignore labels for visual tokens (positions 0 to visual_tokens-1)
+                        visual_ignore = torch.full((visual_tokens,), -100, dtype=labels.dtype, device=device)
+                        
+                        # Combine: visual_ignore + original_labels
+                        combined_labels = torch.cat([visual_ignore, labels[batch_idx]], dim=0)
+                        adjusted_labels.append(combined_labels)
+                    
+                    # Stack to create batch
+                    labels = torch.stack(adjusted_labels, dim=0)
+            
             # Calculate multiple accuracy metrics
             if labels is not None:
                 mask = (labels != -100)
