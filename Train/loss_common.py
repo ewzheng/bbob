@@ -103,15 +103,6 @@ class BBOBLoss:
         """
         logits = outputs.logits  # (B, S, V)
         vocab = logits.size(-1)
-        
-        # Debug: Print shapes before cross entropy
-        print(f"DEBUG LOSS - logits shape: {logits.shape}")
-        print(f"DEBUG LOSS - labels shape: {labels.shape}")
-        print(f"DEBUG LOSS - logits[..., :-1, :] shape: {logits[..., :-1, :].shape}")
-        print(f"DEBUG LOSS - labels[..., 1:] shape: {labels[..., 1:].shape}")
-        print(f"DEBUG LOSS - flattened logits shape: {logits[..., :-1, :].contiguous().view(-1, vocab).shape}")
-        print(f"DEBUG LOSS - flattened labels shape: {labels[..., 1:].contiguous().view(-1).shape}")
-        
         # Shift so that predictions at time t are compared against label t+1
         loss = F.cross_entropy(
             logits[..., :-1, :].contiguous().view(-1, vocab),
