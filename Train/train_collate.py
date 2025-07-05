@@ -370,12 +370,13 @@ class BBOBCollator:  # noqa: N801
             # Insert image placeholder token in the instruction
             # Use existing placeholder_id (typically EOS token) to mark where image should go
             image_placeholder = torch.tensor([placeholder_id], dtype=torch.long)
-            input_ids = torch.cat([image_placeholder, instr_ids], dim=0)
+            input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
             
-            # Labels: ignore instruction tokens, include target tokens
+            # Labels: ignore placeholder and instruction tokens, include target tokens
             # The image placeholder will be handled by the model's _prepare_labels_for_replacement method
-            instruction_ignore = torch.full((input_ids.size(0),), -100, dtype=torch.long)
-            labels = torch.cat([instruction_ignore, tgt_ids], dim=0)
+            placeholder_ignore = torch.full((1,), -100, dtype=torch.long)  # ignore placeholder
+            instruction_ignore = torch.full((instr_ids.size(0),), -100, dtype=torch.long)  # ignore instruction
+            labels = torch.cat([placeholder_ignore, instruction_ignore, tgt_ids], dim=0)
 
             merged_input_ids.append(input_ids)
             merged_labels.append(labels)
