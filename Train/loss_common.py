@@ -103,10 +103,17 @@ class BBOBLoss:
         """
         logits = outputs.logits  # (B, S, V)
         vocab = logits.size(-1)
-        # Shift so that predictions at time t are compared against label t+1
+        
+        # OPTIMIZED: Pre-compute shifted tensors once
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = labels[..., 1:].contiguous()
+        flat_logits = shift_logits.view(-1, vocab)
+        flat_labels = shift_labels.view(-1)
+        
+        # Main cross-entropy loss
         loss = F.cross_entropy(
-            logits[..., :-1, :].contiguous().view(-1, vocab),
-            labels[..., 1:].contiguous().view(-1),
+            flat_logits,
+            flat_labels,
             ignore_index=self.ignore_index,
             reduction="mean",
         )
@@ -117,11 +124,8 @@ class BBOBLoss:
         aux_loss_class = torch.tensor(0.0, device=logits.device)
 
         # Only compute auxiliary losses if their lambda values are non-zero
+        # Use pre-computed flat tensors to avoid redundant computations
         if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0:
-            # Prepare flattened logits and labels (shared computation)
-            flat_logits = logits[..., :-1, :].contiguous().view(-1, vocab)
-            flat_labels = labels[..., 1:].contiguous().view(-1)
-
             # Auxiliary loss focused on numeric tokens
             if self.lambda_digit > 0 and self.numeric_ids is not None:
                 numeric_mask = (flat_labels >= 0) & torch.isin(
@@ -147,10 +151,10 @@ class BBOBLoss:
             # Class-token auxiliary CE – combats wrong / hallucinated labels
             if self.lambda_class > 0 and self._tok_open is not None and self._tok_colon is not None:
                 B = labels.size(0)
-                seq_len = labels.size(1) - 1  # because of shift (labels[...,1:])
+                seq_len = shift_labels.size(1)  # Use pre-computed shift_labels
                 class_mask_list = []
                 for b in range(B):
-                    row = labels[b, 1:]
+                    row = shift_labels[b]  # Use pre-computed shift_labels
                     mask_row = torch.zeros_like(row, dtype=torch.bool)
                     inside = False
                     for idx in range(seq_len):

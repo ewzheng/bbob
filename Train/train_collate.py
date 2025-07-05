@@ -294,12 +294,17 @@ class BBOBCollator:  # noqa: N801
 
         merged_input_ids, merged_labels = [], []
 
+        # Pre-compute common tokens once
+        image_placeholder = torch.tensor([placeholder_id], dtype=torch.long)
+        bos_id = getattr(self.tokenizer, "bos_token_id", None)
+        eos_id = getattr(self.tokenizer, "eos_token_id", None)
+        max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
+
         for item in batch:
             if "input_ids" in item:
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
             else:
                 text = item.get("text", "")
-                max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
                 tokens = self.tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
                 instr_ids = tokens["input_ids"].squeeze(0)
 
@@ -311,7 +316,6 @@ class BBOBCollator:  # noqa: N801
 
                 # rebuild textual fragments so tokens match jittered coords
                 label_strs = item.get("target_label_strs", ["obj"] * bx.size(0))[: bx.size(0)]
-
 
                 fmt_coord = lambda v: f"{max(0.0, min(1.0, v)):.3f}"
 
@@ -326,21 +330,18 @@ class BBOBCollator:  # noqa: N801
                 # EVAL MODE or boxes absent – use stored token list as is
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
 
-
             #------ now same instr truncation logic uses tgt_ids variable ----
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
 
-            max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
             if instr_ids.size(0) > max_txt_len:
                 instr_ids = instr_ids[-max_txt_len:]
-                tgt_ids = torch.tensor([], dtype=torch.long)
+                tgt_ids = torch.empty(0, dtype=torch.long)  # More efficient than torch.tensor([])
             else:
                 remaining = max_txt_len - instr_ids.size(0)
                 if tgt_ids.size(0) > remaining:
                     tgt_ids = tgt_ids[:remaining]
 
                 # --- ensure a single BOS token starts the instruction sequence ---
-                bos_id = getattr(self.tokenizer, "bos_token_id", None)
                 if bos_id is not None:
                     if instr_ids.numel() == 0:
                         # create sequence containing only <bos>
@@ -354,7 +355,6 @@ class BBOBCollator:  # noqa: N801
                             instr_ids = torch.cat([torch.tensor([bos_id], dtype=torch.long), instr_ids])
 
                 # --- ensure a single EOS token terminates the target sequence ---
-                eos_id = getattr(self.tokenizer, "eos_token_id", None)
                 if eos_id is not None:
                     if tgt_ids.numel() == 0:
                         # create sequence containing only <eos>
@@ -367,16 +367,14 @@ class BBOBCollator:  # noqa: N801
                         else:
                             tgt_ids = torch.cat([tgt_ids, torch.tensor([eos_id], dtype=torch.long)])
 
-            # Insert image placeholder token in the instruction
-            # Use existing placeholder_id (typically EOS token) to mark where image should go
-            image_placeholder = torch.tensor([placeholder_id], dtype=torch.long)
+            # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
             
-            # Labels: ignore placeholder and instruction tokens, include target tokens
-            # The image placeholder will be handled by the model's _prepare_labels_for_replacement method
-            placeholder_ignore = torch.full((1,), -100, dtype=torch.long)  # ignore placeholder
-            instruction_ignore = torch.full((instr_ids.size(0),), -100, dtype=torch.long)  # ignore instruction
-            labels = torch.cat([placeholder_ignore, instruction_ignore, tgt_ids], dim=0)
+            # OPTIMIZED: Create labels more efficiently using sizes
+            instr_size = instr_ids.size(0)
+            total_prefix_size = 1 + instr_size  # placeholder + instruction
+            label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long)
+            labels = torch.cat([label_ignore, tgt_ids], dim=0)
 
             merged_input_ids.append(input_ids)
             merged_labels.append(labels)
