@@ -193,6 +193,8 @@ class BBOB(PreTrainedModel):
         """
         Replace image placeholder tokens with visual embeddings using position-based approach.
         
+        OPTIMIZED VERSION: Uses vectorized operations instead of Python loops for much better performance.
+        
         Since the collator always inserts the placeholder at position 0, we can use a position-based
         approach instead of token matching. This avoids conflicts with legitimate EOS tokens that
         appear elsewhere in the sequence (e.g., at the end of sequences).
@@ -214,66 +216,34 @@ class BBOB(PreTrainedModel):
             return text_embeds, attention_mask
             
         batch_size, visual_tokens, embed_dim = visual_embeds.shape
+        batch_size_text, text_tokens, _ = text_embeds.shape
         device = visual_embeds.device
         
-        # Use position-based approach: assume first token is always the image placeholder
-        # This avoids conflicts with legitimate EOS tokens elsewhere in the sequence
+        # Vectorized approach: process entire batch at once
+        # Skip first token (placeholder) from text embeddings
+        text_after = text_embeds[:, 1:]  # (batch_size, text_tokens-1, embed_dim)
         
-        # Process each sample in the batch
-        new_embeds = []
-        new_masks = []
+        # Concatenate visual embeddings with remaining text embeddings
+        # visual_embeds: (batch_size, visual_tokens, embed_dim)
+        # text_after: (batch_size, text_tokens-1, embed_dim)
+        combined_embeds = torch.cat([visual_embeds, text_after], dim=1)
         
-        for batch_idx in range(batch_size):
-            # Position-based approach: replace token at position 0 with visual embeddings
-            # The collator always inserts the image placeholder at the beginning
-            
-            # Split text embeddings: skip first token (placeholder), keep the rest
-            text_after = text_embeds[batch_idx, 1:]  # Skip position 0
-            
-            # Combine: visual_embeds + text_after
-            combined_embed = torch.cat([
-                visual_embeds[batch_idx],
-                text_after
-            ], dim=0)
-            
-            # Handle attention mask
-            if attention_mask is not None:
-                mask_after = attention_mask[batch_idx, 1:]  # Skip position 0
-                visual_mask = torch.ones(visual_tokens, dtype=torch.long, device=device)
-                
-                combined_mask = torch.cat([visual_mask, mask_after], dim=0)
-            else:
-                combined_mask = torch.ones(combined_embed.shape[0], dtype=torch.long, device=device)
-                
-            new_embeds.append(combined_embed)
-            new_masks.append(combined_mask)
-        
-        # Pad sequences to the same length
-        max_len = max(embed.shape[0] for embed in new_embeds)
-        
-        padded_embeds = []
-        padded_masks = []
-        
-        for embed, mask in zip(new_embeds, new_masks):
-            if embed.shape[0] < max_len:
-                pad_len = max_len - embed.shape[0]
-                embed_pad = torch.zeros(pad_len, embed_dim, dtype=embed.dtype, device=device)
-                mask_pad = torch.zeros(pad_len, dtype=torch.long, device=device)
-                
-                padded_embeds.append(torch.cat([embed, embed_pad], dim=0))
-                padded_masks.append(torch.cat([mask, mask_pad], dim=0))
-            else:
-                padded_embeds.append(embed)
-                padded_masks.append(mask)
-        
-        combined_embeds = torch.stack(padded_embeds, dim=0)
-        combined_mask = torch.stack(padded_masks, dim=0)
+        # Handle attention mask vectorized
+        if attention_mask is not None:
+            mask_after = attention_mask[:, 1:]  # Skip first token
+            visual_mask = torch.ones(batch_size, visual_tokens, dtype=torch.long, device=device)
+            combined_mask = torch.cat([visual_mask, mask_after], dim=1)
+        else:
+            new_seq_len = visual_tokens + text_tokens - 1
+            combined_mask = torch.ones(batch_size, new_seq_len, dtype=torch.long, device=device)
         
         return combined_embeds, combined_mask
 
     def _prepare_labels_for_replacement(self, input_ids, labels, visual_tokens):
         """
         Adjust labels to account for image token replacement using position-based approach.
+        
+        OPTIMIZED VERSION: Uses vectorized operations instead of Python loops for much better performance.
         
         Since we know the placeholder is always at position 0, we can use a position-based
         approach instead of token matching.
@@ -288,36 +258,20 @@ class BBOB(PreTrainedModel):
         if labels is None:
             return None
             
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
+        batch_size, text_tokens = labels.shape
+        device = labels.device
         
-        # Position-based approach: replace position 0 with visual ignore labels
-        new_labels = []
+        # Vectorized approach: process entire batch at once
+        # Skip first token (placeholder) from labels
+        labels_after = labels[:, 1:]  # (batch_size, text_tokens-1)
         
-        for batch_idx in range(batch_size):
-            # Split labels: skip position 0 (placeholder), keep the rest
-            labels_after = labels[batch_idx, 1:]  # Skip position 0
-            
-            # Create ignore labels for visual tokens
-            visual_ignore = torch.full((visual_tokens,), IGNORE_INDEX, dtype=labels.dtype, device=device)
-            
-            # Combine: visual_ignore + labels_after
-            combined_labels = torch.cat([visual_ignore, labels_after], dim=0)
-            new_labels.append(combined_labels)
+        # Create ignore labels for visual tokens for entire batch
+        visual_ignore = torch.full((batch_size, visual_tokens), IGNORE_INDEX, dtype=labels.dtype, device=device)
         
-        # Pad sequences to the same length
-        max_len = max(label.shape[0] for label in new_labels)
+        # Concatenate: visual_ignore + labels_after
+        combined_labels = torch.cat([visual_ignore, labels_after], dim=1)
         
-        padded_labels = []
-        for label in new_labels:
-            if label.shape[0] < max_len:
-                pad_len = max_len - label.shape[0]
-                label_pad = torch.full((pad_len,), IGNORE_INDEX, dtype=label.dtype, device=device)
-                padded_labels.append(torch.cat([label, label_pad], dim=0))
-            else:
-                padded_labels.append(label)
-        
-        return torch.stack(padded_labels, dim=0)
+        return combined_labels
 
     def _prepare_visual_inputs(self, images):
         '''

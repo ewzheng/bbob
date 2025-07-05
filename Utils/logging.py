@@ -66,20 +66,18 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                 visual_tokens = logits_seq_len - labels_seq_len
                 
                 if visual_tokens > 0:
-                    # Create adjusted labels with IGNORE_INDEX for visual token positions
+                    # OPTIMIZED: Create adjusted labels with IGNORE_INDEX for visual token positions
                     device = labels.device
-                    adjusted_labels = []
                     
-                    for batch_idx in range(batch_size):
-                        # Create ignore labels for visual tokens (positions 0 to visual_tokens-1)
-                        visual_ignore = torch.full((visual_tokens,), -100, dtype=labels.dtype, device=device)
-                        
-                        # Combine: visual_ignore + original_labels
-                        combined_labels = torch.cat([visual_ignore, labels[batch_idx]], dim=0)
-                        adjusted_labels.append(combined_labels)
+                    # Vectorized approach: process entire batch at once
+                    # Skip first token (placeholder) from labels
+                    labels_after = labels[:, 1:]  # (batch_size, labels_seq_len-1)
                     
-                    # Stack to create batch
-                    labels = torch.stack(adjusted_labels, dim=0)
+                    # Create ignore labels for visual tokens for entire batch
+                    visual_ignore = torch.full((batch_size, visual_tokens), -100, dtype=labels.dtype, device=device)
+                    
+                    # Concatenate: visual_ignore + labels_after
+                    labels = torch.cat([visual_ignore, labels_after], dim=1)
             
             # Calculate multiple accuracy metrics
             if labels is not None:
