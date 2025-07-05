@@ -431,8 +431,12 @@ class BBOB(PreTrainedModel):
             position_ids = torch.arange(seq_length, dtype=torch.long, device=inputs_embeds.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
 
-        # Validate sequence length alignment between inputs and labels
+        # Debug: Print sequence lengths before validation
         if labels is not None and inputs_embeds is not None:
+            print(f"DEBUG - inputs_embeds shape: {inputs_embeds.shape}")
+            print(f"DEBUG - labels shape: {labels.shape}")
+            print(f"DEBUG - combined_mask shape: {combined_mask.shape}")
+            
             if labels.size(1) != inputs_embeds.size(1):
                 raise ValueError(
                     f"Sequence length mismatch: labels has {labels.size(1)} tokens, "
