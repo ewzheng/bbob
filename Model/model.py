@@ -193,7 +193,7 @@ class BBOB(PreTrainedModel):
         """
         Replace image placeholder tokens with visual embeddings using position-based approach.
         
-        OPTIMIZED VERSION: Uses vectorized operations instead of Python loops for much better performance.
+        OPTIMIZED: Uses vectorized operations instead of Python loops for much better performance.
         
         Since the collator always inserts the placeholder at position 0, we can use a position-based
         approach instead of token matching. This avoids conflicts with legitimate EOS tokens that
@@ -216,7 +216,6 @@ class BBOB(PreTrainedModel):
             return text_embeds, attention_mask
             
         batch_size, visual_tokens, embed_dim = visual_embeds.shape
-        batch_size_text, text_tokens, _ = text_embeds.shape
         device = visual_embeds.device
         
         # Vectorized approach: process entire batch at once
@@ -224,8 +223,6 @@ class BBOB(PreTrainedModel):
         text_after = text_embeds[:, 1:]  # (batch_size, text_tokens-1, embed_dim)
         
         # Concatenate visual embeddings with remaining text embeddings
-        # visual_embeds: (batch_size, visual_tokens, embed_dim)
-        # text_after: (batch_size, text_tokens-1, embed_dim)
         combined_embeds = torch.cat([visual_embeds, text_after], dim=1)
         
         # Handle attention mask vectorized
@@ -234,8 +231,8 @@ class BBOB(PreTrainedModel):
             visual_mask = torch.ones(batch_size, visual_tokens, dtype=torch.long, device=device)
             combined_mask = torch.cat([visual_mask, mask_after], dim=1)
         else:
-            new_seq_len = visual_tokens + text_tokens - 1
-            combined_mask = torch.ones(batch_size, new_seq_len, dtype=torch.long, device=device)
+            seq_len = visual_tokens + text_embeds.shape[1] - 1
+            combined_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
         
         return combined_embeds, combined_mask
 
@@ -243,7 +240,7 @@ class BBOB(PreTrainedModel):
         """
         Adjust labels to account for image token replacement using position-based approach.
         
-        OPTIMIZED VERSION: Uses vectorized operations instead of Python loops for much better performance.
+        OPTIMIZED: Uses vectorized operations instead of Python loops for much better performance.
         
         Since we know the placeholder is always at position 0, we can use a position-based
         approach instead of token matching.
@@ -289,7 +286,7 @@ class BBOB(PreTrainedModel):
         # If the caller already provides a BCHW tensor we assume it is
         # correctly normalised for MobileViT and skip the image processor.
         if isinstance(images, torch.Tensor):
-            pixel_values = images.to(device=self.device, dtype=self.dtype)
+            pixel_values = images.to(device=self.device, dtype=self.dtype, non_blocking=True)
         else:
             pixel_values = self.vision_tower.process_image(images)
 
@@ -299,6 +296,7 @@ class BBOB(PreTrainedModel):
 
         # Step-3: project to language embedding space producing visual tokens (B, H*W, D)
         visual_embeds = self.projector(feats)  # (B, H*W, D)
+        
         return visual_embeds
 
     def _embed_tokens(self, input_ids):
@@ -381,7 +379,7 @@ class BBOB(PreTrainedModel):
             batch_size = inputs_embeds.shape[0]
             seq_length = inputs_embeds.shape[1]
             
-            # Create sequential position IDs for the new sequence
+            # Optimized position ID generation
             position_ids = torch.arange(seq_length, dtype=torch.long, device=inputs_embeds.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
 

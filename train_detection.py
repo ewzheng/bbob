@@ -155,7 +155,7 @@ def main():
     args = parser.parse_args()
 
     if args.output_dir is None:
-        args.output_dir = f"Output/vision_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+        args.output_dir = f"Output/detection_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.num_workers == -1:
