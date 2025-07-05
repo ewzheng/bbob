@@ -172,16 +172,11 @@ class BBOBTrainer(Trainer):
             logits = outputs.logits
             if labels.size(1) != logits.size(1):
                 # Token replacement happened - need to adjust labels
-                print(f"DEBUG TRAINER - Adjusting labels from {labels.shape} to match logits {logits.shape}")
-                
-                # Adjust labels using the model's label preparation method
                 input_ids = inputs.get("input_ids")
                 if input_ids is not None and hasattr(model, '_prepare_labels_for_replacement'):
                     # Calculate visual tokens (logits sequence length - original input length + 1 for placeholder)
                     visual_tokens = logits.size(1) - input_ids.size(1) + 1
-                    print(f"DEBUG TRAINER - Calculated visual_tokens: {visual_tokens}")
                     labels = model._prepare_labels_for_replacement(input_ids, labels, visual_tokens)
-                    print(f"DEBUG TRAINER - Adjusted labels shape: {labels.shape}")
 
         guidance_loss = None
         if self.model.training and self.state.global_step < self._guidance_steps and labels is not None and self._loss_func is not None:
