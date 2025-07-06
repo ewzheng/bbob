@@ -146,29 +146,45 @@ class BBOBTrainer(Trainer):
     # ---------------- batch preprocessing override --------------------
 
     def prepare_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
-        # OPTIMIZED: Use non-blocking transfers for async GPU loading
+        """Override to adjust *labels* length before forward/eval so the
+        replacement of the single image placeholder with VIS_TOKENS visual
+        embeddings inside the model no longer causes a sequence-length
+        mismatch for metrics.
+
+        The collator builds inputs as:
+
+            [IMG_PLACEHOLDER] + instr_tokens + target_tokens
+
+        During the forward pass the model replaces that single placeholder
+        with ``VIS_TOKENS`` (=64) learned embeddings, effectively lengthening
+        the sequence by *(VIS_TOKENS-1)*.  We therefore left-pad the **labels**
+        tensor with ``ignore_index`` tokens so its shape matches the logits
+        produced later.  This happens *before* the call to the base
+        ``Trainer.prepare_inputs`` so the modified labels propagate to the
+        evaluation loop and metric callbacks.
+        """
+
+        # First, run the base implementation which also moves tensors to the
+        # right device.
         inputs = super().prepare_inputs(inputs)
-        
-        # Optimize tensor transfers to GPU with non_blocking=True
-        for key, value in inputs.items():
-            if isinstance(value, torch.Tensor) and not value.is_cuda:
-                inputs[key] = value.to(self.model.device, non_blocking=True)
-        
-        # ------------------------------------------------------------
-        # Scheduled sampling (teacher forcing) – per-token Bernoulli
-        # ------------------------------------------------------------
-        if self.model.training and self.state.global_step < self._tf_total:
-            if "input_ids" in inputs and "labels" in inputs:
-                p = self._tf_prob(self.state.global_step)
-                if p > 0.0:
-                    ids = inputs["input_ids"].clone()
-                    lbl = inputs["labels"]
-                    # create Bernoulli mask only where a ground-truth label exists
-                    bern = torch.rand_like(lbl, dtype=torch.float, device=lbl.device) < p
-                    mask = (lbl != -100) & bern
-                    ids[mask] = lbl[mask]
-                    inputs["input_ids"] = ids
-        return inputs 
+
+        if "labels" in inputs and "input_ids" in inputs:
+            labels = inputs["labels"]
+            ids    = inputs["input_ids"]
+
+            if labels is not None and ids is not None and labels.size(1) != ids.size(1):
+                VIS_TOKENS = 64  # Keep in sync with Train.train_collate
+                diff = VIS_TOKENS - 1  # placeholder removed, tokens added
+
+                # Only pad when the expected diff matches; otherwise leave as-is.
+                if labels.size(1) + diff == ids.size(1):
+                    pad = torch.full((labels.size(0), diff), -100, dtype=labels.dtype, device=labels.device)
+                    inputs["labels"] = torch.cat([pad, labels], dim=1)
+
+        # Teacher-forcing replacement happens next (reuse existing logic)
+        inputs = self._apply_teacher_forcing(inputs)
+
+        return inputs
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
         labels = inputs.get("labels")
@@ -245,3 +261,29 @@ class BBOBTrainer(Trainer):
         if return_outputs:
             return loss, outputs
         return loss 
+
+    # ------------------------------------------------------------------
+    # Helper – re-used TF logic extracted from the old prepare_inputs body
+    # ------------------------------------------------------------------
+    def _apply_teacher_forcing(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply teacher-forcing token replacement on *inputs* in-place and
+        return the dict.  Separated so we can call after the new length-fix
+        code as well as in the training loop.
+        """
+
+        # ------------------------------------------------------------
+        # Scheduled sampling (teacher forcing) – per-token Bernoulli
+        # ------------------------------------------------------------
+        if self.model.training and self.state.global_step < self._tf_total:
+            if "input_ids" in inputs and "labels" in inputs:
+                p = self._tf_prob(self.state.global_step)
+                if p > 0.0:
+                    ids = inputs["input_ids"].clone()
+                    lbl = inputs["labels"]
+                    # create Bernoulli mask only where a ground-truth label exists
+                    bern = torch.rand_like(lbl, dtype=torch.float, device=lbl.device) < p
+                    mask = (lbl != -100) & bern
+                    ids[mask] = lbl[mask]
+                    inputs["input_ids"] = ids
+
+        return inputs 

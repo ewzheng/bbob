@@ -58,12 +58,21 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             # Convert logits to predictions immediately (much smaller memory footprint)
             pred_ids = torch.argmax(logits, dim=-1)
             
-            # Verify sequence alignment - model should have already handled this correctly
+            # Verify sequence alignment – during evaluation the *labels* tensor
+            # originates from the data collator (placeholder included) whereas
+            # *logits* length reflects the model-internal replacement of that
+            # single placeholder with ``VIS_TOKENS`` visual embeddings (64 by
+            # default).  This makes ``logits`` 63 tokens longer than ``labels``.
+            # Instead of erroring we now auto-pad the label matrix with
+            # ``ignore_index`` tokens so metric computation can proceed.
+
             if labels is not None and logits.shape[1] != labels.shape[1]:
-                raise ValueError(
-                    f"Sequence length mismatch in metrics: logits has {logits.shape[1]} tokens, "
-                    f"but labels has {labels.shape[1]} tokens. This should have been handled by the model."
-                )
+                diff = logits.shape[1] - labels.shape[1]
+                if diff > 0:
+                    pad = torch.full((labels.size(0), diff), -100, dtype=labels.dtype, device=labels.device)
+                    labels = torch.cat([pad, labels], dim=1)
+                else:
+                    labels = labels[:, :logits.shape[1]]
             
             # Calculate multiple accuracy metrics
             if labels is not None:

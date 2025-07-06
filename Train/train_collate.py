@@ -122,17 +122,16 @@ class BBOBCollator:  # noqa: N801
         # Fast vectorised implementation (torch-only, no Python loop).
         # ------------------------------------------------------------------
 
-        # Accept list / np.ndarray inputs
+        # Accept list / np.ndarray inputs *without* moving to GPU – all collate
+        # operations are meant to stay on the CPU to avoid needless GPU load.
         if not isinstance(bboxes, torch.Tensor):
-            # CRITICAL: Ensure device consistency from the start
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            bboxes = torch.as_tensor(bboxes, dtype=dtype, device=device)
+            bboxes = torch.as_tensor(bboxes, dtype=dtype)
 
         if bboxes.numel() == 0:
             return bboxes.to(dtype=dtype)
 
-        # OPTIMIZED: Ensure consistent device throughout
-        device = bboxes.device
+        # Keep subsequent ops on the same device (should be CPU in dataloader)
+        device = bboxes.device  # typically "cpu"
         bx = bboxes.to(dtype=dtype, device=device).clone()
 
         # centre (cx,cy) and size (w,h)
