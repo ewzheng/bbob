@@ -233,7 +233,7 @@ class BBOBCollator:  # noqa: N801
 
         # CRITICAL: Determine target device early to avoid CPU-GPU mismatches
         # Use GPU if available, otherwise CPU
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cpu"
         
         if on_the_fly:
             processed = []
