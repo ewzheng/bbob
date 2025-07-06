@@ -228,6 +228,13 @@ class BBOBLoss:
                 pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
                 # Get ground truth from shifted labels (what the loss actually uses)  
                 tgt_ids = shift_labels[0].to(device="cpu", non_blocking=True)
+                
+                # DEBUG: Log raw token IDs to understand what's being decoded
+                pred_list = pred_ids.tolist()[:50]  # First 50 tokens
+                tgt_list = tgt_ids.tolist()[:50]    # First 50 tokens
+                self.logger.info(f"DEBUG - Raw pred IDs: {pred_list}")
+                self.logger.info(f"DEBUG - Raw tgt IDs: {tgt_list}")
+                
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
                 self.logger.info({

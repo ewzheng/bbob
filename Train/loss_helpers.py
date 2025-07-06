@@ -241,6 +241,16 @@ def decode_pred_gt(
     # Remove padding / ignore_index from ground truth
     gt_ids_clean = [t for t in gt_ids if t != ignore_index]
 
+    # DEBUG: Check what tokens we're actually decoding
+    print(f"DEBUG decode_pred_gt - pred_ids[:20]: {pred_ids[:20]}")
+    print(f"DEBUG decode_pred_gt - gt_ids_clean[:20]: {gt_ids_clean[:20]}")
+    print(f"DEBUG decode_pred_gt - UNK token ID: {tokenizer.unk_token_id}")
+    print(f"DEBUG decode_pred_gt - PAD token ID: {tokenizer.pad_token_id}")
+
     pred_str = tokenizer.decode(pred_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
     gt_str = tokenizer.decode(gt_ids_clean, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+    
+    print(f"DEBUG decode_pred_gt - pred_str[:100]: {repr(pred_str[:100])}")
+    print(f"DEBUG decode_pred_gt - gt_str[:100]: {repr(gt_str[:100])}")
+    
     return pred_str, gt_str 
