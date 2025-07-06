@@ -133,11 +133,12 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                             # Detection metrics - preserve device correctly
                             if do_detection_metrics:
                                 try:
-                                    # CRITICAL: Keep tensors on original device, avoid device transfers
-                                    pred_masked = pred_ids.masked_fill(~mask, -100)
+                                    # CRITICAL: Move tensors to CPU before detection metrics to avoid device issues
+                                    pred_masked = pred_ids.masked_fill(~mask, -100).cpu()
+                                    labels_cpu = labels.cpu()
                                     det_metrics = detection_metrics_batch(
-                                        pred_masked,  # Keep original tensor with device preserved
-                                        labels,       # Keep original tensor with device preserved
+                                        pred_masked,
+                                        labels_cpu,
                                         tokenizer,
                                     )
                                     det_iou_vals.append(det_metrics.get("mean_iou", 0.0))
@@ -149,8 +150,8 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
 
                                     # second threshold (IoU 0.25)
                                     det25 = detection_metrics_batch(
-                                        pred_masked,  # Keep original tensor with device preserved
-                                        labels,       # Keep original tensor with device preserved
+                                        pred_masked,  # Already on CPU
+                                        labels_cpu,   # Already on CPU
                                         tokenizer,
                                         iou_thresh=0.25,
                                     )
