@@ -224,10 +224,21 @@ class BBOBLoss:
                 # The autoregressive loss uses shift_logits[..., :-1, :] and shift_labels[..., 1:]
                 # so our debug logging must use the same alignment.
                 # --------------------------------------------------
+                # DEBUG: Log tensor shapes and sample values to understand the issue
+                self.logger.info(f"DEBUG - logits.shape: {logits.shape}, labels.shape: {labels.shape}")
+                self.logger.info(f"DEBUG - shift_logits.shape: {shift_logits.shape}, shift_labels.shape: {shift_labels.shape}")
+                
                 # Get predictions from shifted logits (what the loss actually uses)
                 pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
                 # Get ground truth from shifted labels (what the loss actually uses)  
                 tgt_ids = shift_labels[0].to(device="cpu", non_blocking=True)
+                
+                # DEBUG: Log sample token IDs to see what we're actually decoding
+                pred_sample = pred_ids.tolist()[:20]
+                tgt_sample = tgt_ids.tolist()[:20]
+                self.logger.info(f"DEBUG - pred_ids sample: {pred_sample}")
+                self.logger.info(f"DEBUG - tgt_ids sample: {tgt_sample}")
+                self.logger.info(f"DEBUG - UNK token ID: {self.tokenizer.unk_token_id}")
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
