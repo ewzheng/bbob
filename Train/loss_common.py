@@ -164,7 +164,8 @@ class BBOBLoss:
             if self.lambda_digit > 0 and self.numeric_ids is not None:
                 # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
                 numeric_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.numeric_ids)
-                if numeric_mask.any():
+                # CRITICAL: Use .sum() > 0 instead of .any() to avoid GPU-CPU sync
+                if numeric_mask.sum() > 0:
                     aux_loss_digit = F.cross_entropy(
                         flat_logits[numeric_mask], flat_labels[numeric_mask], reduction="mean"
                     )
@@ -173,7 +174,8 @@ class BBOBLoss:
             if self.lambda_punct > 0 and self.punct_ids is not None:
                 # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
                 punct_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.punct_ids)
-                if punct_mask.any():
+                # CRITICAL: Use .sum() > 0 instead of .any() to avoid GPU-CPU sync
+                if punct_mask.sum() > 0:
                     aux_loss_punct = F.cross_entropy(
                         flat_logits[punct_mask], flat_labels[punct_mask], reduction="mean"
                     )
@@ -200,7 +202,8 @@ class BBOBLoss:
                     class_mask_list.append(mask_row)
 
                 class_mask = torch.cat(class_mask_list, dim=0)
-                if class_mask.any():
+                # CRITICAL: Use .sum() > 0 instead of .any() to avoid GPU-CPU sync
+                if class_mask.sum() > 0:
                     aux_loss_class = F.cross_entropy(
                         flat_logits[class_mask], flat_labels[class_mask], reduction="mean"
                     )

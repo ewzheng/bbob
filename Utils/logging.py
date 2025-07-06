@@ -24,10 +24,11 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
     top3_accuracies = []
     top5_accuracies = []
     # -- existing scalar accumulators -------------------------------------------
-    seq_correct_total = 0      # number of sequences predicted fully-correct
+    # CRITICAL: Initialize as tensors to handle tensor accumulation without blocking
+    seq_correct_total = torch.tensor(0.0)      # number of sequences predicted fully-correct
     seq_total         = 0      # total number of sequences evaluated
 
-    pred_target_sim_sum   = 0.0  # summed cosine similarities
+    pred_target_sim_sum   = torch.tensor(0.0)  # summed cosine similarities
     pred_target_sim_count = 0     # number of token positions contributing
 
     # Detection-metric accumulators (filled only when do_detection_metrics=True)
@@ -73,22 +74,26 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                     # Exact token accuracy (top-1)
                     correct = (pred_ids == labels) & mask
                     accuracy = correct.sum().float() / mask_sum.float()
-                    token_accuracies.append(accuracy.item())
+                    # CRITICAL: Avoid .item() call - accumulate tensors instead
+                    token_accuracies.append(accuracy.detach())
                     
                     # Top-k accuracies (k=3 & 5)
                     top3_preds = torch.topk(logits, k=3, dim=-1).indices   # [B, S, 3]
                     top3_correct = (top3_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
                     top3_acc = top3_correct.sum().float() / mask_sum.float()
-                    top3_accuracies.append(top3_acc.item())
+                    # CRITICAL: Avoid .item() call - accumulate tensors instead
+                    top3_accuracies.append(top3_acc.detach())
 
                     top5_preds = torch.topk(logits, k=5, dim=-1).indices   # [B, S, 5]
                     top5_correct = (top5_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
                     top5_acc = top5_correct.sum().float() / mask_sum.float()
-                    top5_accuracies.append(top5_acc.item())
+                    # CRITICAL: Avoid .item() call - accumulate tensors instead
+                    top5_accuracies.append(top5_acc.detach())
                     
                     # Sequence-level accuracy (vectorised)
                     seq_correct = ((pred_ids == labels) | ~mask).all(dim=1)  # (batch,)
-                    seq_correct_total += seq_correct.sum().item()
+                    # CRITICAL: Avoid .item() call - accumulate tensors instead
+                    seq_correct_total += seq_correct.sum().detach()
                     seq_total         += seq_correct.numel()
                     
                     # Prediction-target similarity (most important for projector training)
@@ -108,7 +113,8 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                             l2_norm  = probs_valid.norm(dim=1).clamp(min=1e-12)
                             cos_sim  = p_target / l2_norm          # (N,)
 
-                            pred_target_sim_sum   += cos_sim.sum().item()
+                            # CRITICAL: Avoid .item() call - accumulate tensors instead
+                            pred_target_sim_sum   += cos_sim.sum().detach()
                             pred_target_sim_count += cos_sim.numel()
 
                             # Detection metrics - preserve device correctly
@@ -172,19 +178,40 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             pass
         
         # Calculate final metrics from accumulated values
-        mean_token_accuracy = sum(token_accuracies) / len(token_accuracies) if token_accuracies else 0.0
-        mean_top3_accuracy = sum(top3_accuracies) / len(top3_accuracies) if top3_accuracies else 0.0
-        mean_top5_accuracy = sum(top5_accuracies) / len(top5_accuracies) if top5_accuracies else 0.0
-        mean_sequence_accuracy = seq_correct_total / seq_total if seq_total else 0.0
-        mean_prediction_target_similarity = pred_target_sim_sum / pred_target_sim_count if pred_target_sim_count else 0.0
+        # CRITICAL: Only call .item() here at the end, not during training steps
+        if token_accuracies:
+            mean_token_accuracy = torch.stack(token_accuracies).mean().item()
+        else:
+            mean_token_accuracy = 0.0
+            
+        if top3_accuracies:
+            mean_top3_accuracy = torch.stack(top3_accuracies).mean().item()
+        else:
+            mean_top3_accuracy = 0.0
+            
+        if top5_accuracies:
+            mean_top5_accuracy = torch.stack(top5_accuracies).mean().item()
+        else:
+            mean_top5_accuracy = 0.0
+            
+        if seq_total > 0:
+            mean_sequence_accuracy = (seq_correct_total / seq_total).item()
+        else:
+            mean_sequence_accuracy = 0.0
+            
+        if pred_target_sim_count > 0:
+            mean_prediction_target_similarity = (pred_target_sim_sum / pred_target_sim_count).item()
+        else:
+            mean_prediction_target_similarity = 0.0
         
         # Clear accumulated metrics for next evaluation
         token_accuracies.clear()
         top3_accuracies.clear()
         top5_accuracies.clear()
-        seq_correct_total = 0
+        # CRITICAL: Reset tensor accumulators properly
+        seq_correct_total = torch.tensor(0.0)
         seq_total         = 0
-        pred_target_sim_sum   = 0.0
+        pred_target_sim_sum   = torch.tensor(0.0)
         pred_target_sim_count = 0
         
         metrics_out = {
