@@ -146,54 +146,21 @@ class BBOBTrainer(Trainer):
     # ---------------- batch preprocessing override --------------------
 
     def prepare_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:  # noqa: D401
-        """Override to adjust *labels* length before forward/eval so the
-        replacement of the single image placeholder with VIS_TOKENS visual
-        embeddings inside the model no longer causes a sequence-length
-        mismatch for metrics.
-
-        The collator builds inputs as:
-
-            [IMG_PLACEHOLDER] + instr_tokens + target_tokens
-
-        During the forward pass the model replaces that single placeholder
-        with ``VIS_TOKENS`` (=64) learned embeddings, effectively lengthening
-        the sequence by *(VIS_TOKENS-1)*.  We therefore left-pad the **labels**
-        tensor with ``ignore_index`` tokens so its shape matches the logits
-        produced later.  This happens *before* the call to the base
-        ``Trainer.prepare_inputs`` so the modified labels propagate to the
-        evaluation loop and metric callbacks.
+        """Override to apply teacher-forcing logic after base device transfer.
+        
+        Label alignment is now handled by the collator, so this method only
+        needs to handle teacher-forcing replacement.
         """
-
-        # First, run the base implementation which also moves tensors to the
-        # right device.
+        # First, run the base implementation which moves tensors to the right device
         inputs = super().prepare_inputs(inputs)
 
-        # Teacher-forcing replacement happens next (reuse existing logic)
+        # Apply teacher-forcing replacement
         inputs = self._apply_teacher_forcing(inputs)
 
         return inputs
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
         labels = inputs.get("labels")
-        
-        # ---------------------------------------------------------------
-        # CRITICAL: Align labels AFTER collator but BEFORE model forward
-        # The collator creates labels with same length as input_ids, but the model
-        # will replace the single placeholder with 64 visual tokens, so we need
-        # to pre-align the labels to match the expected logits length.
-        # ---------------------------------------------------------------
-        if "labels" in inputs and "input_ids" in inputs:
-            lbl = inputs["labels"]
-            ids = inputs["input_ids"]
-
-            if lbl is not None and ids is not None and lbl.size(1) == ids.size(1):
-                VIS_TOKENS = 64  # collator constant
-                # remove placeholder label & prepend ignore slots for visual tokens
-                lbl_no_ph = lbl[:, 1:]
-                vis_ignore = torch.full((lbl.size(0), VIS_TOKENS), -100,
-                                        dtype=lbl.dtype, device=lbl.device)
-                inputs["labels"] = torch.cat([vis_ignore, lbl_no_ph], dim=1)
-                labels = inputs["labels"]  # Update local variable
         
         outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
 

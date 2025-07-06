@@ -380,11 +380,16 @@ class BBOBCollator:  # noqa: N801
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
             
-            # OPTIMIZED: Create labels more efficiently using sizes and correct device
+            # CRITICAL: Create labels aligned for visual token replacement
+            # The model will replace the single placeholder with VIS_TOKENS (64) embeddings,
+            # so we need to create labels that match the expected logits length.
+            # Structure: [64 × -100 for visual tokens] + [-100 for instruction] + [target tokens]
             instr_size = instr_ids.size(0)
-            total_prefix_size = 1 + instr_size  # placeholder + instruction
-            label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long, device=device)
-            labels = torch.cat([label_ignore, tgt_ids], dim=0)
+            
+            # Visual token ignore slots (64) + instruction ignore slots
+            visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long, device=device)
+            instr_ignore = torch.full((instr_size,), -100, dtype=torch.long, device=device)
+            labels = torch.cat([visual_ignore, instr_ignore, tgt_ids], dim=0)
 
             merged_input_ids.append(input_ids)
             merged_labels.append(labels)
