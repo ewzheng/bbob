@@ -415,11 +415,18 @@ class BBOBCollator:  # noqa: N801
             input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
             
             # OPTIMIZED: Create labels more efficiently using sizes and correct device
-            # The model will handle visual token alignment internally via _prepare_labels_for_replacement
+            # Account for visual token replacement: 1 placeholder becomes VIS_TOKENS visual tokens
             instr_size = instr_ids.size(0)
-            total_prefix_size = 1 + instr_size  # placeholder + instruction
+            total_prefix_size = VIS_TOKENS + instr_size  # visual tokens + instruction
             label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long, device=device)
             labels = torch.cat([label_ignore, tgt_ids], dim=0)
+
+            # DEBUG: Log sizes to understand length mismatch
+            if self.logger:
+                self.logger.info(f"DEBUG - instr_size: {instr_size}, tgt_ids size: {tgt_ids.size(0)}")
+                self.logger.info(f"DEBUG - total_prefix_size: {total_prefix_size}, label_ignore size: {label_ignore.size(0)}")
+                self.logger.info(f"DEBUG - input_ids size: {input_ids.size(0)}, labels size: {labels.size(0)}")
+                self.logger.info(f"DEBUG - labels content: {labels.tolist()[:30]}")
 
             # DEBUG: Log sample token IDs to see what we're actually decoding
             pred_sample = input_ids.tolist()[:20]

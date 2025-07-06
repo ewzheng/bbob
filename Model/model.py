@@ -366,11 +366,8 @@ class BBOB(PreTrainedModel):
             input_ids, text_embeds, visual_embeds, attention_mask
         )
 
-        # Adjust labels for token replacement
-        if labels is not None and visual_embeds is not None:
-            labels = self._prepare_labels_for_replacement(
-                input_ids, labels, visual_embeds.shape[1]
-            )
+        # Labels are already aligned by the collator, so use them as-is
+        # The collator accounts for visual token replacement when creating labels
 
         # Handle position_ids for multimodal inputs
         if position_ids is not None and visual_embeds is not None:

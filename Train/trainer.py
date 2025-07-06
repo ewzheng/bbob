@@ -156,18 +156,9 @@ class BBOBTrainer(Trainer):
         
         outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
 
-        # CRITICAL: Get the aligned labels that the model actually used for loss computation
-        # The model's forward pass aligns labels internally, but we need to do the same alignment
-        # for the guidance loss to ensure tensor shapes match
+        # CRITICAL: Labels are already aligned by the collator, so use them as-is
+        # The collator handles the visual token alignment, so we don't need to do it again
         aligned_labels = labels
-        if labels is not None and hasattr(model, '_prepare_labels_for_replacement'):
-            # Get visual embeddings to know the alignment size
-            visual_embeds = model._prepare_visual_inputs(inputs.get("images"))
-            if visual_embeds is not None:
-                # Apply the same alignment as the model does internally
-                aligned_labels = model._prepare_labels_for_replacement(
-                    inputs.get("input_ids"), labels, visual_embeds.shape[1]
-                )
 
         if self._loss_func is not None:
             # CRITICAL: Use aligned labels for main loss function to ensure tensor shape consistency
