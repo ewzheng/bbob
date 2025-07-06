@@ -387,6 +387,13 @@ class BBOBCollator:  # noqa: N801
             label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long, device=device)
             labels = torch.cat([label_ignore, tgt_ids], dim=0)
 
+            # DEBUG: Log sample token IDs to see what we're actually decoding
+            pred_sample = input_ids.tolist()[:20]
+            tgt_sample = labels.tolist()[:20]
+            self.logger.info(f"DEBUG - input_ids sample: {pred_sample}")
+            self.logger.info(f"DEBUG - labels sample: {tgt_sample}")
+            self.logger.info(f"DEBUG - UNK token ID: {self.tokenizer.unk_token_id}")
+
             merged_input_ids.append(input_ids)
             merged_labels.append(labels)
 
