@@ -55,6 +55,10 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals, det_recall25_vals, det_iou25_vals, det_class_acc_vals
         
         try:
+            # Ensure labels live on the same device as logits to avoid mismatches
+            if labels is not None and labels.device != logits.device:
+                labels = labels.to(logits.device, non_blocking=True)
+
             # Convert logits to predictions immediately (much smaller memory footprint)
             pred_ids = torch.argmax(logits, dim=-1)
             
