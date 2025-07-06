@@ -220,7 +220,9 @@ class BBOBTrainer(Trainer):
                         guidance_loss = factor * base_loss
 
         if self._loss_func is not None:
-            loss = self._loss_func(outputs, labels)
+            # CRITICAL: Use aligned labels for main loss function to ensure tensor shape consistency
+            loss_labels = aligned_labels if aligned_labels is not None else labels
+            loss = self._loss_func(outputs, loss_labels)
             if guidance_loss is not None:
                 loss = loss + guidance_loss
         else:
