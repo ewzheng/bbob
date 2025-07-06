@@ -333,22 +333,48 @@ class BBOBCollator:  # noqa: N801
                     for bb, lab in zip(bx.tolist(), label_strs)
                 ]
                 det_text = " ".join(frags)
+                
+                # DEBUG: Log detection text generation
+                if self.logger:
+                    self.logger.info(f"DEBUG - target_boxes shape: {bx.shape}")
+                    self.logger.info(f"DEBUG - detection text: '{det_text}'")
+                
                 tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
                 tgt_ids = self._shuffle_fragments(tgt_ids)
+                
+                # DEBUG: Log target IDs
+                if self.logger:
+                    self.logger.info(f"DEBUG - tgt_ids before truncation: {tgt_ids.tolist()[:20]}")
             else:
                 # EVAL MODE or boxes absent – use stored token list as is
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
+                
+                # DEBUG: Log eval mode
+                if self.logger:
+                    self.logger.info(f"DEBUG - EVAL MODE or no target_boxes, tgt_ids: {tgt_ids.tolist()[:20]}")
 
             #------ now same instr truncation logic uses tgt_ids variable ----
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
+            
+            # DEBUG: Log after pad token removal
+            if self.logger:
+                self.logger.info(f"DEBUG - tgt_ids after pad removal: {tgt_ids.tolist()[:20]}")
 
             if instr_ids.size(0) > max_txt_len:
                 instr_ids = instr_ids[-max_txt_len:]
                 tgt_ids = empty_tensor.clone()  # Use pre-computed empty tensor
+                
+                # DEBUG: Log truncation
+                if self.logger:
+                    self.logger.info(f"DEBUG - Instruction too long, tgt_ids set to empty")
             else:
                 remaining = max_txt_len - instr_ids.size(0)
                 if tgt_ids.size(0) > remaining:
                     tgt_ids = tgt_ids[:remaining]
+                    
+                    # DEBUG: Log target truncation
+                    if self.logger:
+                        self.logger.info(f"DEBUG - Target truncated to {remaining} tokens")
 
                 # CRITICAL: Fix device mismatches in BOS/EOS token creation
                 # --- ensure a single BOS token starts the instruction sequence ---
@@ -369,6 +395,10 @@ class BBOBCollator:  # noqa: N801
                     if tgt_ids.numel() == 0:
                         # create sequence containing only <eos>
                         tgt_ids = eos_tensor.clone()
+                        
+                        # DEBUG: Log EOS-only target
+                        if self.logger:
+                            self.logger.info(f"DEBUG - tgt_ids was empty, set to EOS only: {tgt_ids.tolist()}")
                     elif tgt_ids[-1] != eos_id:
                         # append or replace last token with <eos> depending on space
                         if tgt_ids.size(0) >= self.tokenizer.model_max_length - instr_ids.size(0):
@@ -376,6 +406,10 @@ class BBOBCollator:  # noqa: N801
                             tgt_ids[-1] = eos_id
                         else:
                             tgt_ids = torch.cat([tgt_ids, eos_tensor])
+
+            # DEBUG: Log final tgt_ids
+            if self.logger:
+                self.logger.info(f"DEBUG - Final tgt_ids: {tgt_ids.tolist()[:20]}")
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
