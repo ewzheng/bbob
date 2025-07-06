@@ -230,8 +230,6 @@ def decode_pred_gt(
         Decoded prediction and ground-truth strings with *special tokens kept* so
         that "<|bbob|>…</|bbob|>" snippets remain visible for inspection.
     """
-    import torch  # local import to avoid hard dependency when torch absent
-
     # Convert tensors to Python lists
     if isinstance(pred_ids, torch.Tensor):
         pred_ids = pred_ids.tolist()

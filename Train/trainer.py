@@ -42,8 +42,6 @@ class BBOBTrainer(Trainer):
     compute_loss_func : callable | None
         Loss function to use for training. If *None*, the default loss function
         is used.
-    guidance_strength : float
-        Strength of guided sampling.
     tf_ramp_ratio : float
         Ramp ratio for teacher-forcing schedule.
     All other positional / keyword arguments are forwarded to
@@ -62,7 +60,6 @@ class BBOBTrainer(Trainer):
         tf_schedule: str = "cosine",
         tf_ramp_ratio: float = 0.8,
         compute_loss_func: Optional[Any] = None,
-        guidance_strength: float = 1.5,
         **kwargs: Any,
     ) -> None:
         # If caller did not pass an explicit data_collator we insert the train-one
@@ -89,10 +86,6 @@ class BBOBTrainer(Trainer):
 
         # store ramp ratio (fraction of steps used for linear/other decay)
         self._tf_ramp = max(1e-6, float(tf_ramp_ratio))
-
-        # guided sampling uses the same warm-up length as teacher-forcing
-        self._guidance_steps = total_gd_steps
-        self._guidance_strength = guidance_strength
 
     # ------------------------------------------------------------------
     # Overridden DataLoader builders
