@@ -59,6 +59,28 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             if labels is not None and labels.device != logits.device:
                 labels = labels.to(logits.device, non_blocking=True)
 
+            # CRITICAL: Check if labels need alignment with logits
+            # During evaluation, HF Trainer may pass unaligned labels directly from dataloader
+            # while logits come from model with visual token replacement applied
+            if labels is not None and logits.shape[1] != labels.shape[1]:
+                # Labels are shorter than logits, likely need visual token alignment
+                # This happens when logits have visual tokens (64) but labels don't
+                seq_diff = logits.shape[1] - labels.shape[1]
+                if seq_diff == 63:  # 64 visual tokens - 1 placeholder = 63 difference
+                    # Apply the same alignment as the model does internally:
+                    # Remove first label (placeholder) and prepend 64 visual ignore tokens
+                    batch_size = labels.shape[0]
+                    device = labels.device
+                    
+                    # Skip first token (placeholder) from labels
+                    labels_after = labels[:, 1:]  # (batch_size, seq_len-1)
+                    
+                    # Create ignore labels for visual tokens
+                    visual_ignore = torch.full((batch_size, 64), -100, dtype=labels.dtype, device=device)
+                    
+                    # Concatenate: visual_ignore + labels_after
+                    labels = torch.cat([visual_ignore, labels_after], dim=1)
+
             # Convert logits to predictions immediately (much smaller memory footprint)
             pred_ids = torch.argmax(logits, dim=-1)
             
