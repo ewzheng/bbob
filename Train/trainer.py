@@ -191,26 +191,31 @@ class BBOBTrainer(Trainer):
             flat_logits = logits.view(-1, logits.size(-1))
             flat_labels = labels.view(-1)
             
-            # CRITICAL: Pre-move digit/punct IDs to correct device to avoid repeated transfers
-            digit_or_punct = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids]).to(flat_labels.device)
+            # CRITICAL: Ensure loss function tensors are initialized on correct device
+            self._loss_func._ensure_device_tensors(flat_labels.device)
             
-            # OPTIMIZED: Use vectorized masking without .any() which causes CPU sync
-            valid_mask = (flat_labels >= 0)
-            digit_punct_mask = torch.isin(flat_labels, digit_or_punct)
-            mask = valid_mask & digit_punct_mask
-            
-            # CRITICAL: Use mask.sum() > 0 instead of mask.any() to avoid GPU-CPU sync during training
-            # Only compute guidance loss if we have valid tokens (without blocking)
-            mask_sum = mask.sum()
-            if mask_sum > 0:
-                # OPTIMIZED: Direct indexing without nonzero() which blocks GPU-CPU sync
-                masked_logits = flat_logits[mask]
-                masked_labels = flat_labels[mask]
+            # CRITICAL: Only proceed if we have valid digit/punct IDs
+            if self._loss_func.digit_ids is not None and self._loss_func.punct_ids is not None:
+                # CRITICAL: Pre-move digit/punct IDs to correct device to avoid repeated transfers
+                digit_or_punct = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids]).to(flat_labels.device)
                 
-                if masked_logits.numel() > 0:  # Safety check
-                    base_loss = F.cross_entropy(masked_logits, masked_labels, reduction="mean")
-                    factor = self._guidance_strength * (1.0 - self.state.global_step / self._guidance_steps)
-                    guidance_loss = factor * base_loss
+                # OPTIMIZED: Use vectorized masking without .any() which causes CPU sync
+                valid_mask = (flat_labels >= 0)
+                digit_punct_mask = torch.isin(flat_labels, digit_or_punct)
+                mask = valid_mask & digit_punct_mask
+                
+                # CRITICAL: Use mask.sum() > 0 instead of mask.any() to avoid GPU-CPU sync during training
+                # Only compute guidance loss if we have valid tokens (without blocking)
+                mask_sum = mask.sum()
+                if mask_sum > 0:
+                    # OPTIMIZED: Direct indexing without nonzero() which blocks GPU-CPU sync
+                    masked_logits = flat_logits[mask]
+                    masked_labels = flat_labels[mask]
+                    
+                    if masked_logits.numel() > 0:  # Safety check
+                        base_loss = F.cross_entropy(masked_logits, masked_labels, reduction="mean")
+                        factor = self._guidance_strength * (1.0 - self.state.global_step / self._guidance_steps)
+                        guidance_loss = factor * base_loss
 
         if self._loss_func is not None:
             loss = self._loss_func(outputs, labels)
