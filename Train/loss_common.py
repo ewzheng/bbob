@@ -220,13 +220,14 @@ class BBOBLoss:
             # every 4× interval: log a decoded prediction / target pair
             if self.step % (self.log_interval * 4) == 0:
                 # --------------------------------------------------
-                # Avoid full GPU→CPU sync: grab only the *decoded* ids
-                # we actually need, schedule an async transfer, and do
-                # *not* call .tolist() until after `.cpu()` so the copy
-                # happens in pinned memory without blocking the stream.
+                # CRITICAL: Use shifted tensors to match the actual loss computation
+                # The autoregressive loss uses shift_logits[..., :-1, :] and shift_labels[..., 1:]
+                # so our debug logging must use the same alignment.
                 # --------------------------------------------------
-                pred_ids = logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
-                tgt_ids  = labels[0].to(device="cpu", non_blocking=True)
+                # Get predictions from shifted logits (what the loss actually uses)
+                pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
+                # Get ground truth from shifted labels (what the loss actually uses)  
+                tgt_ids = shift_labels[0].to(device="cpu", non_blocking=True)
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
                 self.logger.info({
