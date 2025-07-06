@@ -124,23 +124,27 @@ class BBOBCollator:  # noqa: N801
 
         # Accept list / np.ndarray inputs
         if not isinstance(bboxes, torch.Tensor):
-            bboxes = torch.as_tensor(bboxes, dtype=dtype)
+            # CRITICAL: Ensure device consistency from the start
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            bboxes = torch.as_tensor(bboxes, dtype=dtype, device=device)
 
         if bboxes.numel() == 0:
             return bboxes.to(dtype=dtype)
 
-        bx = bboxes.to(dtype=dtype).clone()
+        # OPTIMIZED: Ensure consistent device throughout
+        device = bboxes.device
+        bx = bboxes.to(dtype=dtype, device=device).clone()
 
         # centre (cx,cy) and size (w,h)
         cxcy = bx[:, :2] + 0.5 * bx[:, 2:]
         wh   = bx[:, 2:]
 
         # random jitter on centre: ±jitter_ratio * (w,h)
-        trans_rng = (torch.rand_like(cxcy) * 2.0 - 1.0) * jitter_ratio
+        trans_rng = (torch.rand_like(cxcy, device=device) * 2.0 - 1.0) * jitter_ratio
         cxcy = cxcy + trans_rng * wh
 
         # random scaling on size: ±jitter_ratio
-        scale_rng = (torch.rand_like(wh) * 2.0 - 1.0) * jitter_ratio
+        scale_rng = (torch.rand_like(wh, device=device) * 2.0 - 1.0) * jitter_ratio
         wh = wh * (1.0 + scale_rng)
 
         # back to xywh (top-left origin)
@@ -227,13 +231,16 @@ class BBOBCollator:  # noqa: N801
         if img_key is None:
             raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
-        device = "cpu"
+        # CRITICAL: Determine target device early to avoid CPU-GPU mismatches
+        # Use GPU if available, otherwise CPU
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        
         if on_the_fly:
             processed = []
             for img in (item[img_key] for item in batch):
                 try:
                     pv = self.processor(img, return_tensors="pt")["pixel_values"][0]  # (3,256,256) float32 0-1
-                    processed.append(pv)
+                    processed.append(pv.to(device))  # Ensure on correct device
                     continue  # success – skip manual fallback
                 except Exception:
                     # Fallback to legacy manual branch for rare failures
@@ -241,11 +248,11 @@ class BBOBCollator:  # noqa: N801
 
                 # ---------------- manual fallback -------------------
                 if isinstance(img, torch.Tensor):
-                    t = img.to(dtype=torch.float32).div_(255.0)
+                    t = img.to(dtype=torch.float32, device=device).div_(255.0)
                 elif isinstance(img, np.ndarray):
-                    t = torch.as_tensor(img, dtype=torch.float32).div_(255.0)
+                    t = torch.as_tensor(img, dtype=torch.float32, device=device).div_(255.0)
                 elif isinstance(img, list):
-                    t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32).div_(255.0)
+                    t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32, device=device).div_(255.0)
                 else:
                     t = pil_to_tensor(img).float().div_(255.0).to(device)
 
@@ -266,7 +273,7 @@ class BBOBCollator:  # noqa: N801
                     nw = max(1, int(W * scale))
                     t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
 
-                    canvas = 0.5 * torch.ones(3, *TARGET_SIZE)
+                    canvas = 0.5 * torch.ones(3, *TARGET_SIZE, device=device)  # FIXED: specify device
                     dh = (TARGET_SIZE[1] - nh) // 2
                     dw = (TARGET_SIZE[0] - nw) // 2
                     canvas[:, dh : dh + nh, dw : dw + nw] = t
@@ -282,36 +289,36 @@ class BBOBCollator:  # noqa: N801
             # `images` / `pixel_values` in CHW format.  We simply stack and
             # normalise.
             # -------------------------------------------------------------
-            img_tensors = [torch.as_tensor(item[img_key]) for item in batch]
+            img_tensors = [torch.as_tensor(item[img_key], device=device) for item in batch]
 
             # Ensure float32 + 0‥1 range once for the whole list (cheap).
             ref = img_tensors[0]
             needs_cast = ref.dtype != torch.float32 or ref.max() > 1.1
             if needs_cast:
-                img_tensors = [t.to(dtype=torch.float32).div_(255.0) for t in img_tensors]
+                img_tensors = [t.to(dtype=torch.float32, device=device).div_(255.0) for t in img_tensors]
 
             pixel_values = torch.stack(img_tensors, 0)
 
         merged_input_ids, merged_labels = [], []
 
-        # Pre-compute common tokens once
-        image_placeholder = torch.tensor([placeholder_id], dtype=torch.long)
+        # CRITICAL: Pre-compute common tokens with correct device specification
+        image_placeholder = torch.tensor([placeholder_id], dtype=torch.long, device=device)
         bos_id = getattr(self.tokenizer, "bos_token_id", None)
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
         max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
 
         for item in batch:
             if "input_ids" in item:
-                instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long).flatten()
+                instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long, device=device).flatten()
             else:
                 text = item.get("text", "")
                 tokens = self.tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
-                instr_ids = tokens["input_ids"].squeeze(0)
+                instr_ids = tokens["input_ids"].squeeze(0).to(device)
 
             # Decide ground-truth detection text ----------------------------------
             if "target_boxes" in item and not self.is_eval:
                 # TRAIN MODE → jitter
-                bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32)
+                bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 bx = self.jitter_bboxes_norm(bx_raw, dtype=torch.float32)
 
                 # rebuild textual fragments so tokens match jittered coords
@@ -324,56 +331,59 @@ class BBOBCollator:  # noqa: N801
                     for bb, lab in zip(bx.tolist(), label_strs)
                 ]
                 det_text = " ".join(frags)
-                tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+                tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
                 tgt_ids = self._shuffle_fragments(tgt_ids)
             else:
                 # EVAL MODE or boxes absent – use stored token list as is
-                tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long).flatten()
+                tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
 
             #------ now same instr truncation logic uses tgt_ids variable ----
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
 
             if instr_ids.size(0) > max_txt_len:
                 instr_ids = instr_ids[-max_txt_len:]
-                tgt_ids = torch.empty(0, dtype=torch.long)  # More efficient than torch.tensor([])
+                tgt_ids = torch.empty(0, dtype=torch.long, device=device)  # FIXED: specify device
             else:
                 remaining = max_txt_len - instr_ids.size(0)
                 if tgt_ids.size(0) > remaining:
                     tgt_ids = tgt_ids[:remaining]
 
+                # CRITICAL: Fix device mismatches in BOS/EOS token creation
                 # --- ensure a single BOS token starts the instruction sequence ---
                 if bos_id is not None:
                     if instr_ids.numel() == 0:
                         # create sequence containing only <bos>
-                        instr_ids = torch.tensor([bos_id], dtype=torch.long)
+                        instr_ids = torch.tensor([bos_id], dtype=torch.long, device=device)
                     elif instr_ids[0] != bos_id:
                         # prepend or replace first token with <bos> depending on space
                         if instr_ids.size(0) >= self.tokenizer.model_max_length - tgt_ids.size(0):
                             # no room left – overwrite first token
                             instr_ids[0] = bos_id
                         else:
-                            instr_ids = torch.cat([torch.tensor([bos_id], dtype=torch.long), instr_ids])
+                            bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device)
+                            instr_ids = torch.cat([bos_tensor, instr_ids])
 
                 # --- ensure a single EOS token terminates the target sequence ---
                 if eos_id is not None:
                     if tgt_ids.numel() == 0:
                         # create sequence containing only <eos>
-                        tgt_ids = torch.tensor([eos_id], dtype=torch.long)
+                        tgt_ids = torch.tensor([eos_id], dtype=torch.long, device=device)
                     elif tgt_ids[-1] != eos_id:
                         # append or replace last token with <eos> depending on space
                         if tgt_ids.size(0) >= self.tokenizer.model_max_length - instr_ids.size(0):
                             # no room left – overwrite last token
                             tgt_ids[-1] = eos_id
                         else:
-                            tgt_ids = torch.cat([tgt_ids, torch.tensor([eos_id], dtype=torch.long)])
+                            eos_tensor = torch.tensor([eos_id], dtype=torch.long, device=device)
+                            tgt_ids = torch.cat([tgt_ids, eos_tensor])
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
             
-            # OPTIMIZED: Create labels more efficiently using sizes
+            # OPTIMIZED: Create labels more efficiently using sizes and correct device
             instr_size = instr_ids.size(0)
             total_prefix_size = 1 + instr_size  # placeholder + instruction
-            label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long)
+            label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long, device=device)
             labels = torch.cat([label_ignore, tgt_ids], dim=0)
 
             merged_input_ids.append(input_ids)

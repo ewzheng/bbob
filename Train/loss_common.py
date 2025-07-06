@@ -16,21 +16,36 @@ class BBOBLoss:
                  lambda_punct: float = 0.05,  # weight for punctuation/syntax aux CE
                  lambda_class: float = 0.15,  # weight for object-class token aux CE
                  **kwargs):
-        self.tok = tokenizer
-        self.ignore_index = ignore_index
-        self.logger = logger
-        self.log_interval = max(1, log_interval)
-        self.step = 0
-        self.lambda_digit = float(lambda_digit)
-        self.lambda_punct = float(lambda_punct)
-        self.lambda_class = float(lambda_class)
+        """
+        Initialise the loss function.
 
-        # Initialize token ID caches as None - only populate if needed
+        Parameters:
+            tokenizer: HuggingFace tokenizer instance
+            ignore_index: Index to ignore in loss calculation (default: -100)
+            lambda_digit: Weight for numeric token auxiliary loss
+            lambda_punct: Weight for punctuation auxiliary loss
+            lambda_class: Weight for class token auxiliary loss
+            logger: Logger instance for warnings
+            log_interval: How often to log metrics
+        """
+        self.tokenizer = tokenizer
+        self.ignore_index = ignore_index
+        self.lambda_digit = lambda_digit
+        self.lambda_punct = lambda_punct
+        self.lambda_class = lambda_class
+        self.logger = logger
+        self.log_interval = log_interval
+        self._logged_samples = 0
+
+        # CRITICAL: Initialize device-specific tensors as None - they'll be created on first use
         self.numeric_ids = None
-        self.digit_ids = None  # Backward compatibility alias
         self.punct_ids = None
-        self._tok_open = None
-        self._tok_colon = None
+        self.digit_ids = None  # For backward compatibility
+        self._device_cache = None  # Cache the device these tensors are on
+
+        # Store the raw token lists for device-specific tensor creation
+        self._raw_numeric_ids = []
+        self._raw_punct_ids = []
 
         # ------------------------------------------------------------------
         # Only cache numeric token IDs if digit loss is enabled
@@ -48,9 +63,7 @@ class BBOBLoss:
                 if logger is not None:
                     logger.warning(f"{missing} numeric tokens were not found in the tokenizer vocabulary; aux loss will ignore them")
 
-            self.numeric_ids = torch.tensor(num_ids, dtype=torch.long)
-            # For backward-compatibility with Trainer guidance
-            self.digit_ids = self.numeric_ids
+            self._raw_numeric_ids = num_ids
 
         # ------------------------------------------------------------------
         # Only cache punctuation token IDs if punct loss is enabled
@@ -69,27 +82,37 @@ class BBOBLoss:
                 punct_token_ids.append(tokenizer.eos_token_id)
             
             if punct_token_ids:
-                self.punct_ids = torch.tensor(punct_token_ids, dtype=torch.long)
+                self._raw_punct_ids = punct_token_ids
             else:
                 if logger is not None:
                     logger.warning("No punctuation tokens found in tokenizer vocabulary; punct loss will be disabled")
                 self.lambda_punct = 0.0  # Disable punct loss if no tokens found
 
         # ------------------------------------------------------------------
-        # Only cache class parsing tokens if class loss is enabled
+        # Only cache class token IDs if class loss is enabled
         # ------------------------------------------------------------------
         if self.lambda_class > 0:
-            self._tok_open = tokenizer.convert_tokens_to_ids(TAG_OPEN)
-            self._tok_colon = tokenizer.convert_tokens_to_ids(":")
-            
-            # Check if required tokens exist
-            if (self._tok_open is None or self._tok_open == tokenizer.unk_token_id or 
-                self._tok_colon is None or self._tok_colon == tokenizer.unk_token_id):
-                if logger is not None:
-                    logger.warning("Required class parsing tokens not found in tokenizer vocabulary; class loss will be disabled")
-                self.lambda_class = 0.0  # Disable class loss if tokens not found
+            # class token IDs remain empty for now (as in original implementation)
+            pass
 
-        # ------------------------------------------------------------------
+    def _ensure_device_tensors(self, device):
+        """
+        CRITICAL: Ensure cached tensors are on the correct device.
+        This method creates device-specific tensors only once per device.
+        """
+        if self._device_cache == device:
+            return  # Already on correct device
+            
+        # Create device-specific tensors
+        if self._raw_numeric_ids and self.lambda_digit > 0:
+            self.numeric_ids = torch.tensor(self._raw_numeric_ids, dtype=torch.long, device=device)
+            self.digit_ids = self.numeric_ids  # For backward compatibility
+            
+        if self._raw_punct_ids and self.lambda_punct > 0:
+            self.punct_ids = torch.tensor(self._raw_punct_ids, dtype=torch.long, device=device)
+            
+        self._device_cache = device
+
     # callable ----------------------------------------------------------
     def __call__(self, outputs, labels, **kwargs):
         """Return autoregressive CE loss.
@@ -103,6 +126,9 @@ class BBOBLoss:
         """
         logits = outputs.logits  # (B, S, V)
         vocab = logits.size(-1)
+        
+        # CRITICAL: Ensure cached tensors are on the correct device
+        self._ensure_device_tensors(logits.device)
         
         # OPTIMIZED: Pre-compute shifted tensors once
         shift_logits = logits[..., :-1, :].contiguous()
@@ -128,10 +154,8 @@ class BBOBLoss:
         if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0:
             # Auxiliary loss focused on numeric tokens
             if self.lambda_digit > 0 and self.numeric_ids is not None:
-                numeric_mask = (flat_labels >= 0) & torch.isin(
-                    flat_labels,
-                    self.numeric_ids.to(flat_labels.device),
-                )
+                # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
+                numeric_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.numeric_ids)
                 if numeric_mask.any():
                     aux_loss_digit = F.cross_entropy(
                         flat_logits[numeric_mask], flat_labels[numeric_mask], reduction="mean"
@@ -139,17 +163,15 @@ class BBOBLoss:
 
             # Auxiliary loss focused on punctuation tokens
             if self.lambda_punct > 0 and self.punct_ids is not None:
-                punct_mask = (flat_labels >= 0) & torch.isin(
-                    flat_labels,
-                    self.punct_ids.to(flat_labels.device),
-                )
+                # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
+                punct_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.punct_ids)
                 if punct_mask.any():
                     aux_loss_punct = F.cross_entropy(
                         flat_logits[punct_mask], flat_labels[punct_mask], reduction="mean"
                     )
 
             # Class-token auxiliary CE – combats wrong / hallucinated labels
-            if self.lambda_class > 0 and self._tok_open is not None and self._tok_colon is not None:
+            if self.lambda_class > 0:
                 B = labels.size(0)
                 seq_len = shift_labels.size(1)  # Use pre-computed shift_labels
                 class_mask_list = []

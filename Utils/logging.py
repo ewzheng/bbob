@@ -42,8 +42,11 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
 
     def preprocess_logits_for_metrics_impl(logits, labels):
         """
-        Memory-efficient preprocessing to avoid OOM during evaluation.
-        Processes logits immediately instead of accumulating them all in GPU memory.
+        OPTIMIZED: Memory-efficient preprocessing that works with token predictions.
+        
+        This function converts logits to predictions immediately and accumulates metrics
+        in memory-efficient way. The labels should already be properly aligned by the model's
+        forward method, so we don't need to adjust them here.
         """
         nonlocal token_accuracies, top3_accuracies, top5_accuracies
         nonlocal seq_correct_total, seq_total
@@ -54,49 +57,33 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
             # Convert logits to predictions immediately (much smaller memory footprint)
             pred_ids = torch.argmax(logits, dim=-1)
             
-            # Handle sequence length mismatch due to image token replacement
+            # Verify sequence alignment - model should have already handled this correctly
             if labels is not None and logits.shape[1] != labels.shape[1]:
-                # Adjust labels to match logits sequence length
-                # This happens when visual tokens are inserted, expanding the sequence
-                batch_size = labels.shape[0]
-                logits_seq_len = logits.shape[1]
-                labels_seq_len = labels.shape[1]
-                
-                # Calculate how many visual tokens were inserted (usually 64)
-                visual_tokens = logits_seq_len - labels_seq_len
-                
-                if visual_tokens > 0:
-                    # OPTIMIZED: Create adjusted labels with IGNORE_INDEX for visual token positions
-                    device = labels.device
-                    
-                    # Vectorized approach: process entire batch at once
-                    # Skip first token (placeholder) from labels
-                    labels_after = labels[:, 1:]  # (batch_size, labels_seq_len-1)
-                    
-                    # Create ignore labels for visual tokens for entire batch
-                    visual_ignore = torch.full((batch_size, visual_tokens), -100, dtype=labels.dtype, device=device)
-                    
-                    # Concatenate: visual_ignore + labels_after
-                    labels = torch.cat([visual_ignore, labels_after], dim=1)
+                raise ValueError(
+                    f"Sequence length mismatch in metrics: logits has {logits.shape[1]} tokens, "
+                    f"but labels has {labels.shape[1]} tokens. This should have been handled by the model."
+                )
             
             # Calculate multiple accuracy metrics
             if labels is not None:
                 mask = (labels != -100)
-                if mask.sum() > 0:
+                mask_sum = mask.sum()
+                
+                if mask_sum > 0:
                     # Exact token accuracy (top-1)
                     correct = (pred_ids == labels) & mask
-                    accuracy = correct.sum().float() / mask.sum().float()
+                    accuracy = correct.sum().float() / mask_sum.float()
                     token_accuracies.append(accuracy.item())
                     
                     # Top-k accuracies (k=3 & 5)
                     top3_preds = torch.topk(logits, k=3, dim=-1).indices   # [B, S, 3]
                     top3_correct = (top3_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
-                    top3_acc = top3_correct.sum().float() / mask.sum().float()
+                    top3_acc = top3_correct.sum().float() / mask_sum.float()
                     top3_accuracies.append(top3_acc.item())
 
                     top5_preds = torch.topk(logits, k=5, dim=-1).indices   # [B, S, 5]
                     top5_correct = (top5_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
-                    top5_acc = top5_correct.sum().float() / mask.sum().float()
+                    top5_acc = top5_correct.sum().float() / mask_sum.float()
                     top5_accuracies.append(top5_acc.item())
                     
                     # Sequence-level accuracy (vectorised)
@@ -110,7 +97,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                         probs = F.softmax(logits, dim=-1)
 
                         # Only operate on non-ignored target positions (labels != -100)
-                        if mask.any():
+                        if mask_sum > 0:
                             labels_valid  = labels[mask]           # (N,)
                             probs_valid   = probs[mask]            # (N, V)
 
@@ -124,12 +111,14 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                             pred_target_sim_sum   += cos_sim.sum().item()
                             pred_target_sim_count += cos_sim.numel()
 
-                            # ----------------- detection metrics ----------------------
+                            # Detection metrics - preserve device correctly
                             if do_detection_metrics:
                                 try:
+                                    # CRITICAL: Keep tensors on original device, avoid device transfers
+                                    pred_masked = pred_ids.masked_fill(~mask, -100)
                                     det_metrics = detection_metrics_batch(
-                                        torch.as_tensor(pred_ids.masked_fill(~mask, -100), dtype=torch.long),
-                                        torch.as_tensor(labels,   dtype=torch.long),
+                                        pred_masked,  # Keep original tensor with device preserved
+                                        labels,       # Keep original tensor with device preserved
                                         tokenizer,
                                     )
                                     det_iou_vals.append(det_metrics.get("mean_iou", 0.0))
@@ -141,8 +130,8 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
 
                                     # second threshold (IoU 0.25)
                                     det25 = detection_metrics_batch(
-                                        torch.as_tensor(pred_ids.masked_fill(~mask, -100), dtype=torch.long),
-                                        torch.as_tensor(labels,   dtype=torch.long),
+                                        pred_masked,  # Keep original tensor with device preserved
+                                        labels,       # Keep original tensor with device preserved
                                         tokenizer,
                                         iou_thresh=0.25,
                                     )
@@ -151,7 +140,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                                 except Exception as e:
                                     print(f"Warning: per-batch detection metric failed – {e}")
                     except Exception as e:
-                        print(f"Error calculating prediction-target similarity: {e}")                        
+                        print(f"Error calculating prediction-target similarity: {e}")
             
             # Return only predictions; HF evaluation API will pass labels separately
             return pred_ids

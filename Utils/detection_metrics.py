@@ -266,15 +266,18 @@ def average_precision(
     if not preds:
         return 0.0
 
-    # Cumulate TP/FP
-    tps = torch.tensor([int(tp) for _, tp in preds]).cumsum(0)
-    fps = torch.tensor([1 - int(tp) for _, tp in preds]).cumsum(0)
+    # CRITICAL: Determine device for tensor operations
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Cumulate TP/FP with correct device specification
+    tps = torch.tensor([int(tp) for _, tp in preds], device=device, dtype=torch.long).cumsum(0)
+    fps = torch.tensor([1 - int(tp) for _, tp in preds], device=device, dtype=torch.long).cumsum(0)
     recalls = tps / max(1, total_gt)
     precisions = tps / (tps + fps)
 
     # 11-point interpolation (recall 0.0 … 1.0 step 0.1)
     ap = 0.0
-    for r in torch.linspace(0.0, 1.0, 11):
+    for r in torch.linspace(0.0, 1.0, 11, device=device):
         precisions_r = precisions[recalls >= r]
         p = precisions_r.max() if len(precisions_r) else 0.0
         ap += p / 11
@@ -307,7 +310,9 @@ def detection_ap_batch(
         # predicted objects with scores
         objects = _object_scores(ids, lp, tokenizer, ignore_index=ignore_index)
 
-        preds_boxes = torch.tensor([o[2] for o in objects], dtype=torch.float32)
+        # CRITICAL: Ensure device consistency for tensor operations
+        device = logits.device
+        preds_boxes = torch.tensor([o[2] for o in objects], dtype=torch.float32, device=device)
         preds_labels = [o[1] for o in objects]
         preds_scores = [o[0] for o in objects]
 
