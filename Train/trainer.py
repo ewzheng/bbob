@@ -168,12 +168,19 @@ class BBOBTrainer(Trainer):
         # right device.
         inputs = super().prepare_inputs(inputs)
 
+        # Teacher-forcing replacement happens next (reuse existing logic)
+        inputs = self._apply_teacher_forcing(inputs)
+
+        return inputs
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
+        labels = inputs.get("labels")
+        
         # ---------------------------------------------------------------
-        # Ensure labels are length-aligned with logits BEFORE model forward
-        # so detection metrics receive the corrected tensor.  We transform
-        # only when the labels still contain the single placeholder — i.e.
-        # when len(labels) == len(input_ids).  This operation is idempotent
-        # and will be skipped for batches already aligned.
+        # CRITICAL: Align labels AFTER collator but BEFORE model forward
+        # The collator creates labels with same length as input_ids, but the model
+        # will replace the single placeholder with 64 visual tokens, so we need
+        # to pre-align the labels to match the expected logits length.
         # ---------------------------------------------------------------
         if "labels" in inputs and "input_ids" in inputs:
             lbl = inputs["labels"]
@@ -186,26 +193,9 @@ class BBOBTrainer(Trainer):
                 vis_ignore = torch.full((lbl.size(0), VIS_TOKENS), -100,
                                         dtype=lbl.dtype, device=lbl.device)
                 inputs["labels"] = torch.cat([vis_ignore, lbl_no_ph], dim=1)
-
-        # Teacher-forcing replacement happens next (reuse existing logic)
-        inputs = self._apply_teacher_forcing(inputs)
-
-        return inputs
-
-    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
-        labels = inputs.get("labels")
+                labels = inputs["labels"]  # Update local variable
+        
         outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
-
-        # Adjust labels to match token replacement if needed
-        if labels is not None and hasattr(outputs, "logits"):
-            logits = outputs.logits
-            if labels.size(1) != logits.size(1):
-                # Token replacement happened - need to adjust labels
-                input_ids = inputs.get("input_ids")
-                if input_ids is not None and hasattr(model, '_prepare_labels_for_replacement'):
-                    # Calculate visual tokens (logits sequence length - original input length + 1 for placeholder)
-                    visual_tokens = logits.size(1) - input_ids.size(1) + 1
-                    labels = model._prepare_labels_for_replacement(input_ids, labels, visual_tokens)
 
         guidance_loss = None
         if self.model.training and self.state.global_step < self._guidance_steps and labels is not None and self._loss_func is not None:
