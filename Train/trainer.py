@@ -164,11 +164,29 @@ class BBOBTrainer(Trainer):
         
         outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
 
+        # CRITICAL: Get the aligned labels that the model actually used for loss computation
+        # The model's forward pass aligns labels internally, but we need to do the same alignment
+        # for the guidance loss to ensure tensor shapes match
+        aligned_labels = labels
+        if labels is not None and hasattr(model, '_prepare_labels_for_replacement'):
+            # Get visual embeddings to know the alignment size
+            visual_embeds = model._prepare_visual_inputs(inputs.get("images"))
+            if visual_embeds is not None:
+                # Apply the same alignment as the model does internally
+                aligned_labels = model._prepare_labels_for_replacement(
+                    inputs.get("input_ids"), labels, visual_embeds.shape[1]
+                )
+
         guidance_loss = None
-        if self.model.training and self.state.global_step < self._guidance_steps and labels is not None and self._loss_func is not None:
+        if self.model.training and self.state.global_step < self._guidance_steps and aligned_labels is not None and self._loss_func is not None:
             logits = outputs.logits  # (B, S, V)
-            flat_logits = logits.view(-1, logits.size(-1))
-            flat_labels = labels.view(-1)
+            
+            # CRITICAL: Use shifted tensors to match the autoregressive loss computation
+            # This ensures tensor shapes align correctly after label alignment
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = aligned_labels[..., 1:].contiguous()
+            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
+            flat_labels = shift_labels.view(-1)
             
             # CRITICAL: Ensure loss function tensors are initialized on correct device
             self._loss_func._ensure_device_tensors(flat_labels.device)
