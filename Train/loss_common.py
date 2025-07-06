@@ -94,6 +94,14 @@ class BBOBLoss:
         if self.lambda_class > 0:
             # class token IDs remain empty for now (as in original implementation)
             pass
+        
+        # CRITICAL: Initialize token IDs for class-token auxiliary loss
+        # These are needed even if lambda_class is 0 to avoid AttributeError
+        self._tok_open = tokenizer.convert_tokens_to_ids(TAG_OPEN)
+        self._tok_colon = tokenizer.convert_tokens_to_ids(":")
+        
+        # Initialize step counter for logging
+        self.step = 0
 
     def _ensure_device_tensors(self, device):
         """
@@ -206,7 +214,7 @@ class BBOBLoss:
             if self.step % (self.log_interval * 4) == 0:
                 pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
                 tgt_ids  = labels[0].detach().cpu()
-                pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tok)
+                pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
                 self.logger.info({
                     "loss": loss.item(),
