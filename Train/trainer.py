@@ -196,8 +196,13 @@ class BBOBTrainer(Trainer):
             
             # CRITICAL: Only proceed if we have valid digit/punct IDs
             if self._loss_func.digit_ids is not None and self._loss_func.punct_ids is not None:
-                # CRITICAL: Pre-move digit/punct IDs to correct device to avoid repeated transfers
-                digit_or_punct = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids]).to(flat_labels.device)
+                # CRITICAL: Cache concatenated tensor instead of recreating every forward pass
+                # This was a major performance bottleneck!
+                if not hasattr(self._loss_func, '_digit_punct_cache') or self._loss_func._digit_punct_cache is None:
+                    self._loss_func._digit_punct_cache = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids])
+                
+                # Move cached tensor to correct device (much cheaper than cat+to every time)
+                digit_or_punct = self._loss_func._digit_punct_cache.to(flat_labels.device, non_blocking=True)
                 
                 # OPTIMIZED: Use vectorized masking without .any() which causes CPU sync
                 valid_mask = (flat_labels >= 0)

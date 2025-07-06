@@ -42,6 +42,7 @@ class BBOBLoss:
         self.punct_ids = None
         self.digit_ids = None  # For backward compatibility
         self._device_cache = None  # Cache the device these tensors are on
+        self._digit_punct_cache = None  # Cache concatenated digit+punct tensor for performance
 
         # Store the raw token lists for device-specific tensor creation
         self._raw_numeric_ids = []
@@ -110,6 +111,9 @@ class BBOBLoss:
         """
         if self._device_cache == device:
             return  # Already on correct device
+        
+        # Invalidate cached concatenated tensor when device changes
+        self._digit_punct_cache = None
             
         # Create device-specific tensors
         if self._raw_numeric_ids and self.lambda_digit > 0:

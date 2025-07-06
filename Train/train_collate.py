@@ -231,8 +231,6 @@ class BBOBCollator:  # noqa: N801
         if img_key is None:
             raise KeyError("Batch items lack an 'images'/'image'/'pixel_values' field")
 
-        # CRITICAL: Determine target device early to avoid CPU-GPU mismatches
-        # Use GPU if available, otherwise CPU
         device = "cpu"
         
         if on_the_fly:
@@ -306,6 +304,11 @@ class BBOBCollator:  # noqa: N801
         bos_id = getattr(self.tokenizer, "bos_token_id", None)
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
         max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
+        
+        # OPTIMIZED: Pre-compute common tensors outside the loop to avoid repeated creation
+        bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device) if bos_id is not None else None
+        eos_tensor = torch.tensor([eos_id], dtype=torch.long, device=device) if eos_id is not None else None
+        empty_tensor = torch.empty(0, dtype=torch.long, device=device)
 
         for item in batch:
             if "input_ids" in item:
@@ -342,7 +345,7 @@ class BBOBCollator:  # noqa: N801
 
             if instr_ids.size(0) > max_txt_len:
                 instr_ids = instr_ids[-max_txt_len:]
-                tgt_ids = torch.empty(0, dtype=torch.long, device=device)  # FIXED: specify device
+                tgt_ids = empty_tensor.clone()  # Use pre-computed empty tensor
             else:
                 remaining = max_txt_len - instr_ids.size(0)
                 if tgt_ids.size(0) > remaining:
@@ -350,31 +353,29 @@ class BBOBCollator:  # noqa: N801
 
                 # CRITICAL: Fix device mismatches in BOS/EOS token creation
                 # --- ensure a single BOS token starts the instruction sequence ---
-                if bos_id is not None:
+                if bos_tensor is not None:
                     if instr_ids.numel() == 0:
                         # create sequence containing only <bos>
-                        instr_ids = torch.tensor([bos_id], dtype=torch.long, device=device)
+                        instr_ids = bos_tensor.clone()
                     elif instr_ids[0] != bos_id:
                         # prepend or replace first token with <bos> depending on space
                         if instr_ids.size(0) >= self.tokenizer.model_max_length - tgt_ids.size(0):
                             # no room left – overwrite first token
                             instr_ids[0] = bos_id
                         else:
-                            bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device)
                             instr_ids = torch.cat([bos_tensor, instr_ids])
 
                 # --- ensure a single EOS token terminates the target sequence ---
-                if eos_id is not None:
+                if eos_tensor is not None:
                     if tgt_ids.numel() == 0:
                         # create sequence containing only <eos>
-                        tgt_ids = torch.tensor([eos_id], dtype=torch.long, device=device)
+                        tgt_ids = eos_tensor.clone()
                     elif tgt_ids[-1] != eos_id:
                         # append or replace last token with <eos> depending on space
                         if tgt_ids.size(0) >= self.tokenizer.model_max_length - instr_ids.size(0):
                             # no room left – overwrite last token
                             tgt_ids[-1] = eos_id
                         else:
-                            eos_tensor = torch.tensor([eos_id], dtype=torch.long, device=device)
                             tgt_ids = torch.cat([tgt_ids, eos_tensor])
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
