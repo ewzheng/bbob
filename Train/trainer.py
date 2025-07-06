@@ -168,18 +168,24 @@ class BBOBTrainer(Trainer):
         # right device.
         inputs = super().prepare_inputs(inputs)
 
+        # ---------------------------------------------------------------
+        # Ensure labels are length-aligned with logits BEFORE model forward
+        # so detection metrics receive the corrected tensor.  We transform
+        # only when the labels still contain the single placeholder — i.e.
+        # when len(labels) == len(input_ids).  This operation is idempotent
+        # and will be skipped for batches already aligned.
+        # ---------------------------------------------------------------
         if "labels" in inputs and "input_ids" in inputs:
-            labels = inputs["labels"]
-            ids    = inputs["input_ids"]
+            lbl = inputs["labels"]
+            ids = inputs["input_ids"]
 
-            if labels is not None and ids is not None and labels.size(1) != ids.size(1):
-                VIS_TOKENS = 64  # Keep in sync with Train.train_collate
-                diff = VIS_TOKENS - 1  # placeholder removed, tokens added
-
-                # Only pad when the expected diff matches; otherwise leave as-is.
-                if labels.size(1) + diff == ids.size(1):
-                    pad = torch.full((labels.size(0), diff), -100, dtype=labels.dtype, device=labels.device)
-                    inputs["labels"] = torch.cat([pad, labels], dim=1)
+            if lbl is not None and ids is not None and lbl.size(1) == ids.size(1):
+                VIS_TOKENS = 64  # collator constant
+                # remove placeholder label & prepend ignore slots for visual tokens
+                lbl_no_ph = lbl[:, 1:]
+                vis_ignore = torch.full((lbl.size(0), VIS_TOKENS), -100,
+                                        dtype=lbl.dtype, device=lbl.device)
+                inputs["labels"] = torch.cat([vis_ignore, lbl_no_ph], dim=1)
 
         # Teacher-forcing replacement happens next (reuse existing logic)
         inputs = self._apply_teacher_forcing(inputs)
