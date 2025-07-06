@@ -219,8 +219,14 @@ class BBOBLoss:
         if self.logger is not None:
             # every 4× interval: log a decoded prediction / target pair
             if self.step % (self.log_interval * 4) == 0:
-                pred_ids = logits.argmax(dim=-1)[0].detach().cpu()
-                tgt_ids  = labels[0].detach().cpu()
+                # --------------------------------------------------
+                # Avoid full GPU→CPU sync: grab only the *decoded* ids
+                # we actually need, schedule an async transfer, and do
+                # *not* call .tolist() until after `.cpu()` so the copy
+                # happens in pinned memory without blocking the stream.
+                # --------------------------------------------------
+                pred_ids = logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
+                tgt_ids  = labels[0].to(device="cpu", non_blocking=True)
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
                 self.logger.info({
