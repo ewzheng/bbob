@@ -59,7 +59,6 @@ class BBOBTrainer(Trainer):
         tf_start_p: float = 1.0,
         tf_end_p: float = 0.0,
         total_tf_steps: int = 0,
-        total_gd_steps: int = 0,
         tf_schedule: str = "cosine",
         tf_ramp_ratio: float = 0.8,
         compute_loss_func: Optional[Any] = None,
@@ -177,54 +176,10 @@ class BBOBTrainer(Trainer):
                     inputs.get("input_ids"), labels, visual_embeds.shape[1]
                 )
 
-        guidance_loss = None
-        if self.model.training and self.state.global_step < self._guidance_steps and aligned_labels is not None and self._loss_func is not None:
-            logits = outputs.logits  # (B, S, V)
-            
-            # CRITICAL: Use shifted tensors to match the autoregressive loss computation
-            # This ensures tensor shapes align correctly after label alignment
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = aligned_labels[..., 1:].contiguous()
-            flat_logits = shift_logits.view(-1, shift_logits.size(-1))
-            flat_labels = shift_labels.view(-1)
-            
-            # CRITICAL: Ensure loss function tensors are initialized on correct device
-            self._loss_func._ensure_device_tensors(flat_labels.device)
-            
-            # CRITICAL: Only proceed if we have valid digit/punct IDs
-            if self._loss_func.digit_ids is not None and self._loss_func.punct_ids is not None:
-                # CRITICAL: Cache concatenated tensor instead of recreating every forward pass
-                # This was a major performance bottleneck!
-                if not hasattr(self._loss_func, '_digit_punct_cache') or self._loss_func._digit_punct_cache is None:
-                    self._loss_func._digit_punct_cache = torch.cat([self._loss_func.digit_ids, self._loss_func.punct_ids])
-                
-                # Move cached tensor to correct device (much cheaper than cat+to every time)
-                digit_or_punct = self._loss_func._digit_punct_cache.to(flat_labels.device, non_blocking=True)
-                
-                # OPTIMIZED: Use vectorized masking without .any() which causes CPU sync
-                valid_mask = (flat_labels >= 0)
-                digit_punct_mask = torch.isin(flat_labels, digit_or_punct)
-                mask = valid_mask & digit_punct_mask
-                
-                # CRITICAL: Use mask.sum() > 0 instead of mask.any() to avoid GPU-CPU sync during training
-                # Only compute guidance loss if we have valid tokens (without blocking)
-                mask_sum = mask.sum()
-                if mask_sum > 0:
-                    # OPTIMIZED: Direct indexing without nonzero() which blocks GPU-CPU sync
-                    masked_logits = flat_logits[mask]
-                    masked_labels = flat_labels[mask]
-                    
-                    if masked_logits.numel() > 0:  # Safety check
-                        base_loss = F.cross_entropy(masked_logits, masked_labels, reduction="mean")
-                        factor = self._guidance_strength * (1.0 - self.state.global_step / self._guidance_steps)
-                        guidance_loss = factor * base_loss
-
         if self._loss_func is not None:
             # CRITICAL: Use aligned labels for main loss function to ensure tensor shape consistency
             loss_labels = aligned_labels if aligned_labels is not None else labels
             loss = self._loss_func(outputs, loss_labels)
-            if guidance_loss is not None:
-                loss = loss + guidance_loss
         else:
             # Use standard cross-entropy loss when no custom loss function is provided
             if labels is not None and hasattr(outputs, "logits"):
