@@ -139,6 +139,11 @@ class BBOBLoss:
         logits = outputs.logits  # (B, S, V)
         vocab = logits.size(-1)
         
+        # DEBUG: Log initial tensor shapes
+        if self.logger is not None and self.step % (self.log_interval * 4) == 0:
+            self.logger.info(f"DEBUG LOSS - Initial logits shape: {logits.shape}")
+            self.logger.info(f"DEBUG LOSS - Initial labels shape: {labels.shape}")
+        
         # CRITICAL: Ensure cached tensors are on the correct device
         self._ensure_device_tensors(logits.device)
         
@@ -147,6 +152,13 @@ class BBOBLoss:
         shift_labels = labels[..., 1:].contiguous()
         flat_logits = shift_logits.view(-1, vocab)
         flat_labels = shift_labels.view(-1)
+        
+        # DEBUG: Log shifted tensor shapes
+        if self.logger is not None and self.step % (self.log_interval * 4) == 0:
+            self.logger.info(f"DEBUG LOSS - Shifted logits shape: {shift_logits.shape}")
+            self.logger.info(f"DEBUG LOSS - Shifted labels shape: {shift_labels.shape}")
+            self.logger.info(f"DEBUG LOSS - Flat logits shape: {flat_logits.shape}")
+            self.logger.info(f"DEBUG LOSS - Flat labels shape: {flat_labels.shape}")
         
         # Main cross-entropy loss
         loss = F.cross_entropy(
