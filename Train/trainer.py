@@ -169,8 +169,8 @@ class BBOBTrainer(Trainer):
             if labels is not None and hasattr(outputs, "logits"):
                 logits = outputs.logits
                 # Shift logits and labels for causal LM loss
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
+                shift_logits = logits[..., :-1, :]
+                shift_labels = labels[..., 1:]
                 loss = F.cross_entropy(
                     shift_logits.view(-1, shift_logits.size(-1)),
                     shift_labels.view(-1),

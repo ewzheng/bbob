@@ -143,8 +143,8 @@ class BBOBLoss:
         self._ensure_device_tensors(logits.device)
         
         # OPTIMIZED: Pre-compute shifted tensors once
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
+        shift_logits = logits[..., :-1, :]
+        shift_labels = labels[..., 1:]
         flat_logits = shift_logits.view(-1, vocab)
         flat_labels = shift_labels.view(-1)
         

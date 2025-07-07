@@ -87,7 +87,7 @@ def train(
         lr_scheduler_type="cosine",
         warmup_ratio=warmup_ratio,
         include_num_input_tokens_seen=True,
-        torch_empty_cache_steps     = max(steps_per_epoch // 2, 0.1),
+        torch_empty_cache_steps     = max(steps_per_epoch // 2, 50),
     )
 
     tokenizer = model.get_tokenizer()
