@@ -139,11 +139,6 @@ class BBOBLoss:
         logits = outputs.logits  # (B, S, V)
         vocab = logits.size(-1)
         
-        # DEBUG: Log initial tensor shapes
-        if self.logger is not None and self.step % (self.log_interval * 4) == 0:
-            self.logger.info(f"DEBUG LOSS - Initial logits shape: {logits.shape}")
-            self.logger.info(f"DEBUG LOSS - Initial labels shape: {labels.shape}")
-        
         # CRITICAL: Ensure cached tensors are on the correct device
         self._ensure_device_tensors(logits.device)
         
@@ -152,13 +147,6 @@ class BBOBLoss:
         shift_labels = labels[..., 1:].contiguous()
         flat_logits = shift_logits.view(-1, vocab)
         flat_labels = shift_labels.view(-1)
-        
-        # DEBUG: Log shifted tensor shapes
-        if self.logger is not None and self.step % (self.log_interval * 4) == 0:
-            self.logger.info(f"DEBUG LOSS - Shifted logits shape: {shift_logits.shape}")
-            self.logger.info(f"DEBUG LOSS - Shifted labels shape: {shift_labels.shape}")
-            self.logger.info(f"DEBUG LOSS - Flat logits shape: {flat_logits.shape}")
-            self.logger.info(f"DEBUG LOSS - Flat labels shape: {flat_labels.shape}")
         
         # Main cross-entropy loss
         loss = F.cross_entropy(
@@ -231,40 +219,9 @@ class BBOBLoss:
         if self.logger is not None:
             # every 4× interval: log a decoded prediction / target pair
             if self.step % (self.log_interval * 4) == 0:
-                # --------------------------------------------------
-                # CRITICAL: Use shifted tensors to match the actual loss computation
-                # The autoregressive loss uses shift_logits[..., :-1, :] and shift_labels[..., 1:]
-                # so our debug logging must use the same alignment.
-                # --------------------------------------------------
-                
-                # DEBUG: Log tensor shapes and sample values to understand the issue
-                self.logger.info(f"DEBUG - logits.shape: {logits.shape}, labels.shape: {labels.shape}")
-                
-                # Get predictions from logits (already shifted by trainer)
-                pred_ids = logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
-                # Get ground truth from labels (already shifted by trainer)  
-                tgt_ids = labels[0].to(device="cpu", non_blocking=True)
-                
-                # DEBUG: Check what's actually in the shifted labels
-                non_ignore_mask = shift_labels[0] != self.ignore_index
-                non_ignore_positions = torch.where(non_ignore_mask)[0]
-                non_ignore_values = shift_labels[0][non_ignore_mask]
-                
-                self.logger.info(f"DEBUG - Non-ignore positions (first 10): {non_ignore_positions[:10].tolist()}")
-                self.logger.info(f"DEBUG - Non-ignore values (first 20): {non_ignore_values[:20].tolist()}")
-                self.logger.info(f"DEBUG - Total non-ignore tokens: {non_ignore_mask.sum().item()}")
-                
-                # DEBUG: Check predictions at non-ignore positions
-                if non_ignore_mask.sum() > 0:
-                    pred_at_targets = shift_logits.argmax(dim=-1)[0][non_ignore_mask]
-                    self.logger.info(f"DEBUG - Predictions at target positions: {pred_at_targets[:20].tolist()}")
-                
-                # DEBUG: Log sample token IDs to see what we're actually decoding
-                pred_sample = pred_ids.tolist()[:20]
-                tgt_sample = tgt_ids.tolist()[:20]
-                self.logger.info(f"DEBUG - pred_ids sample: {pred_sample}")
-                self.logger.info(f"DEBUG - tgt_ids sample: {tgt_sample}")
-                self.logger.info(f"DEBUG - UNK token ID: {self.tokenizer.unk_token_id}")
+                # Use shifted tensors for debug output to match loss computation
+                pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
+                tgt_ids = shift_labels[0].to(device="cpu", non_blocking=True)
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
