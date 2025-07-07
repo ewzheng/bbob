@@ -76,8 +76,8 @@ def train(
         report_to="none",
         remove_unused_columns=False,
         dataloader_num_workers=num_workers,
-        dataloader_prefetch_factor=num_workers+4,
-        dataloader_persistent_workers=False,
+        dataloader_prefetch_factor=8,
+        dataloader_persistent_workers=True,
         dataloader_pin_memory=True,
         save_total_limit=8,
         save_safetensors=True,
@@ -87,7 +87,7 @@ def train(
         lr_scheduler_type="cosine",
         warmup_ratio=warmup_ratio,
         include_num_input_tokens_seen=True,
-        torch_empty_cache_steps     = max(steps_per_epoch // 2, 1), # flush cache after eval
+        torch_empty_cache_steps     = max(steps_per_epoch // 8, 1), # flush cache more frequently to prevent fragmentation
     )
 
     tokenizer = model.get_tokenizer()
@@ -155,7 +155,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.num_workers == -1:
-        num_workers = min(mp.cpu_count() - 4, 8)
+        num_workers = min(mp.cpu_count() - 2, 12)  # Use more workers for CPU-intensive collation
     else:
         num_workers = args.num_workers
 

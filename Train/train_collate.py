@@ -296,6 +296,36 @@ class BBOBCollator:  # noqa: N801
 
             pixel_values = torch.stack(img_tensors, 0)
 
+        # OPTIMIZED: Batch-vectorized bbox processing
+        # Extract all bboxes and labels from batch at once
+        all_bboxes = []
+        all_labels = []
+        batch_indices = []  # Track which sample each bbox belongs to
+        
+        for i, item in enumerate(batch):
+            if "target_boxes" in item and not self.is_eval:
+                bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
+                if bx_raw.numel() > 0:  # Only process non-empty bbox lists
+                    all_bboxes.append(bx_raw)
+                    label_strs = item.get("target_label_strs", ["obj"] * bx_raw.size(0))[: bx_raw.size(0)]
+                    all_labels.extend(label_strs)
+                    batch_indices.extend([i] * bx_raw.size(0))
+        
+        # Vectorized bbox jittering for all bboxes at once
+        jittered_bboxes = []
+        if all_bboxes:
+            # Concatenate all bboxes into one tensor
+            combined_bboxes = torch.cat(all_bboxes, dim=0)
+            # Jitter all bboxes in one vectorized operation
+            jittered_combined = self.jitter_bboxes_norm(combined_bboxes, dtype=torch.float32)
+            
+            # Split back into per-sample groups
+            start_idx = 0
+            for i, bx_raw in enumerate(all_bboxes):
+                end_idx = start_idx + bx_raw.size(0)
+                jittered_bboxes.append(jittered_combined[start_idx:end_idx])
+                start_idx = end_idx
+
         merged_input_ids, merged_labels = [], []
 
         # CRITICAL: Pre-compute common tokens with correct device specification
@@ -309,7 +339,12 @@ class BBOBCollator:  # noqa: N801
         eos_tensor = torch.tensor([eos_id], dtype=torch.long, device=device) if eos_id is not None else None
         empty_tensor = torch.empty(0, dtype=torch.long, device=device)
 
-        for item in batch:
+        # OPTIMIZED: Pre-compute coordinate formatter to avoid lambda creation in loop
+        def fmt_coord(v):
+            return f"{max(0.0, min(1.0, v)):.3f}"
+
+        bbox_idx = 0
+        for i, item in enumerate(batch):
             if "input_ids" in item:
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long, device=device).flatten()
             else:
@@ -319,23 +354,26 @@ class BBOBCollator:  # noqa: N801
 
             # Decide ground-truth detection text ----------------------------------
             if "target_boxes" in item and not self.is_eval:
-                # TRAIN MODE → jitter
+                # TRAIN MODE → use pre-jittered bboxes
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
-                bx = self.jitter_bboxes_norm(bx_raw, dtype=torch.float32)
+                if bx_raw.numel() > 0 and bbox_idx < len(jittered_bboxes):
+                    bx = jittered_bboxes[bbox_idx]
+                    bbox_idx += 1
+                    
+                    # rebuild textual fragments so tokens match jittered coords
+                    label_strs = item.get("target_label_strs", ["obj"] * bx.size(0))[: bx.size(0)]
 
-                # rebuild textual fragments so tokens match jittered coords
-                label_strs = item.get("target_label_strs", ["obj"] * bx.size(0))[: bx.size(0)]
-
-                fmt_coord = lambda v: f"{max(0.0, min(1.0, v)):.3f}"
-
-                frags = [
-                    f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
-                    for bb, lab in zip(bx.tolist(), label_strs)
-                ]
-                det_text = " ".join(frags)
-                
-                tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
-                tgt_ids = self._shuffle_fragments(tgt_ids)
+                    frags = [
+                        f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
+                        for bb, lab in zip(bx.tolist(), label_strs)
+                    ]
+                    det_text = " ".join(frags)
+                    
+                    tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
+                    tgt_ids = self._shuffle_fragments(tgt_ids)
+                else:
+                    # Empty bboxes case
+                    tgt_ids = empty_tensor.clone()
             else:
                 # EVAL MODE or boxes absent – use stored token list as is
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
