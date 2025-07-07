@@ -219,9 +219,9 @@ class BBOBLoss:
         if self.logger is not None:
             # every 4× interval: log a decoded prediction / target pair
             if self.step % (self.log_interval * 4) == 0:
-                # Use shifted tensors for debug output to match loss computation
-                pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
-                tgt_ids = shift_labels[0].to(device="cpu", non_blocking=True)
+                # Use original tensors for debug output (shifted tensors cause misalignment)
+                pred_ids = logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
+                tgt_ids = labels[0].to(device="cpu", non_blocking=True)
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
