@@ -237,10 +237,27 @@ class BBOBLoss:
                 # so our debug logging must use the same alignment.
                 # --------------------------------------------------
                 
-                # Get predictions from shifted logits (what the loss actually uses)
-                pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
-                # Get ground truth from shifted labels (what the loss actually uses)  
-                tgt_ids = shift_labels[0].to(device="cpu", non_blocking=True)
+                # DEBUG: Log tensor shapes and sample values to understand the issue
+                self.logger.info(f"DEBUG - logits.shape: {logits.shape}, labels.shape: {labels.shape}")
+                
+                # Get predictions from logits (already shifted by trainer)
+                pred_ids = logits.argmax(dim=-1)[0].to(device="cpu", non_blocking=True)
+                # Get ground truth from labels (already shifted by trainer)  
+                tgt_ids = labels[0].to(device="cpu", non_blocking=True)
+                
+                # DEBUG: Check what's actually in the shifted labels
+                non_ignore_mask = shift_labels[0] != self.ignore_index
+                non_ignore_positions = torch.where(non_ignore_mask)[0]
+                non_ignore_values = shift_labels[0][non_ignore_mask]
+                
+                self.logger.info(f"DEBUG - Non-ignore positions (first 10): {non_ignore_positions[:10].tolist()}")
+                self.logger.info(f"DEBUG - Non-ignore values (first 20): {non_ignore_values[:20].tolist()}")
+                self.logger.info(f"DEBUG - Total non-ignore tokens: {non_ignore_mask.sum().item()}")
+                
+                # DEBUG: Check predictions at non-ignore positions
+                if non_ignore_mask.sum() > 0:
+                    pred_at_targets = shift_logits.argmax(dim=-1)[0][non_ignore_mask]
+                    self.logger.info(f"DEBUG - Predictions at target positions: {pred_at_targets[:20].tolist()}")
                 
                 # DEBUG: Log sample token IDs to see what we're actually decoding
                 pred_sample = pred_ids.tolist()[:20]
