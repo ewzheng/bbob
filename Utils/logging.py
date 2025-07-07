@@ -8,7 +8,7 @@ from transformers import TrainerCallback
 
 from .detection_metrics import detection_metrics_batch
 
-def create_metrics_functions(tokenizer, do_detection_metrics=False):
+def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None):
     """
     Factory that returns `(compute_metrics, preprocess_logits_for_metrics)` with **shared**
     state.  Added basic detection metrics (parse-rate, mean IoU) on top of the existing
@@ -142,11 +142,24 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                                     # CRITICAL: Move tensors to CPU before detection metrics to avoid device issues
                                     pred_masked = pred_ids.masked_fill(~mask, -100).cpu()
                                     labels_cpu = labels.cpu()
+                                    
+                                    # Debug logging for first few evaluation steps
+                                    if logger is not None and len(det_iou_vals) < 3:
+                                        logger.info(f"Debug detection metrics - batch shapes: pred_masked {pred_masked.shape}, labels_cpu {labels_cpu.shape}")
+                                        # Decode a sample to see what we're working with
+                                        sample_pred = tokenizer.decode(pred_masked[0][pred_masked[0] != -100].tolist(), skip_special_tokens=False)
+                                        sample_label = tokenizer.decode(labels_cpu[0][labels_cpu[0] != -100].tolist(), skip_special_tokens=False)
+                                        logger.info(f"Sample prediction: {sample_pred[:200]}...")
+                                        logger.info(f"Sample ground truth: {sample_label[:200]}...")
+                                    
                                     det_metrics = detection_metrics_batch(
                                         pred_masked,
                                         labels_cpu,
                                         tokenizer,
                                     )
+                                    
+                                    if logger is not None and len(det_iou_vals) < 3:
+                                        logger.info(f"Detection metrics result: {det_metrics}")
                                     det_iou_vals.append(det_metrics.get("mean_iou", 0.0))
                                     det_recall_vals.append(det_metrics.get("recall", 0.0))
                                     det_prec_vals.append(det_metrics.get("precision", 0.0))
@@ -164,7 +177,15 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
                                     det_iou25_vals.append(det25.get("mean_iou", 0.0))
                                     det_recall25_vals.append(det25.get("recall", 0.0))
                                 except Exception as e:
-                                    print(f"Warning: per-batch detection metric failed – {e}")
+                                    if logger is not None:
+                                        logger.warning(f"Per-batch detection metric failed: {e}")
+                                        # Log tensor shapes for debugging
+                                        logger.warning(f"pred_masked shape: {pred_masked.shape}, labels_cpu shape: {labels_cpu.shape}")
+                                        logger.warning(f"Sample pred_masked: {pred_masked[0][:20].tolist()}")
+                                        logger.warning(f"Sample labels_cpu: {labels_cpu[0][:20].tolist()}")
+                                    else:
+                                        print(f"Warning: per-batch detection metric failed – {e}")
+                                        print(f"pred_masked shape: {pred_masked.shape}, labels_cpu shape: {labels_cpu.shape}")
                     except Exception as e:
                         print(f"Error calculating prediction-target similarity: {e}")
             
@@ -244,6 +265,13 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
 
         # -------------------- aggregate detection metrics --------------------
         if do_detection_metrics:
+            # Debug logging to see what values we have
+            if logger is not None:
+                logger.info(f"Detection metric aggregation: {len(det_iou_vals)} batches processed")
+                if det_iou_vals:
+                    logger.info(f"Sample IoU values: {det_iou_vals[:5]}")
+                    logger.info(f"Sample recall values: {det_recall_vals[:5]}")
+            
             mean_iou     = sum(det_iou_vals)     / len(det_iou_vals)     if det_iou_vals else 0.0
             mean_recall  = sum(det_recall_vals)  / len(det_recall_vals)  if det_recall_vals else 0.0
             mean_prec    = sum(det_prec_vals)    / len(det_prec_vals)    if det_prec_vals else 0.0

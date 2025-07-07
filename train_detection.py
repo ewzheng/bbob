@@ -69,7 +69,7 @@ def train(
         bf16=bf16_supported,
         fp16=cuda and not bf16_supported,
         eval_strategy="steps",
-        eval_steps=max(steps_per_epoch // 2, 1),
+        eval_steps=max(steps_per_epoch // 10, 1),
         save_strategy="steps",
         save_steps=max(steps_per_epoch // 2, 1),
         logging_steps=batch_size,
@@ -87,7 +87,7 @@ def train(
         lr_scheduler_type="cosine",
         warmup_ratio=warmup_ratio,
         include_num_input_tokens_seen=True,
-        torch_empty_cache_steps     = max(steps_per_epoch // 8, 1), # flush cache more frequently to prevent fragmentation
+        torch_empty_cache_steps     = max(steps_per_epoch // 2, 1),
     )
 
     tokenizer = model.get_tokenizer()
@@ -106,7 +106,7 @@ def train(
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
-    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer, do_detection_metrics=True)
+    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer, do_detection_metrics=True, logger=logger)
 
     trainer = BBOBTrainer(
         model=model,
