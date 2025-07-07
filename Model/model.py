@@ -286,7 +286,7 @@ class BBOB(PreTrainedModel):
         # If the caller already provides a BCHW tensor we assume it is
         # correctly normalised for MobileViT and skip the image processor.
         if isinstance(images, torch.Tensor):
-            pixel_values = images.to(device=self.device, dtype=self.dtype, non_blocking=True)
+            pixel_values = images.to(device=self.device, dtype=self.dtype)
         else:
             pixel_values = self.vision_tower.process_image(images)
 

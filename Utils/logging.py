@@ -57,7 +57,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False):
         try:
             # Ensure labels live on the same device as logits to avoid mismatches
             if labels is not None and labels.device != logits.device:
-                labels = labels.to(logits.device, non_blocking=True)
+                labels = labels.to(logits.device)
 
             # CRITICAL: Check if labels need alignment with logits
             # During evaluation, HF Trainer may pass unaligned labels directly from dataloader
