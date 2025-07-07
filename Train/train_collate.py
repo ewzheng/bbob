@@ -412,6 +412,7 @@ class BBOBCollator:  # noqa: N801
                 self.logger.info(f"DEBUG - Final tgt_ids: {tgt_ids.tolist()[:20]}")
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
+            # NOTE: input_ids still uses placeholder (1 token) which the model will replace with VIS_TOKENS visual tokens
             input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
             
             # OPTIMIZED: Create labels more efficiently using sizes and correct device
@@ -426,7 +427,8 @@ class BBOBCollator:  # noqa: N801
                 self.logger.info(f"DEBUG - instr_size: {instr_size}, tgt_ids size: {tgt_ids.size(0)}")
                 self.logger.info(f"DEBUG - total_prefix_size: {total_prefix_size}, label_ignore size: {label_ignore.size(0)}")
                 self.logger.info(f"DEBUG - input_ids size: {input_ids.size(0)}, labels size: {labels.size(0)}")
-                self.logger.info(f"DEBUG - labels content: {labels.tolist()[:30]}")
+                self.logger.info(f"DEBUG - labels prefix (ignore): {labels.tolist()[:10]}")
+                self.logger.info(f"DEBUG - labels target portion: {labels.tolist()[total_prefix_size:total_prefix_size+20]}")
 
             # DEBUG: Log sample token IDs to see what we're actually decoding
             pred_sample = input_ids.tolist()[:20]
