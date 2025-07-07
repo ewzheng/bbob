@@ -14,7 +14,7 @@ class BBOBLoss:
     def __init__(self, tokenizer, *, ignore_index: int = -100, logger=None, log_interval: int = 100,
                  lambda_digit: float = 0.25,  # weight for numeric-token aux CE
                  lambda_punct: float = 0.05,  # weight for punctuation/syntax aux CE
-                 lambda_class: float = 0.15,  # weight for object-class token aux CE
+                 lambda_class: float = 0.25,  # weight for object-class token aux CE
                  **kwargs):
         """
         Initialise the loss function.
