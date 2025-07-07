@@ -24,12 +24,12 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
     top3_accuracies = []
     top5_accuracies = []
     # -- existing scalar accumulators -------------------------------------------
-    # CRITICAL: Initialize as tensors to handle tensor accumulation without blocking
-    seq_correct_total = torch.tensor(0.0)      # number of sequences predicted fully-correct
-    seq_total         = 0      # total number of sequences evaluated
+    # CRITICAL: Initialize as scalars to avoid device mismatch issues
+    seq_correct_total = 0.0     # number of sequences predicted fully-correct
+    seq_total         = 0       # total number of sequences evaluated
 
-    pred_target_sim_sum   = torch.tensor(0.0)  # summed cosine similarities
-    pred_target_sim_count = 0     # number of token positions contributing
+    pred_target_sim_sum   = 0.0  # summed cosine similarities
+    pred_target_sim_count = 0    # number of token positions contributing
 
     # Detection-metric accumulators (filled only when do_detection_metrics=True)
     det_iou_vals: list[float]       = []
@@ -55,8 +55,13 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
         nonlocal det_iou_vals, det_recall_vals, det_prec_vals, det_f1_vals, det_acc_vals, det_recall25_vals, det_iou25_vals, det_class_acc_vals
         
         try:
+            if logger is not None and len(det_iou_vals) < 2:
+                logger.info(f"Initial devices - logits: {logits.device}, labels: {labels.device if labels is not None else 'None'}")
+                
             # Ensure labels live on the same device as logits to avoid mismatches
             if labels is not None and labels.device != logits.device:
+                if logger is not None and len(det_iou_vals) < 2:
+                    logger.info(f"Moving labels from {labels.device} to {logits.device}")
                 labels = labels.to(logits.device)
 
             # CRITICAL: Check if labels need alignment with logits
@@ -70,10 +75,10 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
                     # Apply the same alignment as the model does internally:
                     # Remove first label (placeholder) and prepend 64 visual ignore tokens
                     batch_size = labels.shape[0]
-                    device = labels.device
+                    device = logits.device  # Use logits device to ensure consistency
                     
                     # Skip first token (placeholder) from labels
-                    labels_after = labels[:, 1:]  # (batch_size, seq_len-1)
+                    labels_after = labels[:, 1:].to(device)  # Ensure on correct device
                     
                     # Create ignore labels for visual tokens
                     visual_ignore = torch.full((batch_size, 64), -100, dtype=labels.dtype, device=device)
@@ -93,26 +98,26 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
                     # Exact token accuracy (top-1)
                     correct = (pred_ids == labels) & mask
                     accuracy = correct.sum().float() / mask_sum.float()
-                    # CRITICAL: Avoid .item() call - accumulate tensors instead
-                    token_accuracies.append(accuracy.detach())
+                    # CRITICAL: Move to CPU before storing to avoid device issues
+                    token_accuracies.append(accuracy.detach().cpu())
                     
                     # Top-k accuracies (k=3 & 5)
                     top3_preds = torch.topk(logits, k=3, dim=-1).indices   # [B, S, 3]
                     top3_correct = (top3_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
                     top3_acc = top3_correct.sum().float() / mask_sum.float()
-                    # CRITICAL: Avoid .item() call - accumulate tensors instead
-                    top3_accuracies.append(top3_acc.detach())
+                    # CRITICAL: Move to CPU before storing to avoid device issues
+                    top3_accuracies.append(top3_acc.detach().cpu())
 
                     top5_preds = torch.topk(logits, k=5, dim=-1).indices   # [B, S, 5]
                     top5_correct = (top5_preds == labels.unsqueeze(-1)).any(dim=-1) & mask
                     top5_acc = top5_correct.sum().float() / mask_sum.float()
-                    # CRITICAL: Avoid .item() call - accumulate tensors instead
-                    top5_accuracies.append(top5_acc.detach())
+                    # CRITICAL: Move to CPU before storing to avoid device issues
+                    top5_accuracies.append(top5_acc.detach().cpu())
                     
                     # Sequence-level accuracy (vectorised)
                     seq_correct = ((pred_ids == labels) | ~mask).all(dim=1)  # (batch,)
-                    # CRITICAL: Avoid .item() call - accumulate tensors instead
-                    seq_correct_total += seq_correct.sum().detach()
+                    # CRITICAL: Convert to scalar to avoid device issues
+                    seq_correct_total += seq_correct.sum().item()
                     seq_total         += seq_correct.numel()
                     
                     # Prediction-target similarity (most important for projector training)
@@ -132,8 +137,8 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
                             l2_norm  = probs_valid.norm(dim=1).clamp(min=1e-12)
                             cos_sim  = p_target / l2_norm          # (N,)
 
-                            # CRITICAL: Avoid .item() call - accumulate tensors instead
-                            pred_target_sim_sum   += cos_sim.sum().detach()
+                            # CRITICAL: Convert to scalar to avoid device issues
+                            pred_target_sim_sum   += cos_sim.sum().item()
                             pred_target_sim_count += cos_sim.numel()
 
                             # Detection metrics - preserve device correctly
@@ -193,7 +198,15 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
             return pred_ids
             
         except Exception as e:
-            print(f"Error in preprocess_logits_for_metrics: {e}")
+            if logger is not None:
+                logger.error(f"Error in preprocess_logits_for_metrics: {e}")
+                logger.error(f"logits device: {logits.device}, logits shape: {logits.shape}")
+                if labels is not None:
+                    logger.error(f"labels device: {labels.device}, labels shape: {labels.shape}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+            else:
+                print(f"Error in preprocess_logits_for_metrics: {e}")
             # Fallback: just return argmax predictions
             pred_ids = torch.argmax(logits, dim=-1)
             return pred_ids
@@ -236,12 +249,12 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
             mean_top5_accuracy = 0.0
             
         if seq_total > 0:
-            mean_sequence_accuracy = (seq_correct_total / seq_total).item()
+            mean_sequence_accuracy = seq_correct_total / seq_total
         else:
             mean_sequence_accuracy = 0.0
             
         if pred_target_sim_count > 0:
-            mean_prediction_target_similarity = (pred_target_sim_sum / pred_target_sim_count).item()
+            mean_prediction_target_similarity = pred_target_sim_sum / pred_target_sim_count
         else:
             mean_prediction_target_similarity = 0.0
         
@@ -249,10 +262,10 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
         token_accuracies.clear()
         top3_accuracies.clear()
         top5_accuracies.clear()
-        # CRITICAL: Reset tensor accumulators properly
-        seq_correct_total = torch.tensor(0.0)
+        # CRITICAL: Reset scalar accumulators properly
+        seq_correct_total = 0.0
         seq_total         = 0
-        pred_target_sim_sum   = torch.tensor(0.0)
+        pred_target_sim_sum   = 0.0
         pred_target_sim_count = 0
         
         metrics_out = {
