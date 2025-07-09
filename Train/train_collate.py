@@ -61,6 +61,10 @@ class BBOBCollator:  # noqa: N801
         logger=None,
         log_interval=128,
         on_the_fly=False,
+        noise_prob=0.3,  # Probability of adding noise boxes
+        max_noise_boxes=10,  # Max number of noise boxes to add
+        use_noise_class=False,  # Use dedicated "noise" class instead of GT labels
+        noise_ratio_range=(0.25, 0.75),  # Range for noise count as fraction of GT count
         **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
         self.pad_id = pad_token_id
@@ -74,6 +78,10 @@ class BBOBCollator:  # noqa: N801
         self.log_interval = log_interval
         self.is_eval = False
         self.on_the_fly = on_the_fly
+        self.noise_prob = noise_prob
+        self.max_noise_boxes = max_noise_boxes
+        self.use_noise_class = use_noise_class
+        self.noise_ratio_range = noise_ratio_range
 
         # Pre-compute placeholder id differing from pad id.
         if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != pad_token_id:
@@ -107,7 +115,90 @@ class BBOBCollator:  # noqa: N801
         self.is_eval = False
 
     def reseed(self):
-        self.rngjesus = np.random.default_rng()
+        random.seed()
+
+    def _generate_noise_boxes(self, num_boxes, label_strs, device):
+        """Generate random noisy bounding boxes for noise injection."""
+        if num_boxes <= 0:
+            return [], []
+        
+        noise_boxes = []
+        noise_labels = []
+        
+        for _ in range(num_boxes):
+            # Generate random box coordinates (x, y, w, h) in [0, 1]
+            x = random.uniform(0.0, 0.8)
+            y = random.uniform(0.0, 0.8) 
+            w = random.uniform(0.1, min(0.3, 1.0 - x))
+            h = random.uniform(0.1, min(0.3, 1.0 - y))
+            
+            noise_boxes.append([x, y, w, h])
+            
+            # Pick a random label from existing ground truth labels, or use "noise"
+            if self.use_noise_class or not label_strs or random.random() > 0.7:
+                # Use dedicated noise class
+                noise_labels.append("object")  # Generic noise label
+            else:
+                # Sample from GT labels (makes task harder)
+                noise_labels.append(random.choice(label_strs))
+        
+        return noise_boxes, noise_labels
+
+    def _mask_noise_tokens(self, tgt_ids, target_text, combined_labels, noise_mask):
+        """
+        Selectively mask tokens corresponding to noise boxes in the target sequence.
+        
+        This implements the Pix2Seq approach: input has GT+noise mixed, target has
+        GT content but noise positions are masked with -100.
+        
+        Args:
+            tgt_ids: Target token sequence to modify in-place
+            target_text: Full target text string  
+            combined_labels: List of all labels (GT + noise)
+            noise_mask: Boolean tensor indicating which positions are noise
+        """
+        if not any(noise_mask):
+            return  # No noise to mask
+            
+        # PRECISE APPROACH: Tokenize the actual target text fragments to get exact positions
+        
+        # Split target text into individual detection fragments using regex to preserve structure
+        import re
+        
+        # Find all detection fragments: <|bbob|>label: [coords]</|bbob|>
+        # Improved regex to handle spaces and coordinate content properly
+        fragment_pattern = r'<\|bbob\|>[^<]*?</\|bbob\|>'
+        matches = list(re.finditer(fragment_pattern, target_text))
+        
+        # Tokenize each fragment to find exact token boundaries
+        cumulative_tokens = 0
+        
+        for frag_idx, match in enumerate(matches):
+            if frag_idx >= len(noise_mask):
+                break
+                
+            fragment_text = match.group(0)  # Full fragment including tags
+            
+            # Tokenize this exact fragment
+            frag_tokens = self.tokenizer(fragment_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+            frag_token_count = len(frag_tokens)
+            
+            if noise_mask[frag_idx]:
+                # This fragment is noise - mask its tokens
+                start_idx = cumulative_tokens
+                end_idx = min(start_idx + frag_token_count, len(tgt_ids))
+                tgt_ids[start_idx:end_idx] = -100
+            
+            cumulative_tokens += frag_token_count
+            
+            # Safety check to avoid going beyond sequence length
+            if cumulative_tokens >= len(tgt_ids):
+                break
+                
+        # Handle any space tokens between fragments
+        # The above handles the main detection tokens, spaces are typically not significant
+
+
 
     def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.15):
         """Jitter *normalised* (x,y,w,h) boxes in 0‥1 space.
@@ -379,27 +470,114 @@ class BBOBCollator:  # noqa: N801
                         f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
                         for bb, lab in zip(bx.tolist(), label_strs)
                     ]
-                    det_text = " ".join(frags)
+                    gt_det_text = " ".join(frags)
                     
-                    tgt_ids = self.tokenizer(det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
-                    tgt_ids = self._shuffle_fragments(tgt_ids)
+                    # Generate noisy input vs clean target with proper alignment
+                    if random.random() < self.noise_prob and not self.is_eval:
+                        # IMPROVED: Pix2Seq-style noisy sequencing with selective masking
+                        # Create aligned input/target sequences where only noise positions are masked
+                        
+                        # IMPROVED: Generate noise boxes proportional to GT count
+                        # Examples with noise_ratio_range=(0.25, 0.75):
+                        # - 1 GT box → 1 noise box (25-75% of 1, min 1)
+                        # - 4 GT boxes → 1-3 noise boxes (25-75% of 4 = 1-3)  
+                        # - 8 GT boxes → 2-6 noise boxes (25-75% of 8 = 2-6, capped by max_noise_boxes)
+                        # - 0 GT boxes → 1-2 noise boxes (fallback case)
+                        num_gt_boxes = len(label_strs)
+                        if num_gt_boxes > 0:
+                            # Add noise proportional to GT count (configurable range)
+                            noise_ratio = random.uniform(*self.noise_ratio_range)
+                            num_noise = max(1, min(self.max_noise_boxes, int(num_gt_boxes * noise_ratio)))
+                        else:
+                            # If no GT boxes, add 1-2 noise boxes
+                            num_noise = random.randint(1, min(2, self.max_noise_boxes))
+                        
+                        # Optional logging for debugging noise generation
+                        if self.logger:
+                            self._noise_log_counter = getattr(self, '_noise_log_counter', 0) + 1
+                            if self._noise_log_counter % 100 == 0:  # Log every 100 samples
+                                self.logger.info(f"Noise stats: {num_gt_boxes} GT boxes → {num_noise} noise boxes (ratio: {noise_ratio:.2f})")
+                        noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, label_strs, device)
+                        
+                        # Create combined sequence with GT and noise mixed together
+                        combined_boxes = torch.cat([bx, noise_boxes], dim=0)
+                        combined_labels = label_strs + noise_labels
+                        
+                        # Create shuffled order for mixing GT and noise
+                        num_total = len(combined_labels)
+                        shuffle_indices = torch.randperm(num_total)
+                        
+                        # Apply shuffle to both boxes and labels
+                        combined_boxes = combined_boxes[shuffle_indices]
+                        combined_labels = [combined_labels[i] for i in shuffle_indices.tolist()]
+                        
+                        # Track which positions are noise (after shuffling)
+                        noise_mask = shuffle_indices >= len(label_strs)  # True for noise positions
+                        
+                        # Build combined input sequence
+                        input_frags = [
+                            f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
+                            for bb, lab in zip(combined_boxes.tolist(), combined_labels)
+                        ]
+                        input_det_text = " ".join(input_frags)
+                        
+                        # Build target sequence with IDENTICAL structure to input
+                        # KEY INSIGHT: Input and target have same text, but we selectively mask noise tokens
+                        # This is the core of Pix2Seq's approach: learn to generate GT from noisy input
+                        target_det_text = input_det_text
+                        
+                        # Tokenize both sequences (they're identical)
+                        input_ids_det = self.tokenizer(input_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
+                        target_ids_det = self.tokenizer(target_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
+                        
+                        # Create selective mask: mark ONLY noise positions as -100
+                        tgt_ids = target_ids_det.clone()
+                        
+                        # Find token spans corresponding to noise boxes and mask them
+                        self._mask_noise_tokens(tgt_ids, target_det_text, combined_labels, noise_mask)
+                        
+                        # Don't shuffle fragments when using aligned sequences
+                        # input_ids_det already contains the mixed sequence
+                        
+                    else:
+                        # No noise injection - normal training
+                        input_det_text = gt_det_text
+                        target_det_text = gt_det_text
+                        
+                        # Tokenize INPUT sequence (clean)
+                        input_ids_det = self.tokenizer(input_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
+                        input_ids_det = self._shuffle_fragments(input_ids_det)
+                        
+                        # Tokenize TARGET sequence (same as input when no noise)  
+                        tgt_ids = self.tokenizer(target_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
+                        tgt_ids = self._shuffle_fragments(tgt_ids)
                 else:
                     # Empty bboxes case
+                    input_ids_det = empty_tensor.clone()
                     tgt_ids = empty_tensor.clone()
             else:
                 # EVAL MODE or boxes absent – use stored token list as is
+                input_ids_det = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
 
             #------ now same instr truncation logic uses tgt_ids variable ----
+            input_ids_det = input_ids_det[input_ids_det != pad_token_id]
             tgt_ids = tgt_ids[tgt_ids != pad_token_id]
 
             if instr_ids.size(0) > max_txt_len:
                 instr_ids = instr_ids[-max_txt_len:]
+                input_ids_det = empty_tensor.clone()
                 tgt_ids = empty_tensor.clone()  # Use pre-computed empty tensor
             else:
-                remaining = max_txt_len - instr_ids.size(0)
-                if tgt_ids.size(0) > remaining:
-                    tgt_ids = tgt_ids[:remaining]
+                # Handle input sequence (may be longer due to noise)
+                remaining_input = max_txt_len - instr_ids.size(0)
+                if input_ids_det.size(0) > remaining_input:
+                    input_ids_det = input_ids_det[:remaining_input]
+                
+                # Handle target sequence  
+                remaining_target = max_txt_len - instr_ids.size(0)
+                if tgt_ids.size(0) > remaining_target:
+                    tgt_ids = tgt_ids[:remaining_target]
 
                 # CRITICAL: Fix device mismatches in BOS/EOS token creation
                 # --- ensure a single BOS token starts the instruction sequence ---
@@ -430,11 +608,14 @@ class BBOBCollator:  # noqa: N801
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             # NOTE: input_ids still uses placeholder (1 token) which the model will replace with VIS_TOKENS visual tokens
-            input_ids = torch.cat([image_placeholder, instr_ids, tgt_ids], dim=0)
+            input_ids = torch.cat([image_placeholder, instr_ids, input_ids_det], dim=0)
             
             # OPTIMIZED: Create labels more efficiently using sizes and correct device
             # Account for visual token replacement: 1 placeholder becomes VIS_TOKENS visual tokens
             instr_size = instr_ids.size(0)
+            
+            # Create ignore labels for visual tokens and instruction
+            # Visual tokens don't need supervision - they're just processed features
             total_prefix_size = VIS_TOKENS + instr_size  # visual tokens + instruction
             label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long, device=device)
             labels = torch.cat([label_ignore, tgt_ids], dim=0)
@@ -470,13 +651,17 @@ class BBOBCollator:  # noqa: N801
 
 def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
     """Create a collator.  Pass-through extra kwargs such as
-    `bin_numeric_tokens` for optional features."""
+    `noise_prob`, `max_noise_boxes`, `noise_ratio_range` for optional features."""
 
     return BBOBCollator(
         pad_token_id,
         tokenizer,
         image_processor,
         on_the_fly=kwargs.get("on_the_fly", False),
+        noise_prob=kwargs.get("noise_prob", 0.3),
+        max_noise_boxes=kwargs.get("max_noise_boxes", 10),
+        use_noise_class=kwargs.get("use_noise_class", False),
+        noise_ratio_range=kwargs.get("noise_ratio_range", (0.25, 0.75)),
         logger=kwargs.get("logger"),
         log_interval=kwargs.get("log_interval", 0),
     ) 
