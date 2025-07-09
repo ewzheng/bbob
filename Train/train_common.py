@@ -144,6 +144,10 @@ def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.flo
         w = max(0, min(w, target - x))
         h = max(0, min(h, target - y))
 
+        # Skip boxes that end up with zero area (fully outside the crop)
+        if w <= 0 or h <= 0:
+            continue
+
         adjusted.append([
             x / target,
             y / target,
@@ -250,27 +254,39 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
 
         # --- iterate paired variants -----------------------------------------
         for aug_idx, (rgb, boxes_this, labels_this) in enumerate(zip(img_versions, boxes_versions, labels_versions)):
+            # -------------------------------------------------------------
+            # Step 1: prepare a 256×256 input for MobileViT *without*
+            # centre-cropping. Non-MS-crop views are letter-boxed to
+            # preserve every object; MS-crop views already match 256×256.
+            # -------------------------------------------------------------
+            if is_ms_crop_flags[aug_idx]:
+                rgb_proc = rgb          # already 256×256
+                scale, pad_w, pad_h = 1.0, 0, 0
+            else:
+                rgb_proc, scale, pad_w, pad_h = letterbox_image(rgb, target_size)
+
             # --- MobileViT image processor ---
             try:
-                px = image_processor(rgb, return_tensors="np")["pixel_values"][0]
+                px = image_processor(
+                    rgb_proc,
+                    return_tensors="pt",
+                    do_center_crop=False,  # centre-crop disabled globally
+                    do_resize=False,       # we performed resize/pad ourselves
+                )["pixel_values"][0]
                 processed_images.append((px * 255).astype(np.uint8))
             except Exception as e:
                 print(f"Image processing error: {e}")
-                # Fallback to basic processing
-                rgb_resized = rgb.resize(target_size, Image.BICUBIC)
-                px = np.array(rgb_resized, dtype=np.uint8).transpose(2, 0, 1)  # HWC to CHW uint8
+                # Fallback to basic processing – resize shortest edge then letter-box
+                fallback, _, _, _ = letterbox_image(rgb, target_size)
+                px = np.array(fallback, dtype=np.uint8).transpose(2, 0, 1)
                 processed_images.append(px)
 
-            image_sizes.append(rgb.size)
+            # Store *original* image dims (before letter-box) for bbox adjust
+            image_sizes.append(base_rgb.size)
             padded_image_sizes.append(target_size)
 
-            # store params (based on original image dims)
-            orig_w, orig_h = base_rgb.size
-            ratio = target_size[0] / min(orig_w, orig_h)
-            resized_w, resized_h = int(round(orig_w * ratio)), int(round(orig_h * ratio))
-            crop_left = max((resized_w - target_size[0]) // 2, 0)
-            crop_top = max((resized_h - target_size[1]) // 2, 0)
-            lb_params.append((ratio, crop_left, crop_top))
+            # Save scale & padding so we can transform boxes later
+            lb_params.append((scale, pad_w, pad_h))
 
             sample_replication.append(idx)
 
@@ -321,12 +337,17 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         labels_raw = aug_labels_all[aug_idx]
 
         if aug_need_adjust[aug_idx] and bboxes_raw:
-            # need resize/crop adjustment (non-ms-crop views)
-            bboxes = adjust_boxes_resize_crop(
+            # Letter-box adjustment (non-MS-crop views)
+            scale, pad_w, pad_h = lb_params[aug_idx]
+            bboxes = adjust_boxes_for_letterbox(
                 bboxes_raw,
+                scale,
+                pad_w,
+                pad_h,
                 orig_w=image_sizes[aug_idx][0],
                 orig_h=image_sizes[aug_idx][1],
-                target=target_size[0],
+                target_w=target_size[0],
+                target_h=target_size[1],
                 dtype=dtype,
             )
         else:
