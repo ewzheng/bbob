@@ -308,8 +308,12 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
 
                 # Store as compressed bytes to avoid Arrow overflow
                 img_hwc = np.transpose(px_u8, (1, 2, 0))  # CHW -> HWC for PIL
+                # Ensure exact target size before encoding
+                if img_hwc.shape[:2] != target_size[::-1]:  # (H,W) vs (W,H)
+                    img_pil = Image.fromarray(img_hwc).resize(target_size, Image.BILINEAR)
+                    img_hwc = np.array(img_pil)
                 buf = io.BytesIO()
-                Image.fromarray(img_hwc).save(buf, format="JPEG", quality=95, optimize=True)
+                Image.fromarray(img_hwc).save(buf, format="PNG", optimize=True)  # PNG preserves exact pixels
                 processed_images.append(buf.getvalue())
             except Exception as e:
                 print(f"Image processing error: {e}")
