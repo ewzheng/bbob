@@ -301,7 +301,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
 
                 # Convert to uint8 CHW, compatible with collator fast-path
                 if isinstance(px, torch.Tensor):
-                    px_u8 = (px * 255).to(torch.uint8)
+                    px_u8 = (px * 255).cpu().numpy().astype(np.uint8)
                 else:
                     px_u8 = (px * 255).astype(np.uint8)
 
