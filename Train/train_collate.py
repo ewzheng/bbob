@@ -24,6 +24,7 @@ from torchvision.transforms.functional import pil_to_tensor
 from .loss_helpers import TAG_OPEN, TAG_CLOSE
 import random
 import torch.utils.data as tud
+import re
 
 # Constants (kept in sync with Train.train_common)
 VIS_TOKENS: int = 64           # number of visual tokens the model prepends
@@ -59,7 +60,6 @@ class BBOBCollator:  # noqa: N801
         image_processor,
         *,
         logger=None,
-        log_interval=128,
         on_the_fly=False,
         noise_prob=0.3,  # Probability of adding noise boxes
         max_noise_boxes=10,  # Max number of noise boxes to add
@@ -75,7 +75,6 @@ class BBOBCollator:  # noqa: N801
         self.rngjesus = np.random.default_rng()
 
         # teacher-forcing parameters removed – keep placeholders for API compat
-        self.log_interval = log_interval
         self.is_eval = False
         self.on_the_fly = on_the_fly
         self.noise_prob = noise_prob
@@ -117,20 +116,21 @@ class BBOBCollator:  # noqa: N801
     def reseed(self):
         random.seed()
 
-    def _generate_noise_boxes(self, num_boxes, label_strs, device):
+    def _generate_noise_boxes(self, num_boxes, label_strs):
         """Generate random noisy bounding boxes for noise injection."""
         if num_boxes <= 0:
-            return [], []
+            return torch.empty((0, 4)), []
         
         noise_boxes = []
         noise_labels = []
         
         for _ in range(num_boxes):
-            # Generate random box coordinates (x, y, w, h) in [0, 1]
-            x = random.uniform(0.0, 0.8)
-            y = random.uniform(0.0, 0.8) 
-            w = random.uniform(0.1, min(0.3, 1.0 - x))
-            h = random.uniform(0.1, min(0.3, 1.0 - y))
+            # Generate truly random box coordinates (x, y, w, h) in full [0, 1] range
+            # This creates maximally challenging noise for the model to learn to ignore
+            x = random.uniform(0.0, 1.0)
+            y = random.uniform(0.0, 1.0) 
+            w = random.uniform(0.0, 1.0 - x)  # Ensure box stays within image bounds
+            h = random.uniform(0.0, 1.0 - y)  # Ensure box stays within image bounds
             
             noise_boxes.append([x, y, w, h])
             
@@ -142,9 +142,11 @@ class BBOBCollator:  # noqa: N801
                 # Sample from GT labels (makes task harder)
                 noise_labels.append(random.choice(label_strs))
         
-        return noise_boxes, noise_labels
+        # Convert to tensor for concatenation with GT boxes
+        noise_boxes_tensor = torch.tensor(noise_boxes, dtype=torch.float32)
+        return noise_boxes_tensor, noise_labels
 
-    def _mask_noise_tokens(self, tgt_ids, target_text, combined_labels, noise_mask):
+    def _mask_noise_tokens(self, tgt_ids, target_text, noise_mask):
         """
         Selectively mask tokens corresponding to noise boxes in the target sequence.
         
@@ -154,16 +156,12 @@ class BBOBCollator:  # noqa: N801
         Args:
             tgt_ids: Target token sequence to modify in-place
             target_text: Full target text string  
-            combined_labels: List of all labels (GT + noise)
             noise_mask: Boolean tensor indicating which positions are noise
         """
         if not any(noise_mask):
             return  # No noise to mask
             
         # PRECISE APPROACH: Tokenize the actual target text fragments to get exact positions
-        
-        # Split target text into individual detection fragments using regex to preserve structure
-        import re
         
         # Find all detection fragments: <|bbob|>label: [coords]</|bbob|>
         # Improved regex to handle spaces and coordinate content properly
@@ -492,12 +490,8 @@ class BBOBCollator:  # noqa: N801
                             # If no GT boxes, add 1-2 noise boxes
                             num_noise = random.randint(1, min(2, self.max_noise_boxes))
                         
-                        # Optional logging for debugging noise generation
-                        if self.logger:
-                            self._noise_log_counter = getattr(self, '_noise_log_counter', 0) + 1
-                            if self._noise_log_counter % 100 == 0:  # Log every 100 samples
-                                self.logger.info(f"Noise stats: {num_gt_boxes} GT boxes → {num_noise} noise boxes (ratio: {noise_ratio:.2f})")
-                        noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, label_strs, device)
+
+                        noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, label_strs)
                         
                         # Create combined sequence with GT and noise mixed together
                         combined_boxes = torch.cat([bx, noise_boxes], dim=0)
@@ -534,7 +528,7 @@ class BBOBCollator:  # noqa: N801
                         tgt_ids = target_ids_det.clone()
                         
                         # Find token spans corresponding to noise boxes and mask them
-                        self._mask_noise_tokens(tgt_ids, target_det_text, combined_labels, noise_mask)
+                        self._mask_noise_tokens(tgt_ids, target_det_text, noise_mask)
                         
                         # Don't shuffle fragments when using aligned sequences
                         # input_ids_det already contains the mixed sequence
@@ -663,5 +657,4 @@ def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
         use_noise_class=kwargs.get("use_noise_class", False),
         noise_ratio_range=kwargs.get("noise_ratio_range", (0.25, 0.75)),
         logger=kwargs.get("logger"),
-        log_interval=kwargs.get("log_interval", 0),
     ) 
