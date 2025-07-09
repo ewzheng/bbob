@@ -87,20 +87,45 @@ def letterbox_image(image, target_size=DEFAULT_TARGET_SIZE):
     return new_image, scale, pad_w, pad_h
 
 def adjust_boxes_for_letterbox(boxes, scale, pad_w, pad_h, orig_w, orig_h, target_w, target_h, dtype):
-    """Adjust [x, y, w, h] boxes for letterbox resize and normalize to padded image size."""
+    """Adjust [x, y, w, h] boxes for letterbox resize & pad.
+
+    1. Apply the same scale & padding used for the image.
+    2. Clamp to the padded frame (0‥target_w, 0‥target_h).
+    3. Drop boxes whose visible area is 0 (fully outside) or <1 px on a side.
+    4. Return normalised 0‥1 xywh tensor.
+    """
+
+    if isinstance(boxes, torch.Tensor):
+        boxes = boxes.clone().detach().float().cpu().numpy()
+
     adjusted = []
     for x, y, w, h in boxes:
-        x = x * scale + pad_w
-        y = y * scale + pad_h
-        w = w * scale
-        h = h * scale
-        # normalize to new image size
+        # scale & translate to padded image space
+        x1 = x * scale + pad_w
+        y1 = y * scale + pad_h
+        x2 = x1 + w * scale
+        y2 = y1 + h * scale
+
+        # intersect with frame [0, target_w] × [0, target_h]
+        ix1 = max(0.0, min(x1, target_w))
+        iy1 = max(0.0, min(y1, target_h))
+        ix2 = max(0.0, min(x2, target_w))
+        iy2 = max(0.0, min(y2, target_h))
+
+        new_w = ix2 - ix1
+        new_h = iy2 - iy1
+
+        # skip empty or nearly-empty boxes (<1 pixel side)
+        if new_w < 1.0 or new_h < 1.0:
+            continue
+
         adjusted.append([
-            x / target_w,
-            y / target_h,
-            w / target_w,
-            h / target_h
+            ix1 / target_w,
+            iy1 / target_h,
+            new_w / target_w,
+            new_h / target_h,
         ])
+
     return torch.tensor(adjusted, dtype=dtype)
 
 def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.float32):
@@ -269,11 +294,18 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
             try:
                 px = image_processor(
                     rgb_proc,
-                    return_tensors="pt",
+                    return_tensors="pt",  # ensure torch tensor output
                     do_center_crop=False,  # centre-crop disabled globally
                     do_resize=False,       # we performed resize/pad ourselves
                 )["pixel_values"][0]
-                processed_images.append((px * 255).astype(np.uint8))
+
+                # Convert to uint8 CHW, compatible with collator fast-path
+                if isinstance(px, torch.Tensor):
+                    px_u8 = (px * 255).to(torch.uint8)
+                else:
+                    px_u8 = (px * 255).astype(np.uint8)
+
+                processed_images.append(px_u8)
             except Exception as e:
                 print(f"Image processing error: {e}")
                 # Fallback to basic processing – resize shortest edge then letter-box
@@ -503,7 +535,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size})",
-        load_from_cache_file=True
+        load_from_cache_file=False
     )
 
     return dataset
