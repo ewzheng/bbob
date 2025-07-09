@@ -297,7 +297,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                     rgb_proc,
                     return_tensors="pt",  # ensure torch tensor output
                     do_center_crop=False,  # centre-crop disabled globally
-                    do_resize=False,       # we performed resize/pad ourselves
+                    do_resize=True,        # safe since we pre-processed to target size
                 )["pixel_values"][0]
 
                 # Convert to uint8 CHW, compatible with collator fast-path

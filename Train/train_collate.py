@@ -464,87 +464,67 @@ class BBOBCollator:  # noqa: N801
                     # rebuild textual fragments so tokens match jittered coords
                     label_strs = item.get("target_label_strs", ["obj"] * bx.size(0))[: bx.size(0)]
 
-                    frags = [
+                    # Build canonical GT sequence
+                    gt_frags = [
                         f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
                         for bb, lab in zip(bx.tolist(), label_strs)
                     ]
-                    gt_det_text = " ".join(frags)
+                    canonical_det_text = " ".join(gt_frags)
                     
-                    # Generate noisy input vs clean target with proper alignment
+                    # UNIFIED PIPELINE: Build → Shuffle → Apply Noise
                     if random.random() < self.noise_prob and not self.is_eval:
-                        # IMPROVED: Pix2Seq-style noisy sequencing with selective masking
-                        # Create aligned input/target sequences where only noise positions are masked
-                        
-                        # IMPROVED: Generate noise boxes proportional to GT count
-                        # Examples with noise_ratio_range=(0.25, 0.75):
-                        # - 1 GT box → 1 noise box (25-75% of 1, min 1)
-                        # - 4 GT boxes → 1-3 noise boxes (25-75% of 4 = 1-3)  
-                        # - 8 GT boxes → 2-6 noise boxes (25-75% of 8 = 2-6, capped by max_noise_boxes)
-                        # - 0 GT boxes → 1-2 noise boxes (fallback case)
+                        # STEP 1: Generate noise to add to canonical sequence
                         num_gt_boxes = len(label_strs)
                         if num_gt_boxes > 0:
-                            # Add noise proportional to GT count (configurable range)
                             noise_ratio = random.uniform(*self.noise_ratio_range)
                             num_noise = max(1, min(self.max_noise_boxes, int(num_gt_boxes * noise_ratio)))
                         else:
-                            # If no GT boxes, add 1-2 noise boxes
                             num_noise = random.randint(1, min(2, self.max_noise_boxes))
                         
-
                         noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, label_strs)
                         
-                        # Create combined sequence with GT and noise mixed together
+                        # STEP 2: Create combined sequence (GT + noise)
                         combined_boxes = torch.cat([bx, noise_boxes], dim=0)
                         combined_labels = label_strs + noise_labels
                         
-                        # Create shuffled order for mixing GT and noise
+                        # STEP 3: Shuffle at the box/fragment level
                         num_total = len(combined_labels)
                         shuffle_indices = torch.randperm(num_total)
                         
-                        # Apply shuffle to both boxes and labels
                         combined_boxes = combined_boxes[shuffle_indices]
                         combined_labels = [combined_labels[i] for i in shuffle_indices.tolist()]
                         
                         # Track which positions are noise (after shuffling)
-                        noise_mask = shuffle_indices >= len(label_strs)  # True for noise positions
+                        noise_mask = shuffle_indices >= len(label_strs)
                         
-                        # Build combined input sequence
-                        input_frags = [
+                        # STEP 4: Build shuffled sequence text
+                        shuffled_frags = [
                             f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
                             for bb, lab in zip(combined_boxes.tolist(), combined_labels)
                         ]
-                        input_det_text = " ".join(input_frags)
+                        shuffled_det_text = " ".join(shuffled_frags)
                         
-                        # Build target sequence with IDENTICAL structure to input
-                        # KEY INSIGHT: Input and target have same text, but we selectively mask noise tokens
-                        # This is the core of Pix2Seq's approach: learn to generate GT from noisy input
-                        target_det_text = input_det_text
+                        # STEP 5: Tokenize the shuffled sequence
+                        shuffled_ids = self.tokenizer(shuffled_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
                         
-                        # Tokenize both sequences (they're identical)
-                        input_ids_det = self.tokenizer(input_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
-                        target_ids_det = self.tokenizer(target_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
+                        # STEP 6: Use shuffled sequence for both input and target
+                        input_ids_det = shuffled_ids
+                        tgt_ids = shuffled_ids.clone()
                         
-                        # Create selective mask: mark ONLY noise positions as -100
-                        tgt_ids = target_ids_det.clone()
-                        
-                        # Find token spans corresponding to noise boxes and mask them
-                        self._mask_noise_tokens(tgt_ids, target_det_text, noise_mask)
-                        
-                        # Don't shuffle fragments when using aligned sequences
-                        # input_ids_det already contains the mixed sequence
+                        # STEP 7: Apply noise masking to target only
+                        self._mask_noise_tokens(tgt_ids, shuffled_det_text, noise_mask)
                         
                     else:
-                        # No noise injection - normal training
-                        input_det_text = gt_det_text
-                        target_det_text = gt_det_text
+                        # No noise - just shuffle the canonical GT sequence
+                        # STEP 1: Tokenize canonical sequence
+                        canonical_ids = self.tokenizer(canonical_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
                         
-                        # Tokenize INPUT sequence (clean)
-                        input_ids_det = self.tokenizer(input_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
-                        input_ids_det = self._shuffle_fragments(input_ids_det)
+                        # STEP 2: Shuffle at token/fragment level
+                        shuffled_ids = self._shuffle_fragments(canonical_ids)
                         
-                        # Tokenize TARGET sequence (same as input when no noise)  
-                        tgt_ids = self.tokenizer(target_det_text, return_tensors="pt", truncation=False)["input_ids"].squeeze(0).to(device)
-                        tgt_ids = self._shuffle_fragments(tgt_ids)
+                        # STEP 3: Use same shuffled sequence for both input and target
+                        input_ids_det = shuffled_ids
+                        tgt_ids = shuffled_ids.clone()
                 else:
                     # Empty bboxes case
                     input_ids_det = empty_tensor.clone()
