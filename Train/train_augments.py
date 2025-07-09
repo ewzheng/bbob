@@ -23,33 +23,8 @@ _ms_crop_aug = A.Compose(
             p=1.0,
         ),
     ],
-    bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.2),
+    bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"], min_visibility=0.2),
 )
-
-
-def _tl_xywh_to_yolo(boxes):
-    """Convert list/ndarray of top-left xywh (0‥1) → YOLO (cx,cy,w,h)."""
-    if not boxes:
-        return []
-    out = []
-    for x, y, w, h in boxes:
-        cx = x + 0.5 * w
-        cy = y + 0.5 * h
-        out.append([cx, cy, w, h])
-    return out
-
-
-def _yolo_to_tl_xywh(boxes):
-    """Convert list of YOLO (cx,cy,w,h) → top-left xywh (0‥1)."""
-    if not boxes:
-        return []
-    out = []
-    for cx, cy, w, h in boxes:
-        x = cx - 0.5 * w
-        y = cy - 0.5 * h
-        out.append([x, y, w, h])
-    return out
-
 
 def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     """Apply Pix2Seq-style random scale jitter + crop to image and boxes.
@@ -85,7 +60,7 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
                     p=1.0,
                 )
             ],
-            bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.2),
+            bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"], min_visibility=0.2),
         )
     else:
         aug = _ms_crop_aug
@@ -93,21 +68,18 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     # Ensure numpy uint8 image for Albumentations
     img_np, was_pil = _to_numpy(image)
 
-    yolo_boxes = _tl_xywh_to_yolo(boxes)
-
     try:
-        res = aug(image=img_np, bboxes=yolo_boxes, class_labels=labels)
+        res = aug(image=img_np, bboxes=boxes, class_labels=labels)
     except Exception:
         # Fallback: return original
         return image, boxes, labels
 
     img_out = _restore_type(res["image"], was_pil)
-    boxes_yolo = res["bboxes"]
+    boxes_out = res["bboxes"]
     labels_out = res["class_labels"]
 
-    boxes_tl = _yolo_to_tl_xywh(boxes_yolo)
+    return img_out, boxes_out, labels_out
 
-    return img_out, boxes_tl, labels_out
 
 
 def _to_numpy(img):

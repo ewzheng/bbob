@@ -249,7 +249,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                     print(f"MS-crop augmentation failed (continuing): {e}")
 
         # --- iterate paired variants -----------------------------------------
-        for rgb, boxes_this, labels_this in zip(img_versions, boxes_versions, labels_versions):
+        for aug_idx, (rgb, boxes_this, labels_this) in enumerate(zip(img_versions, boxes_versions, labels_versions)):
             # --- MobileViT image processor ---
             try:
                 px = image_processor(rgb, return_tensors="np")["pixel_values"][0]
