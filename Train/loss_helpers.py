@@ -33,6 +33,104 @@ NUM_DIGITS: int = 3              # expected digit tokens per coordinate
 COORD_SCALE: float = float(10 ** NUM_DIGITS)
 
 # -----------------------------------------------------------------------------
+# Snippet extraction & conversion – shared by training & evaluation
+# -----------------------------------------------------------------------------
+
+
+def _extract_snippets(text: str) -> List[str]:
+    """Return every substring between TAG_OPEN and TAG_CLOSE (whitespace-stripped)."""
+    snippets: List[str] = []
+    start = 0
+    while True:
+        st = text.find(TAG_OPEN, start)
+        if st == -1:
+            break
+        st_end = st + len(TAG_OPEN)
+        ed = text.find(TAG_CLOSE, st_end)
+        if ed == -1:
+            break  # unmatched open – ignore tail
+        snippets.append(text[st_end:ed].strip())
+        start = ed + len(TAG_CLOSE)
+    return snippets
+
+
+def _split_snippet(det: str) -> Tuple[str, List[float]]:
+    """Return *(label, xywh)* for one <bbob> snippet (label lower-cased)."""
+    parts = det.split(":", 1)
+    label = parts[0].strip().lower() if parts else ""
+    xywh, _ = parse_detection_string(det)
+    return label, xywh
+
+
+def _snippets_to_boxes_labels(snippets: List[str]) -> Tuple[torch.Tensor, List[str]]:
+    """Convert list of snippets to tensor boxes and parallel label list."""
+    coords: List[List[float]] = []
+    labels: List[str] = []
+    for det in snippets:
+        lab, xywh = _split_snippet(det)
+        coords.append(xywh)
+        labels.append(lab)
+
+    if coords:
+        return torch.tensor(coords, dtype=torch.float32), labels
+    return torch.zeros((0, 4), dtype=torch.float32), labels
+
+# -----------------------------------------------------------------------------
+# Batch utilities – convert (B,S) token IDs to concatenated box tensors
+# -----------------------------------------------------------------------------
+
+
+def ids_to_boxes_labels(
+    token_ids: "torch.Tensor",  # (B,S)
+    tokenizer,
+    *,
+    ignore_index: int = -100,
+) -> Tuple[torch.Tensor, List[str], torch.Tensor]:
+    """Vectorised helper that turns a batch of token IDs into one coordinate tensor.
+
+    Parameters
+    ----------
+    token_ids : LongTensor (B,S)
+        Model predictions *or* ground-truth IDs.
+    tokenizer : PreTrainedTokenizerBase
+        Tokeniser used to decode IDs.
+    ignore_index : int, default -100
+        IDs with this value are removed before decoding.
+
+    Returns
+    -------
+    coords_all : FloatTensor  (N,4)  concatenated xywh in 0‥1
+    labels_all : list[str]    parallel class labels (lower-cased)
+    batch_ptr  : LongTensor   (B+1,) prefix sum indices for slicing per-image.
+    """
+    if token_ids.ndim != 2:
+        raise ValueError("token_ids must be (B,S)")
+
+    # 1) Remove ignore_index paddings
+    filtered: List[List[int]] = [
+        [int(t) for t in row.tolist() if t != ignore_index] for row in token_ids
+    ]
+
+    # 2) Batch-decode once (efficient in HF)
+    decoded: List[str] = tokenizer.batch_decode(
+        filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
+    )
+
+    # 3) Extract snippets & convert to tensors (vectorised decode_batch)
+    snippets_per_batch: List[List[str]] = [_extract_snippets(txt) for txt in decoded]
+
+    coords_all, _fmt_dummy, batch_ptr = decode_batch(snippets_per_batch)
+
+    # Decode labels alongside coords (cheap Python loop over snippets text)
+    labels_all: List[str] = []
+    for snippets in snippets_per_batch:
+        for det in snippets:
+            lab, _ = _split_snippet(det)
+            labels_all.append(lab)
+
+    return coords_all, labels_all, batch_ptr
+
+# -----------------------------------------------------------------------------
 # Parsing helpers -----------------------------------------------------------------------------
 
 def _parse_boxes(logits: torch.Tensor, tokenizer) -> List[List[str]]:

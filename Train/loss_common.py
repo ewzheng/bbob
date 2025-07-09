@@ -6,9 +6,8 @@ from .loss_helpers import (
     TAG_CLOSE,
     hungarian_match,
     xywh_to_xyxy,
+    ids_to_boxes_labels,
 )
-# Helpers from evaluation utilities (internal-but-stable)
-from Utils.detection_metrics import _extract_snippets, _snippets_to_boxes_labels
 
 # Torchvision losses – fall back gracefully if not available
 try:
@@ -246,28 +245,37 @@ class BBOBLoss:
                 gt_strs = self.tokenizer.batch_decode(gt_filtered, skip_special_tokens=False,
                                                        clean_up_tokenization_spaces=True)
 
+                # ---------------- vectorised using ids_to_boxes_labels ----------------
+                pred_ids = shift_logits.argmax(dim=-1)
+                # move to CPU for cheap Python-side decode; keeps GPU free
+                pred_coords_all, _, pred_ptr = ids_to_boxes_labels(
+                    pred_ids.cpu(), self.tokenizer, ignore_index=self.ignore_index
+                )
+
+                gt_coords_all, _, gt_ptr = ids_to_boxes_labels(
+                    shift_labels.cpu(), self.tokenizer, ignore_index=self.ignore_index
+                )
+
                 pb_all: list[torch.Tensor] = []
                 gb_all: list[torch.Tensor] = []
 
-                for pred_str, gt_str in zip(pred_strs, gt_strs):
-                    pred_snips = _extract_snippets(pred_str)
-                    gt_snips = _extract_snippets(gt_str)
+                B = shift_logits.size(0)
+                for b in range(B):
+                    p_slice = slice(pred_ptr[b], pred_ptr[b + 1])
+                    g_slice = slice(gt_ptr[b], gt_ptr[b + 1])
 
-                    pred_boxes, _ = _snippets_to_boxes_labels(pred_snips)
-                    gt_boxes, _ = _snippets_to_boxes_labels(gt_snips)
+                    if p_slice.start == p_slice.stop or g_slice.start == g_slice.stop:
+                        continue  # no boxes for this sample
 
-                    if pred_boxes.numel() == 0 or gt_boxes.numel() == 0:
-                        continue
+                    p_boxes = pred_coords_all[p_slice]
+                    g_boxes = gt_coords_all[g_slice]
 
-                    pairs = hungarian_match(pred_boxes, gt_boxes)
+                    pairs = hungarian_match(p_boxes, g_boxes)
                     if not pairs:
                         continue
 
-                    pb_sel = torch.stack([pred_boxes[i] for i, _ in pairs])
-                    gb_sel = torch.stack([gt_boxes[j] for _, j in pairs])
-
-                    pb_all.append(pb_sel)
-                    gb_all.append(gb_sel)
+                    pb_all.append(p_boxes[[i for i, _ in pairs]])
+                    gb_all.append(g_boxes[[j for _, j in pairs]])
 
                 if pb_all:
                     pb_cat = torch.cat(pb_all, dim=0).to(device=logits.device)
