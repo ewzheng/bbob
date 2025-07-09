@@ -45,6 +45,9 @@ MAX_BATCH_SIZE = 4096
 GPU_MEMORY_PER_SAMPLE = 16 * 1024 * 1024  # 16 MB heuristic (was 4 MB)
 MAX_PREPROC_GPU_BATCH = 256
 CPU_MEMORY_PER_SAMPLE = 6 * 1024 * 1024  # 6 MB heuristic
+AUG_PROB = 0.05
+# NEW: number of Pix2Seq-style multi-scale crops to generate per original image
+MS_CROPS_PER_SAMPLE = 4  # increase to e.g. 3 for more geometric diversity
 
 def normalize_coco_bboxes(bboxes, img_width, img_height, dtype):
     """
@@ -182,6 +185,8 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
     aug_boxes_all: list[list] = []
     aug_labels_all: list[list] = []
     aug_need_adjust: list[bool] = []
+    # Track whether a particular augmented view is already normalised by MS-crop
+    is_ms_crop_flags: list[bool] = []
 
     if images_field is None:
         raise KeyError("Batch dict must contain an 'images' or 'image' key with PIL images")
@@ -209,10 +214,11 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
 
         boxes_versions.append(base_boxes)
         labels_versions.append(base_labels)
+        is_ms_crop_flags.append(False)  # original view needs geometric adjust
 
         
         if training:
-            if augment and random.random() < 0.05:
+            if augment and random.random() < AUG_PROB:
                 try:
                     aug_versions = apply_batch_augmentations(
                         [base_rgb],
@@ -227,17 +233,20 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                         for _ in aug_versions:
                             boxes_versions.append(base_boxes)  # same geometry
                             labels_versions.append(base_labels)
+                            is_ms_crop_flags.append(False)  # photometric aug – still needs adjust
                 except Exception as e:
                     print(f"Augmentation error (continuing with original image): {e}")
 
             # ---------------- multi-scale crop augmentation -------------------
-            try:
-                img_c, boxes_c, labels_c = apply_ms_crop(base_rgb, base_boxes, base_labels)
-                img_versions.append(img_c)
-                boxes_versions.append(boxes_c)
-                labels_versions.append(labels_c)
-            except Exception as e:
-                print(f"MS-crop augmentation failed (continuing): {e}")
+            for _ in range(MS_CROPS_PER_SAMPLE):
+                try:
+                    img_c, boxes_c, labels_c = apply_ms_crop(base_rgb, base_boxes, base_labels)
+                    img_versions.append(img_c)
+                    boxes_versions.append(boxes_c)
+                    labels_versions.append(labels_c)
+                    is_ms_crop_flags.append(True)  # MS-crop view is already normalised
+                except Exception as e:
+                    print(f"MS-crop augmentation failed (continuing): {e}")
 
         # --- iterate paired variants -----------------------------------------
         for rgb, boxes_this, labels_this in zip(img_versions, boxes_versions, labels_versions):
@@ -268,8 +277,8 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
             # store GT boxes/labels for this view
             aug_boxes_all.append(boxes_this)
             aug_labels_all.append(labels_this)
-            # need geometric adjust? if boxes already normalised (ms crop) set False
-            need_adj = not (training and augment and boxes_this is boxes_c if 'boxes_c' in locals() else False)
+            # No geometric adjustment required for MS-crop views (already 0-1)
+            need_adj = not is_ms_crop_flags[aug_idx]
             aug_need_adjust.append(need_adj)
 
     text = batch["text"]
