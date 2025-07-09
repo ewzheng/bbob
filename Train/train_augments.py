@@ -17,8 +17,7 @@ _ms_crop_aug = A.Compose(
         # Pix2Seq-v2 uses up-to-1.5 area scaling; we approximate by first
         # scaling the image separately (handled below for custom calls).
         A.RandomResizedCrop(
-            height=TARGET_SIZE[1],
-            width=TARGET_SIZE[0],
+            size=TARGET_SIZE,           # (height, width)
             scale=(0.4, 1.0),           # valid range for Albumentations
             ratio=(1.0, 1.0),           # keep aspect ratio
             p=1.0,
@@ -80,8 +79,7 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
         aug = A.Compose(
             [
                 A.RandomResizedCrop(
-                    height=TARGET_SIZE[1],
-                    width=TARGET_SIZE[0],
+                    size=TARGET_SIZE,
                     scale=scale_range_valid,
                     ratio=(1.0, 1.0),
                     p=1.0,
