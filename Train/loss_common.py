@@ -29,7 +29,6 @@ class BBOBLoss:
                  lambda_digit: float = 0.25,  # weight for numeric-token aux CE
                  lambda_punct: float = 0.05,  # weight for punctuation/syntax aux CE
                  lambda_class: float = 0.25,  # weight for object-class token aux CE
-                 lambda_box: float = 0.1,    # weight for box-level CIoU auxiliary loss
                  **kwargs):
         """
         Initialise the loss function.
@@ -48,7 +47,6 @@ class BBOBLoss:
         self.lambda_digit = lambda_digit
         self.lambda_punct = lambda_punct
         self.lambda_class = lambda_class
-        self.lambda_box = lambda_box
         self.logger = logger
         self.log_interval = log_interval
         self._logged_samples = 0
@@ -177,11 +175,10 @@ class BBOBLoss:
         aux_loss_digit = torch.tensor(0.0, device=logits.device)
         aux_loss_punct = torch.tensor(0.0, device=logits.device)
         aux_loss_class = torch.tensor(0.0, device=logits.device)
-        aux_loss_box = torch.tensor(0.0, device=logits.device)
 
         # Only compute auxiliary losses if their lambda values are non-zero
         # Use pre-computed flat tensors to avoid redundant computations
-        if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0 or self.lambda_box > 0:
+        if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0:
             # Auxiliary loss focused on numeric tokens
             if self.lambda_digit > 0 and self.numeric_ids is not None:
                 # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
@@ -230,73 +227,6 @@ class BBOBLoss:
                         flat_logits[class_mask], flat_labels[class_mask], reduction="mean"
                     )
 
-            # ------------------------------------------------------------------
-            # Box-level CIoU auxiliary – uses model *predictions* (arg-max)
-            # ------------------------------------------------------------------
-            if self.lambda_box > 0:
-                # 1. Decode predicted & GT strings (cheap CPU op)
-                pred_ids = shift_logits.argmax(dim=-1)  # (B,S)
-                gt_ids = shift_labels  # (B,S)
-
-                pred_filtered = [
-                    [int(t) for t in row.tolist() if t != self.ignore_index]
-                    for row in pred_ids
-                ]
-                gt_filtered = [
-                    [int(t) for t in row.tolist() if t != self.ignore_index]
-                    for row in gt_ids
-                ]
-
-                pred_strs = self.tokenizer.batch_decode(pred_filtered, skip_special_tokens=False,
-                                                         clean_up_tokenization_spaces=True)
-                gt_strs = self.tokenizer.batch_decode(gt_filtered, skip_special_tokens=False,
-                                                       clean_up_tokenization_spaces=True)
-
-                # ---------------- vectorised using ids_to_boxes_labels ----------------
-                pred_ids = shift_logits.argmax(dim=-1)
-                # move to CPU for cheap Python-side decode; keeps GPU free
-                pred_coords_all, _, pred_ptr = ids_to_boxes_labels(
-                    pred_ids.cpu(), self.tokenizer, ignore_index=self.ignore_index
-                )
-
-                gt_coords_all, _, gt_ptr = ids_to_boxes_labels(
-                    shift_labels.cpu(), self.tokenizer, ignore_index=self.ignore_index
-                )
-
-                pb_all: list[torch.Tensor] = []
-                gb_all: list[torch.Tensor] = []
-
-                B = shift_logits.size(0)
-                for b in range(B):
-                    p_slice = slice(pred_ptr[b], pred_ptr[b + 1])
-                    g_slice = slice(gt_ptr[b], gt_ptr[b + 1])
-
-                    if p_slice.start == p_slice.stop or g_slice.start == g_slice.stop:
-                        continue  # no boxes for this sample
-
-                    p_boxes = pred_coords_all[p_slice]
-                    g_boxes = gt_coords_all[g_slice]
-
-                    pairs = hungarian_match(p_boxes, g_boxes)
-                    if not pairs:
-                        continue
-
-                    pb_all.append(p_boxes[[i for i, _ in pairs]])
-                    gb_all.append(g_boxes[[j for _, j in pairs]])
-
-                if pb_all:
-                    pb_cat = torch.cat(pb_all, dim=0).to(device=logits.device)
-                    gb_cat = torch.cat(gb_all, dim=0).to(device=logits.device)
-
-                    pb_xyxy = xywh_to_xyxy(pb_cat)
-                    gb_xyxy = xywh_to_xyxy(gb_cat)
-
-                    if _ciou_loss_fn is not None:
-                        aux_loss_box = _ciou_loss_fn(pb_xyxy, gb_xyxy, reduction="mean")
-                    else:
-                        giou = _g_box_iou(pb_xyxy, gb_xyxy).diag()
-                        aux_loss_box = (1.0 - giou).mean()
-
         if not torch.isfinite(loss):
             raise RuntimeError("NaN/Inf in LM loss")
 
@@ -315,7 +245,6 @@ class BBOBLoss:
                     "aux_numeric": (self.lambda_digit * aux_loss_digit).item(),
                     "aux_punct": (self.lambda_punct * aux_loss_punct).item(),
                     "aux_class": (self.lambda_class * aux_loss_class).item(),
-                    "aux_box": (self.lambda_box * aux_loss_box).item(),
                 })
 
         self.step += 1
@@ -325,7 +254,6 @@ class BBOBLoss:
             + self.lambda_digit * aux_loss_digit
             + self.lambda_punct * aux_loss_punct
             + self.lambda_class * aux_loss_class
-            + self.lambda_box * aux_loss_box
         )
 
         return total_loss
