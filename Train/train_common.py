@@ -24,6 +24,7 @@ import random
 # Image processing imports for dynamic resizer
 from PIL import Image
 import numpy as np
+import io
 
 # img / tensor utilities
 from torchvision.transforms.functional import pil_to_tensor
@@ -306,8 +307,6 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                     px_u8 = (px * 255).astype(np.uint8)
 
                 # Store as compressed bytes to avoid Arrow overflow
-                import io
-                from PIL import Image
                 img_hwc = np.transpose(px_u8, (1, 2, 0))  # CHW -> HWC for PIL
                 buf = io.BytesIO()
                 Image.fromarray(img_hwc).save(buf, format="JPEG", quality=95, optimize=True)
