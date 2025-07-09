@@ -305,7 +305,8 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                 else:
                     px_u8 = (px * 255).astype(np.uint8)
 
-                processed_images.append(px_u8)
+                # Store as raw bytes to keep Arrow offsets small
+                processed_images.append(px_u8.tobytes())
             except Exception as e:
                 print(f"Image processing error: {e}")
                 # Fallback to basic processing – resize shortest edge then letter-box
