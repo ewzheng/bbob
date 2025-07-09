@@ -1,6 +1,21 @@
 import torch
 import torch.nn.functional as F
-from .loss_helpers import decode_pred_gt, TAG_OPEN, TAG_CLOSE
+from .loss_helpers import (
+    decode_pred_gt,
+    TAG_OPEN,
+    TAG_CLOSE,
+    hungarian_match,
+    xywh_to_xyxy,
+)
+# Helpers from evaluation utilities (internal-but-stable)
+from Utils.detection_metrics import _extract_snippets, _snippets_to_boxes_labels
+
+# Torchvision losses – fall back gracefully if not available
+try:
+    from torchvision.ops import complete_box_iou_loss as _ciou_loss_fn  # type: ignore
+except ImportError:  # pragma: no cover
+    _ciou_loss_fn = None
+from torchvision.ops import generalized_box_iou as _g_box_iou  # type: ignore
 
 class BBOBLoss:
     """Minimal language-model cross-entropy loss for BBOB.
@@ -15,6 +30,7 @@ class BBOBLoss:
                  lambda_digit: float = 0.25,  # weight for numeric-token aux CE
                  lambda_punct: float = 0.05,  # weight for punctuation/syntax aux CE
                  lambda_class: float = 0.25,  # weight for object-class token aux CE
+                 lambda_box: float = 0.1,    # weight for box-level CIoU auxiliary loss
                  **kwargs):
         """
         Initialise the loss function.
@@ -33,6 +49,7 @@ class BBOBLoss:
         self.lambda_digit = lambda_digit
         self.lambda_punct = lambda_punct
         self.lambda_class = lambda_class
+        self.lambda_box = lambda_box
         self.logger = logger
         self.log_interval = log_interval
         self._logged_samples = 0
@@ -160,10 +177,11 @@ class BBOBLoss:
         aux_loss_digit = torch.tensor(0.0, device=logits.device)
         aux_loss_punct = torch.tensor(0.0, device=logits.device)
         aux_loss_class = torch.tensor(0.0, device=logits.device)
+        aux_loss_box = torch.tensor(0.0, device=logits.device)
 
         # Only compute auxiliary losses if their lambda values are non-zero
         # Use pre-computed flat tensors to avoid redundant computations
-        if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0:
+        if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0 or self.lambda_box > 0:
             # Auxiliary loss focused on numeric tokens
             if self.lambda_digit > 0 and self.numeric_ids is not None:
                 # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
@@ -212,6 +230,58 @@ class BBOBLoss:
                         flat_logits[class_mask], flat_labels[class_mask], reduction="mean"
                     )
 
+            # ------------------------------------------------------------------
+            # Box-level CIoU auxiliary – uses model *predictions* (arg-max)
+            # ------------------------------------------------------------------
+            if self.lambda_box > 0:
+                # 1. Decode predicted & GT strings (cheap CPU op)
+                pred_ids = shift_logits.argmax(dim=-1)  # (B,S)
+                gt_ids = shift_labels  # (B,S)
+
+                pred_filtered = [row.tolist() for row in pred_ids]
+                gt_filtered = [row.tolist() for row in gt_ids]
+
+                pred_strs = self.tokenizer.batch_decode(pred_filtered, skip_special_tokens=False,
+                                                         clean_up_tokenization_spaces=True)
+                gt_strs = self.tokenizer.batch_decode(gt_filtered, skip_special_tokens=False,
+                                                       clean_up_tokenization_spaces=True)
+
+                pb_all: list[torch.Tensor] = []
+                gb_all: list[torch.Tensor] = []
+
+                for pred_str, gt_str in zip(pred_strs, gt_strs):
+                    pred_snips = _extract_snippets(pred_str)
+                    gt_snips = _extract_snippets(gt_str)
+
+                    pred_boxes, _ = _snippets_to_boxes_labels(pred_snips)
+                    gt_boxes, _ = _snippets_to_boxes_labels(gt_snips)
+
+                    if pred_boxes.numel() == 0 or gt_boxes.numel() == 0:
+                        continue
+
+                    pairs = hungarian_match(pred_boxes, gt_boxes)
+                    if not pairs:
+                        continue
+
+                    pb_sel = torch.stack([pred_boxes[i] for i, _ in pairs])
+                    gb_sel = torch.stack([gt_boxes[j] for _, j in pairs])
+
+                    pb_all.append(pb_sel)
+                    gb_all.append(gb_sel)
+
+                if pb_all:
+                    pb_cat = torch.cat(pb_all, dim=0).to(device=logits.device)
+                    gb_cat = torch.cat(gb_all, dim=0).to(device=logits.device)
+
+                    pb_xyxy = xywh_to_xyxy(pb_cat)
+                    gb_xyxy = xywh_to_xyxy(gb_cat)
+
+                    if _ciou_loss_fn is not None:
+                        aux_loss_box = _ciou_loss_fn(pb_xyxy, gb_xyxy, reduction="mean")
+                    else:
+                        giou = _g_box_iou(pb_xyxy, gb_xyxy).diag()
+                        aux_loss_box = (1.0 - giou).mean()
+
         if not torch.isfinite(loss):
             raise RuntimeError("NaN/Inf in LM loss")
 
@@ -239,6 +309,7 @@ class BBOBLoss:
             + self.lambda_digit * aux_loss_digit
             + self.lambda_punct * aux_loss_punct
             + self.lambda_class * aux_loss_class
+            + self.lambda_box * aux_loss_box
         )
 
         return total_loss

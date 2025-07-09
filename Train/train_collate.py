@@ -109,7 +109,7 @@ class BBOBCollator:  # noqa: N801
     def reseed(self):
         self.rngjesus = np.random.default_rng()
 
-    def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.05):
+    def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.15):
         """Jitter *normalised* (x,y,w,h) boxes in 0‥1 space.
 
         Each box is perturbed independently:
