@@ -13,10 +13,13 @@ TARGET_SIZE = (256, 256)
 # Pre-compile transform so it is constructed once per process
 _ms_crop_aug = A.Compose(
     [
+        # NOTE: Albumentations 1.x enforces scale values ∈ [0,1].
+        # Pix2Seq-v2 uses up-to-1.5 area scaling; we approximate by first
+        # scaling the image separately (handled below for custom calls).
         A.RandomResizedCrop(
             height=TARGET_SIZE[1],
             width=TARGET_SIZE[0],
-            scale=(0.4, 1.5),           # resize factor range
+            scale=(0.4, 1.0),           # valid range for Albumentations
             ratio=(1.0, 1.0),           # keep aspect ratio
             p=1.0,
         ),
@@ -49,7 +52,7 @@ def _yolo_to_tl_xywh(boxes):
     return out
 
 
-def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.5)):
+def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     """Apply Pix2Seq-style random scale jitter + crop to image and boxes.
 
     Parameters
@@ -68,13 +71,18 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.5)):
     labels = labels or []
 
     # If caller wants a custom scale range, rebuild the transform lazily
-    if scale_range != (0.4, 1.5):
+    if scale_range != (0.4, 1.0):
+        # Validate scale_range; clamp to (0,1] if necessary to satisfy Albumentations
+        lo, hi = scale_range
+        lo = max(0.0, min(1.0, lo))
+        hi = max(lo, min(1.0, hi))
+        scale_range_valid = (lo, hi)
         aug = A.Compose(
             [
                 A.RandomResizedCrop(
                     height=TARGET_SIZE[1],
                     width=TARGET_SIZE[0],
-                    scale=scale_range,
+                    scale=scale_range_valid,
                     ratio=(1.0, 1.0),
                     p=1.0,
                 )
