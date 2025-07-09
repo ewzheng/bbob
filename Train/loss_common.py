@@ -161,8 +161,9 @@ class BBOBLoss:
         # OPTIMIZED: Pre-compute shifted tensors once
         shift_logits = logits[..., :-1, :]
         shift_labels = labels[..., 1:]
-        flat_logits = shift_logits.view(-1, vocab)
-        flat_labels = shift_labels.view(-1)
+        # Use reshape to handle possibly non-contiguous tensors from slicing
+        flat_logits = shift_logits.reshape(-1, vocab)
+        flat_labels = shift_labels.reshape(-1)
         
         # Main cross-entropy loss
         loss = F.cross_entropy(
