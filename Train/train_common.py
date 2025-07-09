@@ -19,6 +19,7 @@ import time
 import multiprocess as mp
 import math
 import yaml 
+import random
 
 # Image processing imports for dynamic resizer
 from PIL import Image
@@ -31,7 +32,7 @@ import torch.nn.functional as F
 import psutil
 
 # Image augmentations
-from .train_augments import apply_batch_augmentations
+from .train_augments import apply_batch_augmentations, apply_ms_crop
 from Utils.class_id_map import init_from_labels, get_id
 
 # Constants
@@ -149,7 +150,7 @@ def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.flo
 
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, image_processor, training=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
+def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
     '''
     build vision-language features for one raw dataset batch.
 
@@ -173,6 +174,15 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, target_s
     sample_replication = []    # map augmented index -> original sample idx
 
     images_field = "images" if "images" in batch else "image" if "image" in batch else None
+
+    # Store per-augmented-image ground-truth boxes / labels and a flag
+    # indicating whether geometric adjustment is still required.  For
+    # Pix2Seq-style MS-crop the boxes are already normalised to the 256×256
+    # output, so no further adjust is needed.
+    aug_boxes_all: list[list] = []
+    aug_labels_all: list[list] = []
+    aug_need_adjust: list[bool] = []
+
     if images_field is None:
         raise KeyError("Batch dict must contain an 'images' or 'image' key with PIL images")
 
@@ -186,23 +196,51 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, target_s
         # Generate list of images: original + each augmentation (training only)
         # ------------------------------------------------------------------
         img_versions = [base_rgb]
+        boxes_versions: list[list] = []
+        labels_versions: list[list] = []
 
+        # Load base GT if available
+        if "objects" in batch:
+            sample_obj = batch["objects"][idx]
+            base_boxes = sample_obj.get("bbox", [])
+            base_labels = sample_obj.get("category", [])
+        else:
+            base_boxes, base_labels = [], []
+
+        boxes_versions.append(base_boxes)
+        labels_versions.append(base_labels)
+
+        
         if training:
-            try:
-                aug_versions = apply_batch_augmentations(
-                    [base_rgb],
-                    weather_intensity="medium",
-                    camera_intensity="medium",
-                    weather_enabled=True,
-                    camera_enabled=True,
-                    max_augmentations_per_type=2,
-                )
-                if aug_versions:
-                    img_versions.extend(aug_versions)
-            except Exception as e:
-                print(f"Augmentation error (continuing with original image): {e}")
+            if augment and random.random() < 0.05:
+                try:
+                    aug_versions = apply_batch_augmentations(
+                        [base_rgb],
+                        weather_intensity="medium",
+                        camera_intensity="medium",
+                        weather_enabled=True,
+                        camera_enabled=True,
+                        max_augmentations_per_type=2,
+                    )
+                    if aug_versions:
+                        img_versions.extend(aug_versions)
+                        for _ in aug_versions:
+                            boxes_versions.append(base_boxes)  # same geometry
+                            labels_versions.append(base_labels)
+                except Exception as e:
+                    print(f"Augmentation error (continuing with original image): {e}")
 
-        for rgb in img_versions:
+            # ---------------- multi-scale crop augmentation -------------------
+            try:
+                img_c, boxes_c, labels_c = apply_ms_crop(base_rgb, base_boxes, base_labels)
+                img_versions.append(img_c)
+                boxes_versions.append(boxes_c)
+                labels_versions.append(labels_c)
+            except Exception as e:
+                print(f"MS-crop augmentation failed (continuing): {e}")
+
+        # --- iterate paired variants -----------------------------------------
+        for rgb, boxes_this, labels_this in zip(img_versions, boxes_versions, labels_versions):
             # --- MobileViT image processor ---
             try:
                 px = image_processor(rgb, return_tensors="np")["pixel_values"][0]
@@ -226,6 +264,13 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, target_s
             lb_params.append((ratio, crop_left, crop_top))
 
             sample_replication.append(idx)
+
+            # store GT boxes/labels for this view
+            aug_boxes_all.append(boxes_this)
+            aug_labels_all.append(labels_this)
+            # need geometric adjust? if boxes already normalised (ms crop) set False
+            need_adj = not (training and augment and boxes_this is boxes_c if 'boxes_c' in locals() else False)
+            aug_need_adjust.append(need_adj)
 
     text = batch["text"]
     
@@ -261,95 +306,96 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, target_s
     }
 
     # apply augmentations to objects
-    if "objects" in batch:
-        for aug_idx, orig_idx in enumerate(sample_replication):
-            sample = batch["objects"][orig_idx]
+    for aug_idx, orig_idx in enumerate(sample_replication):
+        # Retrieve stored boxes / labels for this augmented view
+        bboxes_raw = aug_boxes_all[aug_idx]
+        labels_raw = aug_labels_all[aug_idx]
 
-            # Fetch a *fresh* copy of the ground-truth boxes so that each
-            # augmented view starts from the same coordinates before its own
-            bboxes = torch.as_tensor(sample["bbox"], dtype=dtype).clone()
-
-            # 2) adjust to letter-boxed, padded coordinates then normalise
-            ratio, crop_left, crop_top = lb_params[aug_idx]
+        if aug_need_adjust[aug_idx] and bboxes_raw:
+            # need resize/crop adjustment (non-ms-crop views)
             bboxes = adjust_boxes_resize_crop(
-                bboxes,
-                orig_w = image_sizes[aug_idx][0],
-                orig_h = image_sizes[aug_idx][1],
-                target = target_size[0],
-                dtype = dtype,
+                bboxes_raw,
+                orig_w=image_sizes[aug_idx][0],
+                orig_h=image_sizes[aug_idx][1],
+                target=target_size[0],
+                dtype=dtype,
             )
-            sample_boxes = []
-            sample_label_ids = []   # canonical integer IDs (multi-token aware)
-            sample_label_strs = []  # human-readable strings (for text)
-            for bbox, category in zip(bboxes, sample["category"]):
-                # Convert tensors to plain python lists
-                if isinstance(bbox, torch.Tensor):
-                    bbox = bbox.tolist()
+        else:
+            bboxes = torch.as_tensor(bboxes_raw, dtype=dtype)
 
-                # --- map category to string --------------------------------
-                if isinstance(category, int):
-                    label_str = label_lookup.get(category, str(category)) if label_lookup else str(category)
-                else:
-                    label_str = str(category)
+        sample_boxes = []
+        sample_label_ids = []   # canonical integer IDs (multi-token aware)
+        sample_label_strs = []  # human-readable strings (for text)
 
-                # --- tokenise *whole* phrase and map to deterministic ID --
-                sub_tok_ids = tokenizer(label_str, add_special_tokens=False)["input_ids"]
-                cls_id = get_id(sub_tok_ids)
+        for bbox, category in zip(bboxes, labels_raw):
+            # Convert tensors to plain python lists
+            if isinstance(bbox, torch.Tensor):
+                bbox = bbox.tolist()
 
-                sample_boxes.append(bbox)
-                sample_label_ids.append(cls_id)
-                sample_label_strs.append(label_str)
-
-            # -------------------------------------------------------------
-            # Build detection target string: <bbob>class:bbox</bbob>
-            # -------------------------------------------------------------
-            detection_fragments = []
-            for bbox, label in zip(sample_boxes, sample_label_strs):
-                # bbox components are already 0-1; keep them as 3-decimal floats
-                bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
-                detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
-
-            # ---------------------------------------------------------
-            # Build the textual target *and* decide how many detections
-            # can be kept so that text, boxes and labels stay in sync.
-            # ---------------------------------------------------------
-
-            kept_n: int = 0  # how many objects remain after truncation
-            ids: list[int]
-
-            if detection_fragments:
-                frags = detection_fragments  # alias for brevity
-
-                # Try dropping fragments from the *end* until the encoded
-                # length fits.  This guarantees that we always keep a
-                # prefix of the object list, so slicing boxes / labels with
-                # kept_n is safe.
-                while frags:
-                    candidate = " ".join(frags)
-                    enc = tokenizer(candidate, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
-                    if enc.size(0) <= MAX_TARGET_TEXT_LENGTH:
-                        ids = enc.tolist()
-                        kept_n = len(frags)
-                        break
-                    frags.pop()  # drop last <bbob>… fragment and retry
-                else:
-                    # Even the first fragment does not fit – encode the
-                    # first one with hard truncation, keep_n = 1
-                    first = detection_fragments[0]
-                    ids = tokenizer(first, return_tensors="pt", truncation=True,
-                                     max_length=MAX_TARGET_TEXT_LENGTH)["input_ids"].squeeze(0).tolist()
-                    kept_n = 1
+            # --- map category to string --------------------------------
+            if isinstance(category, int):
+                label_str = label_lookup.get(category, str(category)) if label_lookup else str(category)
             else:
-                ids = []
-                kept_n = 0
+                label_str = str(category)
 
-            # ---------------- boxes / labels -----------------------
-            # Slice to *kept_n* so geometric targets match the text.
-            result.setdefault("target_boxes", []).append(sample_boxes[:kept_n])
-            result.setdefault("target_labels", []).append(sample_label_ids[:kept_n])
-            result.setdefault("target_label_strs", []).append(sample_label_strs[:kept_n])
-            # ---------------- store token ids ----------------------
-            result.setdefault("target_text", []).append(ids)
+            # --- tokenise *whole* phrase and map to deterministic ID --
+            sub_tok_ids = tokenizer(label_str, add_special_tokens=False)["input_ids"]
+            cls_id = get_id(sub_tok_ids)
+
+            sample_boxes.append(bbox)
+            sample_label_ids.append(cls_id)
+            sample_label_strs.append(label_str)
+
+        # -------------------------------------------------------------
+        # Build detection target string: <bbob>class:bbox</bbob>
+        # -------------------------------------------------------------
+        detection_fragments = []
+        for bbox, label in zip(sample_boxes, sample_label_strs):
+            # bbox components are already 0-1; keep them as 3-decimal floats
+            bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
+            detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
+
+        # ---------------------------------------------------------
+        # Build the textual target *and* decide how many detections
+        # can be kept so that text, boxes and labels stay in sync.
+        # ---------------------------------------------------------
+
+        kept_n: int = 0  # how many objects remain after truncation
+        ids: list[int]
+
+        if detection_fragments:
+            frags = detection_fragments  # alias for brevity
+
+            # Try dropping fragments from the *end* until the encoded
+            # length fits.  This guarantees that we always keep a
+            # prefix of the object list, so slicing boxes / labels with
+            # kept_n is safe.
+            while frags:
+                candidate = " ".join(frags)
+                enc = tokenizer(candidate, return_tensors="pt", truncation=False)["input_ids"].squeeze(0)
+                if enc.size(0) <= MAX_TARGET_TEXT_LENGTH:
+                    ids = enc.tolist()
+                    kept_n = len(frags)
+                    break
+                frags.pop()  # drop last <bbob>… fragment and retry
+            else:
+                # Even the first fragment does not fit – encode the
+                # first one with hard truncation, keep_n = 1
+                first = detection_fragments[0]
+                ids = tokenizer(first, return_tensors="pt", truncation=True,
+                                 max_length=MAX_TARGET_TEXT_LENGTH)["input_ids"].squeeze(0).tolist()
+                kept_n = 1
+        else:
+            ids = []
+            kept_n = 0
+
+        # ---------------- boxes / labels -----------------------
+        # Slice to *kept_n* so geometric targets match the text.
+        result.setdefault("target_boxes", []).append(sample_boxes[:kept_n])
+        result.setdefault("target_labels", []).append(sample_label_ids[:kept_n])
+        result.setdefault("target_label_strs", []).append(sample_label_strs[:kept_n])
+        # ---------------- store token ids ----------------------
+        result.setdefault("target_text", []).append(ids)
 
     if "sentences" in batch and "target_text" not in result:
         target_texts = []
@@ -380,7 +426,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, target_s
     return result
 
 
-def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_training=False, dtype=torch.float32, max_workers=None, label_lookup=None):
+def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_training=False, augment=False, dtype=torch.float32, max_workers=None, label_lookup=None):
     """
     Process entire dataset through image resizing and feature extraction
     
@@ -390,6 +436,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         - image_processor: MobileViTImageProcessor instance for image processing
         - instruction: instruction text to add to each example
         - is_training: boolean indicating whether this is a training set
+        - augment: boolean indicating whether to apply augmentations
         - dtype: torch dtype for tensors
         - max_workers: number of workers for multiprocessing
         - label_lookup: mapping from class indices to names
@@ -416,6 +463,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         training=is_training,
         dtype=dtype,
         label_lookup=label_lookup,
+        augment=augment,
     )
 
     dataset = dataset.map(
@@ -479,6 +527,7 @@ def load_and_prepare_dataset(
     image_processor,
     dtype=torch.float32,
     on_the_fly=False,
+    augment=False,
 ):
     """
     Load dataset from HuggingFace hub and create train/test splits
@@ -605,6 +654,7 @@ def load_and_prepare_dataset(
             image_processor,
             instruction,
             is_training=True,
+            augment=augment,
             dtype=dtype,
             label_lookup=label_lookup,
         )
@@ -616,6 +666,7 @@ def load_and_prepare_dataset(
             image_processor,
             instruction,
             is_training=False,
+            augment=augment,
             dtype=dtype,
             label_lookup=label_lookup,
         )

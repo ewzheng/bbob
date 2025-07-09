@@ -197,6 +197,7 @@ def main():
         tokenizer=tokenizer,
         instruction=args.instruction,
         image_processor=model.get_image_processor(),
+        augment=True,
         dtype=model.dtype,
         on_the_fly=False,
     )

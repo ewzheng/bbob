@@ -4,6 +4,105 @@ import numpy as np
 from PIL import Image
 import random
 
+# -----------------------------------------------------------------------------
+# Geometric augmentation – multi-scale random crop (Pix2Seq-style)
+# -----------------------------------------------------------------------------
+
+TARGET_SIZE = (256, 256)
+
+# Pre-compile transform so it is constructed once per process
+_ms_crop_aug = A.Compose(
+    [
+        A.RandomResizedCrop(
+            height=TARGET_SIZE[1],
+            width=TARGET_SIZE[0],
+            scale=(0.4, 1.5),           # resize factor range
+            ratio=(1.0, 1.0),           # keep aspect ratio
+            p=1.0,
+        ),
+    ],
+    bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.2),
+)
+
+
+def _tl_xywh_to_yolo(boxes):
+    """Convert list/ndarray of top-left xywh (0‥1) → YOLO (cx,cy,w,h)."""
+    if not boxes:
+        return []
+    out = []
+    for x, y, w, h in boxes:
+        cx = x + 0.5 * w
+        cy = y + 0.5 * h
+        out.append([cx, cy, w, h])
+    return out
+
+
+def _yolo_to_tl_xywh(boxes):
+    """Convert list of YOLO (cx,cy,w,h) → top-left xywh (0‥1)."""
+    if not boxes:
+        return []
+    out = []
+    for cx, cy, w, h in boxes:
+        x = cx - 0.5 * w
+        y = cy - 0.5 * h
+        out.append([x, y, w, h])
+    return out
+
+
+def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.5)):
+    """Apply Pix2Seq-style random scale jitter + crop to image and boxes.
+
+    Parameters
+    ----------
+    image   : PIL.Image | np.ndarray | torch.Tensor(3,H,W)
+    boxes   : list[list[float]]  xywh top-left normalised 0‥1
+    labels  : list[str]
+    scale_range : tuple(float,float)
+        Passed to `RandomResizedCrop.scale`.
+    Returns
+    -------
+    aug_img, aug_boxes, aug_labels (boxes stay xywh top-left 0‥1)
+    """
+    # Make sure boxes & labels are lists
+    boxes = boxes or []
+    labels = labels or []
+
+    # If caller wants a custom scale range, rebuild the transform lazily
+    if scale_range != (0.4, 1.5):
+        aug = A.Compose(
+            [
+                A.RandomResizedCrop(
+                    height=TARGET_SIZE[1],
+                    width=TARGET_SIZE[0],
+                    scale=scale_range,
+                    ratio=(1.0, 1.0),
+                    p=1.0,
+                )
+            ],
+            bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.2),
+        )
+    else:
+        aug = _ms_crop_aug
+
+    # Ensure numpy uint8 image for Albumentations
+    img_np, was_pil = _to_numpy(image)
+
+    yolo_boxes = _tl_xywh_to_yolo(boxes)
+
+    try:
+        res = aug(image=img_np, bboxes=yolo_boxes, class_labels=labels)
+    except Exception:
+        # Fallback: return original
+        return image, boxes, labels
+
+    img_out = _restore_type(res["image"], was_pil)
+    boxes_yolo = res["bboxes"]
+    labels_out = res["class_labels"]
+
+    boxes_tl = _yolo_to_tl_xywh(boxes_yolo)
+
+    return img_out, boxes_tl, labels_out
+
 
 def _to_numpy(img):
     """Convert PIL image to numpy array if necessary."""
