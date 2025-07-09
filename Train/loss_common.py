@@ -315,6 +315,7 @@ class BBOBLoss:
                     "aux_numeric": (self.lambda_digit * aux_loss_digit).item(),
                     "aux_punct": (self.lambda_punct * aux_loss_punct).item(),
                     "aux_class": (self.lambda_class * aux_loss_class).item(),
+                    "aux_box": (self.lambda_box * aux_loss_box).item(),
                 })
 
         self.step += 1
