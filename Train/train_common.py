@@ -47,7 +47,7 @@ MAX_PREPROC_GPU_BATCH = 256
 CPU_MEMORY_PER_SAMPLE = 6 * 1024 * 1024  # 6 MB heuristic
 AUG_PROB = 0.05
 # NEW: number of Pix2Seq-style multi-scale crops to generate per original image
-MS_CROPS_PER_SAMPLE = 4  # increase to e.g. 3 for more geometric diversity
+MS_CROPS_PER_SAMPLE = 2 # increase to e.g. 3 for more geometric diversity
 
 def normalize_coco_bboxes(bboxes, img_width, img_height, dtype):
     """
@@ -255,7 +255,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                         camera_intensity="medium",
                         weather_enabled=True,
                         camera_enabled=True,
-                        max_augmentations_per_type=2,
+                        max_augmentations_per_type=1,
                     )
                     if aug_versions:
                         img_versions.extend(aug_versions)

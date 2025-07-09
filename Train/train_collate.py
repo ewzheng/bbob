@@ -289,13 +289,8 @@ class BBOBCollator:  # noqa: N801
             img_tensors = []
             for itm in batch:
                 img_data = itm[img_key]
-                if isinstance(img_data, (bytes, bytearray)):
-                    # Decode raw CHW uint8 bytes (3*256*256)
-                    arr = torch.frombuffer(img_data, dtype=torch.uint8)
-                    arr = arr.reshape(3, *TARGET_SIZE)  # (C,H,W)
-                    img_tensors.append(arr.to(device))
-                else:
-                    img_tensors.append(torch.as_tensor(img_data, device=device))
+
+                img_tensors.append(torch.as_tensor(img_data, device=device))
 
             # Ensure float32 + 0‥1 range once for the whole list (cheap).
             ref = img_tensors[0]
