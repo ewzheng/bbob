@@ -305,8 +305,13 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                 else:
                     px_u8 = (px * 255).astype(np.uint8)
 
-                # Store as numpy array (collator expects this format)
-                processed_images.append(px_u8)
+                # Store as compressed bytes to avoid Arrow overflow
+                import io
+                from PIL import Image
+                img_hwc = np.transpose(px_u8, (1, 2, 0))  # CHW -> HWC for PIL
+                buf = io.BytesIO()
+                Image.fromarray(img_hwc).save(buf, format="JPEG", quality=95, optimize=True)
+                processed_images.append(buf.getvalue())
             except Exception as e:
                 print(f"Image processing error: {e}")
                 # Fallback to basic processing – resize shortest edge then letter-box

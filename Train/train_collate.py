@@ -236,7 +236,7 @@ class BBOBCollator:  # noqa: N801
             processed = []
             for img in (item[img_key] for item in batch):
                 try:
-                    pv = self.processor(img, return_tensors="pt")["pixel_values"][0]  # (3,256,256) float32 0-1
+                    pv = self.processor(img, return_tensors="pt", do_center_crop=False)["pixel_values"][0]  # (3,256,256) float32 0-1
                     processed.append(pv.to(device))  # Ensure on correct device
                     continue  # success – skip manual fallback
                 except Exception:
@@ -290,7 +290,15 @@ class BBOBCollator:  # noqa: N801
             for itm in batch:
                 img_data = itm[img_key]
 
-                img_tensors.append(torch.as_tensor(img_data, device=device))
+                if isinstance(img_data, (bytes, bytearray)):
+                    # Decode JPEG/PNG bytes back to CHW tensor
+                    import io
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(img_data)).convert("RGB")
+                    arr = torch.as_tensor(np.array(img), device=device)  # HWC uint8
+                    img_tensors.append(arr.permute(2, 0, 1))  # CHW
+                else:
+                    img_tensors.append(torch.as_tensor(img_data, device=device))
 
             # Ensure float32 + 0‥1 range once for the whole list (cheap).
             ref = img_tensors[0]
