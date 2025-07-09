@@ -238,8 +238,14 @@ class BBOBLoss:
                 pred_ids = shift_logits.argmax(dim=-1)  # (B,S)
                 gt_ids = shift_labels  # (B,S)
 
-                pred_filtered = [row.tolist() for row in pred_ids]
-                gt_filtered = [row.tolist() for row in gt_ids]
+                pred_filtered = [
+                    [int(t) for t in row.tolist() if t != self.ignore_index]
+                    for row in pred_ids
+                ]
+                gt_filtered = [
+                    [int(t) for t in row.tolist() if t != self.ignore_index]
+                    for row in gt_ids
+                ]
 
                 pred_strs = self.tokenizer.batch_decode(pred_filtered, skip_special_tokens=False,
                                                          clean_up_tokenization_spaces=True)
