@@ -107,7 +107,7 @@ def train(
     # This creates two functions that share closure variables for accumulating metrics
     compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer, do_detection_metrics=False)
 
-    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size * grad_acc_steps, 1), lambda_digit=0, lambda_punct=0)  
+    compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(batch_size * grad_acc_steps, 1), lambda_digit=0, lambda_punct=0, lambda_class=0, lambda_box=0)  
 
     trainer = BBOBTrainer(
         model=model,
