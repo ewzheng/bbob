@@ -305,13 +305,16 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                 else:
                     px_u8 = (px * 255).astype(np.uint8)
 
-                # Store as raw bytes to keep Arrow offsets small
-                processed_images.append(px_u8.tobytes())
+                # Store as numpy array (collator expects this format)
+                processed_images.append(px_u8)
             except Exception as e:
                 print(f"Image processing error: {e}")
                 # Fallback to basic processing – resize shortest edge then letter-box
                 fallback, _, _, _ = letterbox_image(rgb, target_size)
                 px = np.array(fallback, dtype=np.uint8).transpose(2, 0, 1)
+                # Ensure fallback also produces uint8 CHW format
+                if isinstance(px, np.ndarray) and px.dtype != np.uint8:
+                    px = (px * 255).astype(np.uint8) if px.max() <= 1.0 else px.astype(np.uint8)
                 processed_images.append(px)
 
             # Store *original* image dims (before letter-box) for bbox adjust
