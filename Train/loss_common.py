@@ -36,7 +36,6 @@ class BBOBLoss:
             tokenizer: HuggingFace tokenizer instance
             ignore_index: Index to ignore in loss calculation (default: -100)
             lambda_digit: Weight for numeric token auxiliary loss
-            lambda_punct: Weight for punctuation auxiliary loss
             lambda_class: Weight for class token auxiliary loss
             logger: Logger instance for warnings
             log_interval: How often to log metrics
@@ -203,12 +202,16 @@ class BBOBLoss:
                 pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu")
                 tgt_ids = shift_labels[0].to(device="cpu")
                 
+                # Also get input sequence to see noise interleaving
+                input_ids = labels[0].to(device="cpu")  # Original unshifted input
+                
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
+                input_str = self.tokenizer.decode(input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
                 
                 # NEW: Extract and log actual GT objects for monitoring
                 gt_objects = self._extract_gt_objects(tgt_ids)
                 
-                self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
+                self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str, "sample_input": input_str})
                 self.logger.info({"gt_objects": gt_objects})  # Log parsed GT objects
                 self.logger.info({
                     "loss": loss.item(),
