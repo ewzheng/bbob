@@ -564,7 +564,21 @@ class BBOBCollator:  # noqa: N801
                         tgt_ids = shuffled_ids.clone()
                         
                         # STEP 7: Apply noise masking to target only
-                        self._mask_noise_tokens(tgt_ids, shuffled_det_text, noise_mask)
+                        # CRITICAL: After truncation, we need to rebuild the text from truncated tokens
+                        # to ensure proper alignment for noise masking
+                        if tgt_ids.size(0) > 0:
+                            # Rebuild the text from the actually used tokens for accurate masking
+                            truncated_text = self.tokenizer.decode(tgt_ids, skip_special_tokens=False)
+                            # Count how many complete fragments remain after truncation
+
+                            fragment_pattern = r'<\|bbob\|>[^<]*?</\|bbob\|>'
+                            truncated_fragments = re.findall(fragment_pattern, truncated_text)
+                            
+                            # Adjust noise_mask to match the number of remaining fragments
+                            if len(truncated_fragments) < len(noise_mask):
+                                noise_mask = noise_mask[:len(truncated_fragments)]
+                            
+                            self._mask_noise_tokens(tgt_ids, truncated_text, noise_mask)
                         
                     else:
                         # No noise - just shuffle the canonical GT sequence
