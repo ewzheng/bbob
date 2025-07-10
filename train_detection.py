@@ -5,10 +5,14 @@ Description: End-to-end training (vision tower + projector + language model) usi
 Usage: python train_vision.py -m <checkpoint_with_projector> -d <dataset_name> -i <instruction_text> [other args]
 '''
 
+import os
+# Set CUDA memory allocator to use expandable segments to reduce fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import argparse
 from datetime import datetime
-import os, math, multiprocess as mp
+import math, multiprocess as mp
 import random
 import numpy as np
 

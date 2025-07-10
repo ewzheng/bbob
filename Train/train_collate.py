@@ -238,11 +238,9 @@ class BBOBCollator:  # noqa: N801
             target_fragments = []
             for frag, is_noise in zip(shuffled_fragments, shuffled_noise_mask):
                 if is_noise:
-                    # Create a mask token sequence of similar length to maintain alignment
-                    # Count tokens in this fragment to estimate mask length needed
-                    frag_tokens = self.tokenizer(frag, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-                    mask_tokens = ["<mask>"] * len(frag_tokens)  # Use <mask> as placeholder
-                    target_fragments.append(" ".join(mask_tokens))
+                    # Use a simple placeholder that we'll replace after tokenization
+                    # Instead of <mask>, use a pattern that won't interfere with real content
+                    target_fragments.append("NOISE_PLACEHOLDER")
                 else:
                     target_fragments.append(frag)
             target_text = " ".join(target_fragments)
@@ -254,22 +252,40 @@ class BBOBCollator:  # noqa: N801
         input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
         target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
         
-        # Replace mask tokens with -100 in target
+        # Replace noise placeholder tokens with -100 in target
         if noise_mask is not None:
-            mask_token_id = self.tokenizer.convert_tokens_to_ids("<mask>")
-            target_tokens[target_tokens == mask_token_id] = -100
-        
-        # Apply length constraints  
-        if len(input_tokens) > max_length:
-            input_tokens = input_tokens[:max_length]
+            # Find all tokens that came from NOISE_PLACEHOLDER and mask them
+            placeholder_text = "NOISE_PLACEHOLDER"
+            placeholder_tokens = self.tokenizer(placeholder_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
             
-        if len(target_tokens) > max_length:
-            target_tokens = target_tokens[:max_length]
+            # Replace any occurrence of placeholder token sequence with -100
+            for placeholder_token_id in placeholder_tokens:
+                target_tokens[target_tokens == placeholder_token_id] = -100
+        
+        # Apply length constraints with VERY aggressive limits to prevent OOM
+        max_safe_length = min(max_length, 512)  # Much more aggressive limit
+        
+        if len(input_tokens) > max_safe_length:
+            if self.logger:
+                self.logger.warning(f"Input sequence too long ({len(input_tokens)} tokens), truncating to {max_safe_length}")
+            input_tokens = input_tokens[:max_safe_length]
+            
+        if len(target_tokens) > max_safe_length:
+            if self.logger:
+                self.logger.warning(f"Target sequence too long ({len(target_tokens)} tokens), truncating to {max_safe_length}")
+            target_tokens = target_tokens[:max_safe_length]
             
         # Ensure same length for proper alignment
         min_len = min(len(input_tokens), len(target_tokens))
         input_tokens = input_tokens[:min_len]
         target_tokens = target_tokens[:min_len]
+        
+        # SAFETY: Final check to ensure we never return sequences longer than safe limit
+        if min_len > max_safe_length:
+            if self.logger:
+                self.logger.error(f"Sequence still too long after truncation: {min_len} tokens, forcing to {max_safe_length}")
+            input_tokens = input_tokens[:max_safe_length]
+            target_tokens = target_tokens[:max_safe_length]
         
         return input_tokens.to(boxes.device), target_tokens.to(boxes.device)
 

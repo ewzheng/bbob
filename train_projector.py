@@ -5,13 +5,16 @@ Description: Train only the projector. Everything else is frozen.
 Usage: python train_projector.py -m <base_llm_path> -d <dataset_name> -e <epochs> -i <instruction_text>
 '''
 
+import os
+# Set CUDA memory allocator to use expandable segments to reduce fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
 import torch
 import argparse
 from datetime import datetime
 
 # utils
 import sys
-import os
 import multiprocess as mp
 import math
 import numpy as np
