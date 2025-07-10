@@ -371,56 +371,6 @@ class BBOBCollator:  # noqa: N801
         out = torch.cat([xy, wh], dim=1)
         return out
 
-    def _shuffle_fragments(self, ids: torch.Tensor) -> torch.Tensor:
-        """Return a copy with <bbob> … </bbob> snippets shuffled."""
-        if self.open_id == -1 or self.close_id == -1 or self.open_id is None or self.close_id is None:
-            return ids  # tags not in vocab → nothing to shuffle
-
-        seq = ids.tolist()
-        # Find first <bbob>
-        ptr = 0
-        prefix = []
-        while ptr < len(seq) and seq[ptr] != self.open_id:
-            prefix.append(seq[ptr])
-            ptr += 1
-
-        if ptr == len(seq):
-            return ids  # no fragments
-
-        fragments: list[list[int]] = []
-        while ptr < len(seq):
-            if seq[ptr] != self.open_id:
-                break
-            start = ptr
-            depth = 1
-            ptr += 1
-            while ptr < len(seq) and depth > 0:
-                if seq[ptr] == self.open_id:
-                    depth += 1
-                elif seq[ptr] == self.close_id:
-                    depth -= 1
-                ptr += 1
-            frag = seq[start:ptr]
-            fragments.append(frag)
-            # Skip any tokens between fragments (spaces, punctuation, etc.)
-            while ptr < len(seq) and seq[ptr] != self.open_id:
-                ptr += 1
-
-        suffix = seq[ptr:]
-
-        if len(fragments) <= 1:
-            return ids  # nothing to shuffle
-
-        self.rngjesus.shuffle(fragments)
-
-        # Rebuild sequence with shuffled fragments
-        new_seq = prefix[:]
-        for frag in fragments:
-            new_seq.extend(frag)
-        new_seq.extend(suffix)
-        return torch.tensor(new_seq, dtype=torch.long)
-
-
     def _make_batch(self, batch, *, pad_token_id: int, placeholder_id: int, on_the_fly=False):
         """Core functional routine"""
 
@@ -512,19 +462,14 @@ class BBOBCollator:  # noqa: N801
             pixel_values = torch.stack(img_tensors, 0)
 
         # OPTIMIZED: Batch-vectorized bbox processing
-        # Extract all bboxes and labels from batch at once
+        # Extract all bboxes from batch at once
         all_bboxes = []
-        all_labels = []
-        batch_indices = []  # Track which sample each bbox belongs to
         
         for i, item in enumerate(batch):
             if "target_boxes" in item and not self.is_eval:
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 if bx_raw.numel() > 0:  # Only process non-empty bbox lists
                     all_bboxes.append(bx_raw)
-                    label_strs = item.get("target_label_strs", ["obj"] * bx_raw.size(0))[: bx_raw.size(0)]
-                    all_labels.extend(label_strs)
-                    batch_indices.extend([i] * bx_raw.size(0))
         
         # Vectorized bbox jittering for all bboxes at once
         jittered_bboxes = []
@@ -636,37 +581,34 @@ class BBOBCollator:  # noqa: N801
                 tgt_ids = tgt_ids[:min_len]
 
             # CRITICAL: Handle BOS/EOS tokens consistently to maintain alignment
-            # Store original lengths before any modifications
-            original_instr_len = instr_ids.size(0)
-            original_tgt_len = tgt_ids.size(0)
             
-                # --- ensure a single BOS token starts the instruction sequence ---
-                if bos_tensor is not None:
-                    if instr_ids.numel() == 0:
-                        # create sequence containing only <bos>
-                        instr_ids = bos_tensor.clone()
-                    elif instr_ids[0] != bos_id:
-                        # prepend or replace first token with <bos> depending on space
+            # --- ensure a single BOS token starts the instruction sequence ---
+            if bos_tensor is not None:
+                if instr_ids.numel() == 0:
+                    # create sequence containing only <bos>
+                    instr_ids = bos_tensor.clone()
+                elif instr_ids[0] != bos_id:
+                    # prepend or replace first token with <bos> depending on space
                     total_space_needed = instr_ids.size(0) + 1 + tgt_ids.size(0)  # +1 for potential BOS
                     if total_space_needed > self.tokenizer.model_max_length:
-                            # no room left – overwrite first token
-                            instr_ids[0] = bos_id
-                        else:
-                            instr_ids = torch.cat([bos_tensor, instr_ids])
+                        # no room left – overwrite first token
+                        instr_ids[0] = bos_id
+                    else:
+                        instr_ids = torch.cat([bos_tensor, instr_ids])
 
-                # --- ensure a single EOS token terminates the target sequence ---
-                if eos_tensor is not None:
-                    if tgt_ids.numel() == 0:
-                        # create sequence containing only <eos>
-                        tgt_ids = eos_tensor.clone()
-                    elif tgt_ids[-1] != eos_id:
-                        # append or replace last token with <eos> depending on space
+            # --- ensure a single EOS token terminates the target sequence ---
+            if eos_tensor is not None:
+                if tgt_ids.numel() == 0:
+                    # create sequence containing only <eos>
+                    tgt_ids = eos_tensor.clone()
+                elif tgt_ids[-1] != eos_id:
+                    # append or replace last token with <eos> depending on space
                     total_space_needed = instr_ids.size(0) + tgt_ids.size(0) + 1  # +1 for potential EOS
                     if total_space_needed > self.tokenizer.model_max_length:
-                            # no room left – overwrite last token
-                            tgt_ids[-1] = eos_id
-                        else:
-                            tgt_ids = torch.cat([tgt_ids, eos_tensor])
+                        # no room left – overwrite last token
+                        tgt_ids[-1] = eos_id
+                    else:
+                        tgt_ids = torch.cat([tgt_ids, eos_tensor])
 
             # SAFETY: Ensure detection sequences are exactly the same length
             # This is critical since input_ids uses input_ids_det and labels uses tgt_ids
