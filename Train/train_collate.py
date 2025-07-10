@@ -234,16 +234,12 @@ class BBOBCollator:  # noqa: N801
         
         # Build target sequence with proper masking
         if noise_mask is not None:
-            # For target: replace noise fragments with special mask tokens
-            target_fragments = []
+            # For target: only include GT fragments, skip noise entirely
+            gt_fragments_only = []
             for frag, is_noise in zip(shuffled_fragments, shuffled_noise_mask):
-                if is_noise:
-                    # Use a simple placeholder that we'll replace after tokenization
-                    # Instead of <mask>, use a pattern that won't interfere with real content
-                    target_fragments.append("NOISE_PLACEHOLDER")
-                else:
-                    target_fragments.append(frag)
-            target_text = " ".join(target_fragments)
+                if not is_noise:  # Only keep GT fragments
+                    gt_fragments_only.append(frag)
+            target_text = " ".join(gt_fragments_only)
         else:
             # No noise - same as input
             target_text = input_text
@@ -252,15 +248,12 @@ class BBOBCollator:  # noqa: N801
         input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
         target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
         
-        # Replace noise placeholder tokens with -100 in target
-        if noise_mask is not None:
-            # Find all tokens that came from NOISE_PLACEHOLDER and mask them
-            placeholder_text = "NOISE_PLACEHOLDER"
-            placeholder_tokens = self.tokenizer(placeholder_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-            
-            # Replace any occurrence of placeholder token sequence with -100
-            for placeholder_token_id in placeholder_tokens:
-                target_tokens[target_tokens == placeholder_token_id] = -100
+        # For noise case: pad target to match input length with -100 (noise positions)
+        if noise_mask is not None and len(target_tokens) < len(input_tokens):
+            # Pad target with -100 tokens to match input length
+            padding_len = len(input_tokens) - len(target_tokens)
+            padding = torch.full((padding_len,), -100, dtype=target_tokens.dtype)
+            target_tokens = torch.cat([target_tokens, padding])
         
         # Apply length constraints with VERY aggressive limits to prevent OOM
         max_safe_length = min(max_length, 512)  # Much more aggressive limit
