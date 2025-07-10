@@ -160,6 +160,12 @@ def main():
 
     logger.info(f"Loading model from {args.model}")
     model = build_BBOB(args.model, args.bnb_config, load=True)
+    
+    # Clean GPU memory after model construction to prevent fragmentation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        logger.info("Cleared GPU cache after model initialization")
 
     # Get tokenizer and ensure it has a defined pad token (defaults to EOS).
     tokenizer = model.get_tokenizer()

@@ -61,9 +61,9 @@ class BBOBCollator:  # noqa: N801
         *,
         logger=None,
         on_the_fly=False,
-        noise_prob=0.0,  # TEMPORARILY DISABLED: Probability of adding noise boxes
+        noise_prob=1.0,  # ALWAYS add noise objects for proper Pix2Seq training
         max_noise_boxes=10,  # Max number of noise boxes to add
-        use_noise_class=False,  # Use dedicated "noise" class instead of GT labels
+        use_noise_class=True,  # Use dedicated "object" class for noise instead of GT labels
         noise_ratio_range=(0.25, 0.75),  # Range for noise count as fraction of GT count
         **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
@@ -183,16 +183,16 @@ class BBOBCollator:  # noqa: N801
         full_tokens = self.tokenizer(full_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
         
         # SAFETY: Emergency sequence length check to prevent OOM
-        if len(full_tokens) > 8192:  # Emergency limit well beyond typical sequences
+        if len(full_tokens) > 2048:  # Much more aggressive emergency limit 
             if self.logger:
                 self.logger.warning(f"Extremely long sequence detected ({len(full_tokens)} tokens), truncating aggressively")
                 self.logger.warning(f"Fragment count: {len(fragments)}, text preview: {full_text[:200]}...")
-            # Force truncation to safe length
-            truncated_tokens = full_tokens[:min(max_length, 4096)]
+            # Force truncation to very safe length
+            truncated_tokens = full_tokens[:min(max_length, 1024)]
         elif len(full_tokens) > max_length:
             # Use fragment-boundary truncation if possible
             truncated_tokens = self._truncate_at_fragment_boundary(full_tokens, max_length)
-            if self.logger and len(full_tokens) > max_length * 2:  # Log if significantly over limit
+            if self.logger and len(full_tokens) > max_length * 1.5:  # Log if moderately over limit
                 self.logger.warning(f"Long sequence truncated: {len(full_tokens)} -> {len(truncated_tokens)} tokens")
         else:
             truncated_tokens = full_tokens
@@ -488,6 +488,24 @@ class BBOBCollator:  # noqa: N801
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
         max_txt_len = self.tokenizer.model_max_length - VIS_TOKENS
         
+        # OVERRIDE: Force reasonable sequence limits to prevent OOM
+        # Many tokenizers have very high model_max_length (like 1M+) which is impractical
+        reasonable_max_length = 2048  # Reasonable limit for detection training
+        if max_txt_len > reasonable_max_length - VIS_TOKENS:
+            max_txt_len = reasonable_max_length - VIS_TOKENS
+            if self.logger and not hasattr(self, '_logged_override'):
+                self.logger.warning(f"Overriding tokenizer max_length to reasonable limit: {reasonable_max_length}")
+                self._logged_override = True
+
+        # DEBUG: Log sequence length constraints
+        if self.logger and hasattr(self, '_logged_constraints'):
+            if not self._logged_constraints:
+                self.logger.info(f"Sequence constraints: model_max_length={self.tokenizer.model_max_length}, VIS_TOKENS={VIS_TOKENS}, max_txt_len={max_txt_len}")
+                self._logged_constraints = True
+        elif self.logger and not hasattr(self, '_logged_constraints'):
+            self.logger.info(f"Sequence constraints: model_max_length={self.tokenizer.model_max_length}, VIS_TOKENS={VIS_TOKENS}, max_txt_len={max_txt_len}")
+            self._logged_constraints = True
+        
         # OPTIMIZED: Pre-compute common tensors outside the loop to avoid repeated creation
         bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device) if bos_id is not None else None
         eos_tensor = torch.tensor([eos_id], dtype=torch.long, device=device) if eos_id is not None else None
@@ -576,33 +594,33 @@ class BBOBCollator:  # noqa: N801
 
             # CRITICAL: Handle BOS/EOS tokens consistently to maintain alignment
             
-            # --- ensure a single BOS token starts the instruction sequence ---
-            if bos_tensor is not None:
-                if instr_ids.numel() == 0:
-                    # create sequence containing only <bos>
-                    instr_ids = bos_tensor.clone()
-                elif instr_ids[0] != bos_id:
-                    # prepend or replace first token with <bos> depending on space
+                # --- ensure a single BOS token starts the instruction sequence ---
+                if bos_tensor is not None:
+                    if instr_ids.numel() == 0:
+                        # create sequence containing only <bos>
+                        instr_ids = bos_tensor.clone()
+                    elif instr_ids[0] != bos_id:
+                        # prepend or replace first token with <bos> depending on space
                     total_space_needed = instr_ids.size(0) + 1 + tgt_ids.size(0)  # +1 for potential BOS
                     if total_space_needed > self.tokenizer.model_max_length:
-                        # no room left – overwrite first token
-                        instr_ids[0] = bos_id
-                    else:
-                        instr_ids = torch.cat([bos_tensor, instr_ids])
+                            # no room left – overwrite first token
+                            instr_ids[0] = bos_id
+                        else:
+                            instr_ids = torch.cat([bos_tensor, instr_ids])
 
-            # --- ensure a single EOS token terminates the target sequence ---
-            if eos_tensor is not None:
-                if tgt_ids.numel() == 0:
-                    # create sequence containing only <eos>
-                    tgt_ids = eos_tensor.clone()
-                elif tgt_ids[-1] != eos_id:
-                    # append or replace last token with <eos> depending on space
+                # --- ensure a single EOS token terminates the target sequence ---
+                if eos_tensor is not None:
+                    if tgt_ids.numel() == 0:
+                        # create sequence containing only <eos>
+                        tgt_ids = eos_tensor.clone()
+                    elif tgt_ids[-1] != eos_id:
+                        # append or replace last token with <eos> depending on space
                     total_space_needed = instr_ids.size(0) + tgt_ids.size(0) + 1  # +1 for potential EOS
                     if total_space_needed > self.tokenizer.model_max_length:
-                        # no room left – overwrite last token
-                        tgt_ids[-1] = eos_id
-                    else:
-                        tgt_ids = torch.cat([tgt_ids, eos_tensor])
+                            # no room left – overwrite last token
+                            tgt_ids[-1] = eos_id
+                        else:
+                            tgt_ids = torch.cat([tgt_ids, eos_tensor])
 
             # SAFETY: Ensure detection sequences are exactly the same length
             # This is critical since input_ids uses input_ids_det and labels uses tgt_ids
@@ -613,6 +631,22 @@ class BBOBCollator:  # noqa: N801
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             # NOTE: input_ids still uses placeholder (1 token) which the model will replace with VIS_TOKENS visual tokens
+            
+            # SAFETY: Final check for total sequence length before concatenation
+            total_length = 1 + instr_ids.size(0) + input_ids_det.size(0)  # placeholder + instruction + detection
+            if total_length > 2048:  # Hard limit to prevent OOM
+                if self.logger:
+                    self.logger.warning(f"Final sequence too long ({total_length} tokens), truncating detection part")
+                # Aggressively truncate detection sequence to fit
+                max_det_len = 2048 - 1 - instr_ids.size(0)
+                if max_det_len > 0:
+                    input_ids_det = input_ids_det[:max_det_len]
+                    tgt_ids = tgt_ids[:max_det_len]
+                else:
+                    # If instruction is too long, clear detection entirely
+                    input_ids_det = empty_tensor.clone()
+                    tgt_ids = empty_tensor.clone()
+            
             input_ids = torch.cat([image_placeholder, instr_ids, input_ids_det], dim=0)
             
             # OPTIMIZED: Create labels more efficiently using sizes and correct device
@@ -665,7 +699,7 @@ def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
         on_the_fly=kwargs.get("on_the_fly", False),
         noise_prob=kwargs.get("noise_prob", 1),
         max_noise_boxes=kwargs.get("max_noise_boxes", 10),
-        use_noise_class=kwargs.get("use_noise_class", False),
-        noise_ratio_range=kwargs.get("noise_ratio_range", (0.25, 0.75)),
+        use_noise_class=kwargs.get("use_noise_class", True),
+        noise_ratio_range=kwargs.get("noise_ratio_range", (0.5, 0.75)),
         logger=kwargs.get("logger"),
     ) 

@@ -167,6 +167,12 @@ def main():
     logger.info(f"Training for max {args.epochs} epochs")
 
     model = build_BBOB(args.model, args.bnb_config)
+    
+    # Clean GPU memory after model construction to prevent fragmentation
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        logger.info("Cleared GPU cache after model initialization")
 
     train_dataset, val_dataset = load_and_prepare_dataset(
         args.dataset,
