@@ -425,6 +425,13 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         sample_label_strs = []  # human-readable strings (for text)
 
         for bbox, category in zip(bboxes, labels_raw):
+            # Skip boxes that are out-of-bounds or have zero/neg area after all adjustments
+            if bbox[2] <= 0.0 or bbox[3] <= 0.0:
+                continue
+            if bbox[0] >= 1.0 or bbox[1] >= 1.0:
+                continue
+            if bbox[0] < 0.0 or bbox[1] < 0.0:
+                continue
             # Convert tensors to plain python lists
             if isinstance(bbox, torch.Tensor):
                 bbox = bbox.tolist()
@@ -570,7 +577,7 @@ def preprocess_dataset(dataset, tokenizer, image_processor, instruction, is_trai
         remove_columns=dataset.column_names,
         num_proc=max_workers,
         desc=f"Processing images and text ({max_workers} workers, CPU batch={cpu_batch_size})",
-        load_from_cache_file=True
+        load_from_cache_file=False
     )
 
     return dataset
