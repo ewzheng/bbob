@@ -640,33 +640,33 @@ class BBOBCollator:  # noqa: N801
             original_instr_len = instr_ids.size(0)
             original_tgt_len = tgt_ids.size(0)
             
-            # --- ensure a single BOS token starts the instruction sequence ---
-            if bos_tensor is not None:
-                if instr_ids.numel() == 0:
-                    # create sequence containing only <bos>
-                    instr_ids = bos_tensor.clone()
-                elif instr_ids[0] != bos_id:
-                    # prepend or replace first token with <bos> depending on space
+                # --- ensure a single BOS token starts the instruction sequence ---
+                if bos_tensor is not None:
+                    if instr_ids.numel() == 0:
+                        # create sequence containing only <bos>
+                        instr_ids = bos_tensor.clone()
+                    elif instr_ids[0] != bos_id:
+                        # prepend or replace first token with <bos> depending on space
                     total_space_needed = instr_ids.size(0) + 1 + tgt_ids.size(0)  # +1 for potential BOS
                     if total_space_needed > self.tokenizer.model_max_length:
-                        # no room left – overwrite first token
-                        instr_ids[0] = bos_id
-                    else:
-                        instr_ids = torch.cat([bos_tensor, instr_ids])
+                            # no room left – overwrite first token
+                            instr_ids[0] = bos_id
+                        else:
+                            instr_ids = torch.cat([bos_tensor, instr_ids])
 
-            # --- ensure a single EOS token terminates the target sequence ---
-            if eos_tensor is not None:
-                if tgt_ids.numel() == 0:
-                    # create sequence containing only <eos>
-                    tgt_ids = eos_tensor.clone()
-                elif tgt_ids[-1] != eos_id:
-                    # append or replace last token with <eos> depending on space
+                # --- ensure a single EOS token terminates the target sequence ---
+                if eos_tensor is not None:
+                    if tgt_ids.numel() == 0:
+                        # create sequence containing only <eos>
+                        tgt_ids = eos_tensor.clone()
+                    elif tgt_ids[-1] != eos_id:
+                        # append or replace last token with <eos> depending on space
                     total_space_needed = instr_ids.size(0) + tgt_ids.size(0) + 1  # +1 for potential EOS
                     if total_space_needed > self.tokenizer.model_max_length:
-                        # no room left – overwrite last token
-                        tgt_ids[-1] = eos_id
-                    else:
-                        tgt_ids = torch.cat([tgt_ids, eos_tensor])
+                            # no room left – overwrite last token
+                            tgt_ids[-1] = eos_id
+                        else:
+                            tgt_ids = torch.cat([tgt_ids, eos_tensor])
 
             # SAFETY: Ensure detection sequences are exactly the same length
             # This is critical since input_ids uses input_ids_det and labels uses tgt_ids

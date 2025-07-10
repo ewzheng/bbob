@@ -27,7 +27,6 @@ class BBOBLoss:
 
     def __init__(self, tokenizer, *, ignore_index: int = -100, logger=None, log_interval: int = 100,
                  lambda_digit: float = 0.25,  # weight for numeric-token aux CE
-                 lambda_punct: float = 0.05,  # weight for punctuation/syntax aux CE
                  lambda_class: float = 0.25,  # weight for object-class token aux CE
                  **kwargs):
         """
@@ -45,7 +44,6 @@ class BBOBLoss:
         self.tokenizer = tokenizer
         self.ignore_index = ignore_index
         self.lambda_digit = lambda_digit
-        self.lambda_punct = lambda_punct
         self.lambda_class = lambda_class
         self.logger = logger
         self.log_interval = log_interval
@@ -80,28 +78,7 @@ class BBOBLoss:
 
             self._raw_numeric_ids = num_ids
 
-        # ------------------------------------------------------------------
-        # Only cache punctuation token IDs if punct loss is enabled
-        # ------------------------------------------------------------------
-        if self.lambda_punct > 0:
-            punct_token_ids = []
-            
-            # Get punctuation tokens, handling cases where they might not exist
-            for token in [TAG_OPEN, TAG_CLOSE, ",", ":", "[", "]"]:
-                tid = tokenizer.convert_tokens_to_ids(token)
-                if tid is not None and tid not in (tokenizer.unk_token_id, -1):
-                    punct_token_ids.append(tid)
-            
-            # Add EOS token if it exists
-            if tokenizer.eos_token_id is not None:
-                punct_token_ids.append(tokenizer.eos_token_id)
-            
-            if punct_token_ids:
-                self._raw_punct_ids = punct_token_ids
-            else:
-                if logger is not None:
-                    logger.warning("No punctuation tokens found in tokenizer vocabulary; punct loss will be disabled")
-                self.lambda_punct = 0.0  # Disable punct loss if no tokens found
+
 
         # ------------------------------------------------------------------
         # Only cache class token IDs if class loss is enabled
@@ -133,9 +110,6 @@ class BBOBLoss:
         if self._raw_numeric_ids and self.lambda_digit > 0:
             self.numeric_ids = torch.tensor(self._raw_numeric_ids, dtype=torch.long, device=device)
             self.digit_ids = self.numeric_ids  # For backward compatibility
-            
-        if self._raw_punct_ids and self.lambda_punct > 0:
-            self.punct_ids = torch.tensor(self._raw_punct_ids, dtype=torch.long, device=device)
             
         self._device_cache = device
 
@@ -173,12 +147,11 @@ class BBOBLoss:
 
         # Initialize auxiliary losses
         aux_loss_digit = torch.tensor(0.0, device=logits.device)
-        aux_loss_punct = torch.tensor(0.0, device=logits.device)
         aux_loss_class = torch.tensor(0.0, device=logits.device)
 
         # Only compute auxiliary losses if their lambda values are non-zero
         # Use pre-computed flat tensors to avoid redundant computations
-        if self.lambda_digit > 0 or self.lambda_punct > 0 or self.lambda_class > 0:
+        if self.lambda_digit > 0 or self.lambda_class > 0:
             # Auxiliary loss focused on numeric tokens
             if self.lambda_digit > 0 and self.numeric_ids is not None:
                 # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
@@ -189,15 +162,7 @@ class BBOBLoss:
                         flat_logits[numeric_mask], flat_labels[numeric_mask], reduction="mean"
                     )
 
-            # Auxiliary loss focused on punctuation tokens
-            if self.lambda_punct > 0 and self.punct_ids is not None:
-                # OPTIMIZED: No repeated .to(device) calls - tensors already on correct device
-                punct_mask = (flat_labels >= 0) & torch.isin(flat_labels, self.punct_ids)
-                # CRITICAL: Use .sum() > 0 instead of .any() to avoid GPU-CPU sync
-                if punct_mask.sum() > 0:
-                    aux_loss_punct = F.cross_entropy(
-                        flat_logits[punct_mask], flat_labels[punct_mask], reduction="mean"
-                    )
+
 
             # Class-token auxiliary CE – combats wrong / hallucinated labels
             if self.lambda_class > 0:
@@ -243,7 +208,6 @@ class BBOBLoss:
                 self.logger.info({
                     "loss": loss.item(),
                     "aux_numeric": (self.lambda_digit * aux_loss_digit).item(),
-                    "aux_punct": (self.lambda_punct * aux_loss_punct).item(),
                     "aux_class": (self.lambda_class * aux_loss_class).item(),
                 })
 
@@ -252,7 +216,6 @@ class BBOBLoss:
         total_loss = (
             loss
             + self.lambda_digit * aux_loss_digit
-            + self.lambda_punct * aux_loss_punct
             + self.lambda_class * aux_loss_class
         )
 
