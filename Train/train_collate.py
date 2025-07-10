@@ -63,7 +63,7 @@ class BBOBCollator:  # noqa: N801
         on_the_fly=False,
         noise_prob=1.0,  # ALWAYS add noise objects for proper Pix2Seq training
         max_noise_boxes=16,  # Max number of noise boxes to add
-        noise_ratio_range=(0.25, 0.75),  # Range for noise count as fraction of GT count
+        noise_ratio_range=(1, 1.25),  # Range for noise count as fraction of GT count
         **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
         self.pad_id = pad_token_id
