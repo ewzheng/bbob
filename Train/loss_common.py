@@ -206,7 +206,10 @@ class BBOBLoss:
                 input_ids = labels[0].to(device="cpu")  # Original unshifted input
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
-                input_str = self.tokenizer.decode(input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+                
+                # Filter out -100 tokens before decoding to avoid overflow error
+                clean_input_ids = input_ids[input_ids != self.ignore_index]
+                input_str = self.tokenizer.decode(clean_input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
                 
                 # NEW: Extract and log actual GT objects for monitoring
                 gt_objects = self._extract_gt_objects(tgt_ids)

@@ -135,11 +135,11 @@ class BBOBCollator:  # noqa: N801
                 gt_idx = random.randint(0, len(gt_boxes) - 1)
                 x, y, w, h = gt_boxes[gt_idx].tolist()
                 
-                # Add small jitter (max 5% of box size)
-                jitter_x = random.uniform(-0.05, 0.05) * w
-                jitter_y = random.uniform(-0.05, 0.05) * h
-                jitter_w = random.uniform(-0.05, 0.05) * w
-                jitter_h = random.uniform(-0.05, 0.05) * h
+                # Add large jitter to create clear negative examples (much larger than GT jitter of 15%)
+                jitter_x = random.uniform(-0.4, 0.4) * w  # 40% jitter (vs 15% for GT)
+                jitter_y = random.uniform(-0.4, 0.4) * h  # 40% jitter
+                jitter_w = random.uniform(-0.3, 0.3) * w  # 30% size jitter
+                jitter_h = random.uniform(-0.3, 0.3) * h  # 30% size jitter
                 
                 # Apply jitter and clamp to [0, 1]
                 new_x = max(0.0, min(1.0 - w, x + jitter_x))
@@ -335,7 +335,7 @@ class BBOBCollator:  # noqa: N801
             return torch.empty(0, dtype=token_ids.dtype, device=token_ids.device)
 
 
-    def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.15):
+    def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.05):
         """Jitter *normalised* (x,y,w,h) boxes in 0‥1 space.
 
         Each box is perturbed independently:
