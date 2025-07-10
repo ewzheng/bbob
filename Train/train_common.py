@@ -346,7 +346,20 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
     # ensure tokenizer has a padding token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    
+
+    def format_coordinate(v):
+        """Format coordinate to match special digit tokens.
+        
+        Quantizes coordinate to discrete vocabulary that matches special tokens.
+        Special tokens are: "0.000", "0.001", "0.002", ..., "1.000" (1001 total)
+        """
+        # Clamp to [0, 1] range
+        v_clamped = max(0.0, min(1.0, float(v)))
+        # Quantize to 1000 discrete levels (0-1000 integers)
+        quantized = round(v_clamped * 1000.0)
+        # Format as special token string
+        return f"{quantized/1000.0:.3f}"
+
     # Reserve room for the visual tokens that will be prepended later in the
     # model forward pass.  MobileViT-v2 @256 px yields 8×8 = 64 tokens.
     max_txt_len = tokenizer.model_max_length - VIS_TOKENS
@@ -425,8 +438,8 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         # -------------------------------------------------------------
         detection_fragments = []
         for bbox, label in zip(sample_boxes, sample_label_strs):
-            # bbox components are already 0-1; keep them as 3-decimal floats
-            bbox_txt = ", ".join(f"{v:.3f}" for v in bbox)
+            # bbox components are already 0-1; quantize to special digit tokens
+            bbox_txt = ", ".join(format_coordinate(v) for v in bbox)
             detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
 
         # ---------------------------------------------------------

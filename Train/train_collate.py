@@ -22,6 +22,7 @@ from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from torchvision.transforms.functional import pil_to_tensor
 from .loss_helpers import TAG_OPEN, TAG_CLOSE
+from .train_common import format_coordinate
 import random
 import torch.utils.data as tud
 import re
@@ -101,7 +102,7 @@ class BBOBCollator:  # noqa: N801
     # OPTIMIZATION: Cached coordinate formatting implementation
     def _fmt_coord_impl(self, v):
         """Internal implementation of coordinate formatting with caching."""
-        return f"{max(0.0, min(1.0, v)):.3f}"
+        return format_coordinate(v)
     
     def fmt_coord(self, v):
         """Cached coordinate formatting method."""

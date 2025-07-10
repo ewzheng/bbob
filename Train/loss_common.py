@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from .train_common import format_coordinate
 from .loss_helpers import (
     decode_pred_gt,
     TAG_OPEN,
@@ -8,6 +9,7 @@ from .loss_helpers import (
     xywh_to_xyxy,
     ids_to_boxes_labels,
 )
+import re
 
 # Torchvision losses – fall back gracefully if not available
 try:
@@ -276,8 +278,8 @@ class BBOBLoss:
                         coords = [float(c) for c in coords[:4]]  # Take first 4 coordinates
                         
                         if len(coords) == 4:
-                            # Format coordinates to 3 decimal places
-                            coords_str = f"[{coords[0]:.3f}, {coords[1]:.3f}, {coords[2]:.3f}, {coords[3]:.3f}]"
+                            # Format coordinates using quantized special tokens
+                            coords_str = f"[{format_coordinate(coords[0])}, {format_coordinate(coords[1])}, {format_coordinate(coords[2])}, {format_coordinate(coords[3])}]"
                             objects.append(f"{class_name}: {coords_str}")
                         else:
                             objects.append(f"{class_name}: [incomplete coords]")
