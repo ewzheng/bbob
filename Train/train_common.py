@@ -62,7 +62,9 @@ def format_coordinate(v: float) -> str:
     the output exactly equals one of those tokens.
     """
     v_clamped = max(0.0, min(1.0, float(v)))
-    quant = round(v_clamped * 1000.0)  # integer 0-1000
+    quant = round(v_clamped * 1000.0)
+    if quant == 0 and v_clamped > 0.0:
+        quant = 1  # avoid zero-width/height after rounding
     return f"{quant/1000.0:.3f}"
 
 # ======================================================================
