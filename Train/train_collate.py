@@ -92,7 +92,7 @@ class BBOBCollator:  # noqa: N801
 
         self.open_id = tokenizer.convert_tokens_to_ids(TAG_OPEN)
         self.close_id = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
-        self.space_id = tokenizer.convert_tokens_to_ids(" ")
+        # Note: space_id no longer needed - tokenizer handles spacing naturally
 
     # ---------------- main callable ------------------------------------
 
@@ -170,71 +170,44 @@ class BBOBCollator:  # noqa: N801
             for bb, lab in zip(boxes.tolist(), labels)
         ]
         
-        # Tokenize fragments individually to track boundaries
-        fragment_tokens = []
-        fragment_lengths = []
-        
-        for frag in fragments:
-            tokens = self.tokenizer(frag, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-            fragment_tokens.append(tokens)
-            fragment_lengths.append(len(tokens))
-        
-        # Determine how many complete fragments fit within max_length
-        cumulative_length = 0
-        fragments_to_keep = 0
-        
-        for length in fragment_lengths:
-            if cumulative_length + length <= max_length:
-                cumulative_length += length
-                fragments_to_keep += 1
-            else:
-                break
-        
-        if fragments_to_keep == 0:
-            empty = torch.empty(0, dtype=torch.long, device=boxes.device)
-            return empty.clone(), empty.clone()
-        
-        # Build final sequences from kept fragments
-        kept_tokens = fragment_tokens[:fragments_to_keep]
-        
-        # Apply shuffling if no noise (maintains fragment-level shuffling)
+        # Apply shuffling if no noise (fragment-level shuffling)
         if noise_mask is None:
             # Shuffle fragments for no-noise case
-            indices = torch.randperm(len(kept_tokens))
-            kept_tokens = [kept_tokens[i] for i in indices.tolist()]
+            indices = torch.randperm(len(fragments))
+            fragments = [fragments[i] for i in indices.tolist()]
         
-        # Concatenate all tokens
-        if kept_tokens:
-            # Add spaces between fragments
-            final_tokens = []
-            for i, tokens in enumerate(kept_tokens):
-                if i > 0 and self.space_id != -1:
-                    final_tokens.append(torch.tensor([self.space_id], dtype=torch.long))
-                final_tokens.append(tokens)
-            input_ids_det = torch.cat(final_tokens, dim=0).to(boxes.device)
+        # Build full text with natural spaces (let tokenizer handle spacing)
+        full_text = " ".join(fragments)
+        
+        # Tokenize the full text once
+        full_tokens = self.tokenizer(full_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+        
+        # Apply length limit through truncation
+        if len(full_tokens) > max_length:
+            # Use fragment-boundary truncation if possible
+            truncated_tokens = self._truncate_at_fragment_boundary(full_tokens, max_length)
         else:
-            input_ids_det = torch.empty(0, dtype=torch.long, device=boxes.device)
+            truncated_tokens = full_tokens
         
-        # Create target sequence
+        input_ids_det = truncated_tokens.to(boxes.device)
         tgt_ids = input_ids_det.clone()
         
         # Apply noise masking if needed
-        if noise_mask is not None and len(kept_tokens) > 0:
-            # Adjust noise mask to match kept fragments
-            kept_noise_mask = noise_mask[:fragments_to_keep]
+        if noise_mask is not None and len(input_ids_det) > 0:
+            # For noise masking, we need to rebuild the text to track fragment boundaries
+            truncated_text = self.tokenizer.decode(input_ids_det, skip_special_tokens=False)
             
-            # Mask noise fragments efficiently
-            token_idx = 0
-            for frag_idx, tokens in enumerate(kept_tokens):
-                if frag_idx < len(kept_noise_mask) and kept_noise_mask[frag_idx]:
-                    # Mask this fragment's tokens
-                    frag_len = len(tokens)
-                    tgt_ids[token_idx:token_idx + frag_len] = -100
-                
-                token_idx += len(tokens)
-                # Account for space token
-                if frag_idx < len(kept_tokens) - 1 and self.space_id != -1:
-                    token_idx += 1
+            # Count actual fragments in truncated text
+            import re
+            fragment_pattern = r'<\|bbob\|>[^<]*?</\|bbob\|>'
+            actual_fragments = re.findall(fragment_pattern, truncated_text)
+            
+            # Adjust noise mask to match actual fragments
+            if len(actual_fragments) < len(noise_mask):
+                noise_mask = noise_mask[:len(actual_fragments)]
+            
+            # Apply masking using the existing method
+            self._mask_noise_tokens(tgt_ids, truncated_text, noise_mask)
         
         return input_ids_det, tgt_ids
 
@@ -252,7 +225,7 @@ class BBOBCollator:  # noqa: N801
         if token_ids.size(0) <= max_length:
             return token_ids
             
-        if self.close_id == -1:
+        if self.close_id == -1 or self.close_id is None or self.open_id is None:
             # No fragment markers in vocab - fall back to simple truncation
             return token_ids[:max_length]
             
@@ -400,7 +373,7 @@ class BBOBCollator:  # noqa: N801
 
     def _shuffle_fragments(self, ids: torch.Tensor) -> torch.Tensor:
         """Return a copy with <bbob> … </bbob> snippets shuffled."""
-        if self.open_id == -1 or self.close_id == -1:
+        if self.open_id == -1 or self.close_id == -1 or self.open_id is None or self.close_id is None:
             return ids  # tags not in vocab → nothing to shuffle
 
         seq = ids.tolist()
@@ -429,8 +402,8 @@ class BBOBCollator:  # noqa: N801
                 ptr += 1
             frag = seq[start:ptr]
             fragments.append(frag)
-            # skip whitespace between fragments (kept as single space later)
-            while ptr < len(seq) and seq[ptr] == self.space_id:
+            # Skip any tokens between fragments (spaces, punctuation, etc.)
+            while ptr < len(seq) and seq[ptr] != self.open_id:
                 ptr += 1
 
         suffix = seq[ptr:]
@@ -440,13 +413,10 @@ class BBOBCollator:  # noqa: N801
 
         self.rngjesus.shuffle(fragments)
 
+        # Rebuild sequence with shuffled fragments
         new_seq = prefix[:]
-        first = True
         for frag in fragments:
-            if not first and self.space_id != -1:
-                new_seq.append(self.space_id)
             new_seq.extend(frag)
-            first = False
         new_seq.extend(suffix)
         return torch.tensor(new_seq, dtype=torch.long)
 
