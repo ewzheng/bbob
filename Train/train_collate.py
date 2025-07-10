@@ -757,7 +757,7 @@ class BBOBCollator:  # noqa: N801
                 label_strs = item.get("target_label_strs", ["obj"] * bx_raw.size(0))[: bx_raw.size(0)]
                 
                 # Determine noise count
-                if random.random() < self.noise_prob and not self.is_eval:
+                if random.random() <= self.noise_prob and not self.is_eval:
                     num_gt_boxes = len(label_strs)
                     if num_gt_boxes > 0:
                         noise_ratio = random.uniform(*self.noise_ratio_range)
@@ -1021,6 +1021,6 @@ def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
         on_the_fly=kwargs.get("on_the_fly", False),
         noise_prob=kwargs.get("noise_prob", 1),
         max_noise_boxes=kwargs.get("max_noise_boxes", 10),
-        noise_ratio_range=kwargs.get("noise_ratio_range", (0.5, 0.75)),
+        noise_ratio_range=kwargs.get("noise_ratio_range", (1, 1.25)),
         logger=kwargs.get("logger"),
     ) 
