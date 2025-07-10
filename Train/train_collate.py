@@ -134,6 +134,8 @@ class BBOBCollator:  # noqa: N801
         OPTIMIZED: Generate noise boxes for entire batch using vectorized operations.
         Much faster than generating noise per-sample.
         
+        FIXED: Use per-sample noise generation to avoid cross-contamination of labels between samples.
+        
         Args:
             batch_gt_boxes: List of GT box tensors for each sample in batch
             batch_label_strs: List of label string lists for each sample
@@ -146,164 +148,17 @@ class BBOBCollator:  # noqa: N801
         batch_size = len(batch_gt_boxes)
         batch_results = [None] * batch_size
         
-        # Collect all GT boxes and their sample indices for vectorized processing
-        all_gt_boxes = []
-        all_gt_labels = []
-        sample_indices = []
-        sample_start_indices = []
-        
+        # SIMPLE FIX: Generate noise per-sample to avoid label cross-contamination
+        # This is slightly less efficient but ensures correct label isolation
         for sample_idx, (gt_boxes, label_strs, num_noise) in enumerate(zip(batch_gt_boxes, batch_label_strs, batch_noise_counts)):
             if num_noise <= 0:
                 # Use proper device for empty tensors
                 device = gt_boxes.device if gt_boxes.numel() > 0 else torch.device('cpu')
                 batch_results[sample_idx] = (torch.empty((0, 4), device=device), [])
-                continue
-                
-            sample_start_indices.append(len(all_gt_boxes))
-            
-            # Add GT boxes for this sample to the batch
-            for i, (box, label) in enumerate(zip(gt_boxes, label_strs)):
-                all_gt_boxes.append(box)
-                all_gt_labels.append(label)
-                sample_indices.append(sample_idx)
-        
-        if not all_gt_boxes:
-            # No GT boxes in entire batch - generate random noise only
-            for i, num_noise in enumerate(batch_noise_counts):
-                if batch_results[i] is None:  # Only fill if not already filled
-                    # Use proper device for empty GT boxes
-                    device = batch_gt_boxes[i].device if batch_gt_boxes[i].numel() > 0 else torch.device('cpu')
-                    noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, ["object"], torch.empty((0, 4), device=device))
-                    batch_results[i] = (noise_boxes, noise_labels)
-            return batch_results
-        
-        # Convert to tensors for vectorized operations
-        all_gt_boxes_tensor = torch.stack(all_gt_boxes) if all_gt_boxes else torch.empty((0, 4))
-        
-        # VECTORIZED NOISE GENERATION
-        total_noise_needed = sum(batch_noise_counts)
-        if total_noise_needed == 0:
-            return [(torch.empty((0, 4)), [])] * len(batch_gt_boxes)
-        
-        # Generate noise categories vectorized
-        n_jittered = max(1, int(total_noise_needed * 0.4))
-        n_shifted = max(1, int(total_noise_needed * 0.3))  
-        n_random = total_noise_needed - n_jittered - n_shifted
-        
-        all_noise_boxes = []
-        all_noise_labels = []
-        
-        # 1. VECTORIZED JITTERED BOXES
-        if len(all_gt_boxes) > 0 and n_jittered > 0:
-            # Randomly select GT boxes to jitter (with replacement)
-            jitter_indices = torch.randint(0, len(all_gt_boxes), (n_jittered,))
-            boxes_to_jitter = all_gt_boxes_tensor[jitter_indices]  # (n_jittered, 4)
-            
-            # Vectorized jitter application
-            x, y, w, h = boxes_to_jitter[:, 0], boxes_to_jitter[:, 1], boxes_to_jitter[:, 2], boxes_to_jitter[:, 3]
-            
-            # Generate all jitter values at once with consistent device
-            device = boxes_to_jitter.device
-            jitter_x = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.4 * w  # 40% jitter
-            jitter_y = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.4 * h  # 40% jitter
-            jitter_w = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.3 * w  # 30% size jitter
-            jitter_h = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.3 * h  # 30% size jitter
-            
-            # Apply jitter and clamp vectorized (step by step to handle bounds properly)
-            jittered_x = x + jitter_x
-            jittered_y = y + jitter_y
-            jittered_w = w + jitter_w
-            jittered_h = h + jitter_h
-            
-            # Clamp coordinates and sizes properly
-            new_x = torch.clamp_min(jittered_x, 0.0)
-            new_y = torch.clamp_min(jittered_y, 0.0)
-            new_w = torch.clamp_min(jittered_w, 0.01)
-            new_h = torch.clamp_min(jittered_h, 0.01)
-            
-            # Ensure boxes stay within image bounds
-            new_x = torch.minimum(new_x, 1.0 - new_w)
-            new_y = torch.minimum(new_y, 1.0 - new_h)
-            new_w = torch.minimum(new_w, 1.0 - new_x)
-            new_h = torch.minimum(new_h, 1.0 - new_y)
-            
-            jittered_boxes = torch.stack([new_x, new_y, new_w, new_h], dim=1)
-            all_noise_boxes.append(jittered_boxes)
-            
-            # Select corresponding labels
-            jittered_labels = [all_gt_labels[idx] for idx in jitter_indices.tolist()]
-            all_noise_labels.extend(jittered_labels)
-        
-        # 2. VECTORIZED SHIFTED BOXES
-        if len(all_gt_boxes) > 0 and n_shifted > 0:
-            shift_indices = torch.randint(0, len(all_gt_boxes), (n_shifted,))
-            boxes_to_shift = all_gt_boxes_tensor[shift_indices]  # (n_shifted, 4)
-            
-            # Extract widths and heights
-            w, h = boxes_to_shift[:, 2], boxes_to_shift[:, 3]
-            
-            # Generate random centers vectorized with consistent device
-            device = boxes_to_shift.device
-            cx = torch.rand(n_shifted, device=device) * (1.0 - w) + w/2
-            cy = torch.rand(n_shifted, device=device) * (1.0 - h) + h/2
-            
-            # Convert back to (x, y, w, h)
-            new_x = cx - w/2
-            new_y = cy - h/2
-            
-            shifted_boxes = torch.stack([new_x, new_y, w, h], dim=1)
-            all_noise_boxes.append(shifted_boxes)
-            
-            # Select corresponding labels
-            shifted_labels = [all_gt_labels[idx] for idx in shift_indices.tolist()]
-            all_noise_labels.extend(shifted_labels)
-        
-        # 3. VECTORIZED RANDOM BOXES  
-        if n_random > 0:
-            # Generate completely random boxes vectorized with consistent device
-            device = all_gt_boxes_tensor.device if len(all_gt_boxes) > 0 else torch.device('cpu')
-            x = torch.rand(n_random, device=device) * 0.8  # Leave some margin
-            y = torch.rand(n_random, device=device) * 0.8
-            # Calculate max width/height to stay within bounds
-            max_w = torch.minimum(torch.full_like(x, 0.5), 1.0 - x)
-            max_h = torch.minimum(torch.full_like(y, 0.5), 1.0 - y)
-            w = torch.rand(n_random, device=device) * max_w
-            h = torch.rand(n_random, device=device) * max_h
-            
-            random_boxes = torch.stack([x, y, w, h], dim=1)
-            all_noise_boxes.append(random_boxes)
-            
-            # Use random labels from available GT labels
-            if all_gt_labels:
-                random_labels = [random.choice(all_gt_labels) for _ in range(n_random)]
             else:
-                random_labels = ["object"] * n_random
-            all_noise_labels.extend(random_labels)
-        
-        # Combine all noise boxes
-        if all_noise_boxes:
-            combined_noise_boxes = torch.cat(all_noise_boxes, dim=0)
-        else:
-            # Use device from GT boxes if available
-            device = all_gt_boxes_tensor.device if len(all_gt_boxes) > 0 else torch.device('cpu')
-            combined_noise_boxes = torch.empty((0, 4), device=device)
-        
-        # DISTRIBUTE NOISE BACK TO SAMPLES
-        # Note: samples with num_noise <= 0 already have empty results added at the beginning
-        # Only distribute noise to samples that actually need it
-        noise_idx = 0
-        remaining_samples = []
-        for sample_idx, num_noise in enumerate(batch_noise_counts):
-            if num_noise > 0:
-                remaining_samples.append((sample_idx, num_noise))
-        
-        for sample_idx, num_noise in remaining_samples:
-            sample_noise_boxes = combined_noise_boxes[noise_idx:noise_idx + num_noise]
-            sample_noise_labels = all_noise_labels[noise_idx:noise_idx + num_noise]
-            
-            # Insert at correct position (batch_results already has placeholders for num_noise <= 0)
-            batch_results[sample_idx] = (sample_noise_boxes, sample_noise_labels)
-            noise_idx += num_noise
+                # Generate noise for this sample using only its own GT labels
+                noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, label_strs, gt_boxes)
+                batch_results[sample_idx] = (noise_boxes, noise_labels)
         
         return batch_results
 
