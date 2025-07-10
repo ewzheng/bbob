@@ -445,16 +445,13 @@ class BBOBCollator:  # noqa: N801
                 # No noise - same as input
                 target_text = input_text
             
-            # OPTIMIZATION 4: Batch tokenization instead of individual calls
+            # OPTIMIZATION 4: Individual tokenization for input and target (different lengths expected)
+            # Note: Can't use batch tokenization here because input/target often have different lengths
+            input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+            
             if target_text:
-                # Tokenize both input and target in one batch call
-                texts_to_tokenize = [input_text, target_text]
-                batch_tokens = self.tokenizer(texts_to_tokenize, return_tensors="pt", add_special_tokens=False, padding=False)
-                input_tokens = batch_tokens["input_ids"][0]
-                target_tokens = batch_tokens["input_ids"][1]
+                target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
             else:
-                # Only input text
-                input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
                 target_tokens = torch.empty(0, dtype=torch.long, device=boxes.device)
                 
         else:
@@ -810,17 +807,21 @@ class BBOBCollator:  # noqa: N801
                 batch_has_input_ids.append(False)
                 batch_texts_to_tokenize.append(item.get("text", ""))
         
-        # Tokenize all text instructions in one batch call (much faster)
+        # Pre-tokenize all text instructions individually (batch tokenization needs padding for different lengths)
         texts_needing_tokenization = [text for text, has_ids in zip(batch_texts_to_tokenize, batch_has_input_ids) if not has_ids]
         if texts_needing_tokenization:
-            batch_tokenized = self.tokenizer(
-                texts_needing_tokenization, 
-                return_tensors="pt", 
-                max_length=max_txt_len, 
-                truncation=True, 
-                padding=False
-            )
-            tokenized_iter = iter(batch_tokenized["input_ids"])
+            # Tokenize each text individually to avoid length mismatch issues
+            individual_tokenized = []
+            for text in texts_needing_tokenization:
+                tokens = self.tokenizer(
+                    text, 
+                    return_tensors="pt", 
+                    max_length=max_txt_len, 
+                    truncation=True, 
+                    add_special_tokens=False
+                )["input_ids"].squeeze(0)
+                individual_tokenized.append(tokens)
+            tokenized_iter = iter(individual_tokenized)
         else:
             tokenized_iter = iter([])
 
@@ -829,7 +830,7 @@ class BBOBCollator:  # noqa: N801
             if batch_has_input_ids[i]:
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long, device=device).flatten()
             else:
-                instr_ids = next(tokenized_iter).to(device)
+                instr_ids = next(tokenized_iter).to(device)  # Move to correct device
 
             # Decide ground-truth detection text ----------------------------------
             if "target_boxes" in item and not self.is_eval:
