@@ -413,17 +413,17 @@ class BBOBCollator:  # noqa: N801
     def _build_and_process_sequence(self, boxes, labels, noise_mask, max_length, _unused=None):
         """
         Efficiently build, tokenize, truncate and mask detection sequence in one pass.
-        OPTIMIZED: Uses vectorized tokenization and pre-allocated buffers for better performance.
+        FIXED: Proper Pix2Seq alignment where input and target have same structure,
+        but noise positions in target are masked with -100.
         
         Args:
             boxes: Tensor of box coordinates 
             labels: List of label strings
             noise_mask: Boolean tensor indicating noise positions (None if no noise)
             max_length: Maximum sequence length allowed
-            fmt_coord: Coordinate formatting function
             
         Returns:
-            input_ids_det, tgt_ids: Processed token sequences
+            input_ids_det, tgt_ids: Processed token sequences with proper alignment
         """
         if len(labels) == 0:
             empty = torch.empty(0, dtype=torch.long, device=boxes.device)
@@ -447,79 +447,57 @@ class BBOBCollator:  # noqa: N801
             fragment_is_noise.append(bool(is_noise))
         
         # ALWAYS shuffle to get proper interleaving
-        shuffle_indices = torch.randperm(len(all_fragments))
-        shuffled_fragments = [all_fragments[i] for i in shuffle_indices.tolist()]
-        shuffled_noise_mask = [fragment_is_noise[i] for i in shuffle_indices.tolist()]
-        
-        # OPTIMIZATION 3: Vectorized tokenization - tokenize all fragments at once
-        # This is much faster than individual tokenization calls
-        if len(shuffled_fragments) > 1:
-            # Use batch tokenization for multiple fragments
-            input_text = " ".join(shuffled_fragments)
-            
-            if noise_mask is not None:
-                # For target: only include GT fragments, skip noise entirely
-                gt_fragments_only = [frag for frag, is_noise in zip(shuffled_fragments, shuffled_noise_mask) if not is_noise]
-                target_text = " ".join(gt_fragments_only) if gt_fragments_only else ""
+        # Upstream code has already shuffled (GT + noise). Use order as-is to
+        # keep logic simple and deterministic.
+
+        fragments = all_fragments
+        is_noise_list = fragment_is_noise if noise_mask is not None else [False] * len(all_fragments)
+
+        # Incrementally build input & target token lists for perfect alignment
+        input_token_chunks = []
+        target_token_chunks = []
+
+        for idx, (frag_text, is_noise_frag) in enumerate(zip(fragments, is_noise_list)):
+            # Prepend a space to every fragment except the first to mimic " ".join()
+            text_to_tokenize = frag_text if idx == 0 else " " + frag_text
+            frag_tokens = self.tokenizer(text_to_tokenize, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+
+            input_token_chunks.append(frag_tokens)
+
+            if is_noise_frag:
+                target_token_chunks.append(torch.full_like(frag_tokens, -100))
             else:
-                # No noise - same as input
-                target_text = input_text
-            
-            # OPTIMIZATION 4: Individual tokenization for input and target (different lengths expected)
-            # Note: Can't use batch tokenization here because input/target often have different lengths
-            input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-            
-            if target_text:
-                target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-            else:
-                target_tokens = torch.empty(0, dtype=torch.long, device=boxes.device)
-                
-        else:
-            # Single fragment - no need for batching
-            input_text = shuffled_fragments[0]
-            if noise_mask is not None and shuffled_noise_mask[0]:
-                # Single noise fragment - target is empty
-                target_text = ""
-                target_tokens = torch.empty(0, dtype=torch.long, device=boxes.device)
-            else:
-                target_text = input_text
-                target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-            
-            input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-        
-        # OPTIMIZATION 5: Pre-allocate padding tensor to avoid repeated tensor creation
-        # For noise case: pad target to match input length with -100 (noise positions)
-        if noise_mask is not None and len(target_tokens) < len(input_tokens):
-            padding_len = len(input_tokens) - len(target_tokens)
-            if padding_len > 0:
-                # Pre-allocate padding tensor
-                padding = torch.full((padding_len,), -100, dtype=target_tokens.dtype, device=boxes.device)
-                target_tokens = torch.cat([target_tokens, padding])
-        
-        # Apply length constraints with VERY aggressive limits to prevent OOM
+                target_token_chunks.append(frag_tokens)
+
+        # Concatenate all chunks into flat sequences
+        input_tokens = torch.cat(input_token_chunks) if input_token_chunks else torch.empty(0, dtype=torch.long, device=boxes.device)
+        target_tokens = torch.cat(target_token_chunks) if target_token_chunks else torch.empty(0, dtype=torch.long, device=boxes.device)
+ 
+        # Apply length constraints with aggressive limits to prevent OOM
         max_safe_length = min(max_length, 512)  # Much more aggressive limit
         
         if len(input_tokens) > max_safe_length:
             if self.logger:
                 self.logger.warning(f"Input sequence too long ({len(input_tokens)} tokens), truncating to {max_safe_length}")
             input_tokens = input_tokens[:max_safe_length]
-            
-        if len(target_tokens) > max_safe_length:
-            if self.logger:
-                self.logger.warning(f"Target sequence too long ({len(target_tokens)} tokens), truncating to {max_safe_length}")
             target_tokens = target_tokens[:max_safe_length]
             
-        # Ensure same length for proper alignment
-        min_len = min(len(input_tokens), len(target_tokens))
-        input_tokens = input_tokens[:min_len]
-        target_tokens = target_tokens[:min_len]
+        # CRITICAL: Verify perfect alignment after noise masking
+        if len(input_tokens) != len(target_tokens):
+            min_len = min(len(input_tokens), len(target_tokens))
+            input_tokens = input_tokens[:min_len]
+            target_tokens = target_tokens[:min_len]
+            if self.logger:
+                self.logger.warning(f"Alignment correction applied: sequences truncated to {min_len}")
         
-        # SAFETY: Final check to ensure we never return sequences longer than safe limit
-        if min_len > max_safe_length:
-            if self.logger:
-                self.logger.error(f"Sequence still too long after truncation: {min_len} tokens, forcing to {max_safe_length}")
-            input_tokens = input_tokens[:max_safe_length]
-            target_tokens = target_tokens[:max_safe_length]
+        # SAFETY: Verify that non-noise positions in target match input
+        if noise_mask is not None and self.logger:
+            non_ignore_mask = target_tokens != -100
+            if non_ignore_mask.sum() > 0:
+                input_subset = input_tokens[non_ignore_mask]
+                target_subset = target_tokens[non_ignore_mask]
+                if not torch.equal(input_subset, target_subset):
+                    self.logger.warning("Input/target alignment verification failed for non-noise positions")
         
         return input_tokens.to(boxes.device), target_tokens.to(boxes.device)
 
