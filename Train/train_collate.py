@@ -146,6 +146,58 @@ class BBOBCollator:  # noqa: N801
         noise_boxes_tensor = torch.tensor(noise_boxes, dtype=torch.float32)
         return noise_boxes_tensor, noise_labels
 
+    def _truncate_at_fragment_boundary(self, token_ids, max_length):
+        """
+        Truncate token sequence at complete fragment boundaries to avoid cutting boxes mid-sequence.
+        
+        Args:
+            token_ids: Token sequence to truncate
+            max_length: Maximum allowed length
+            
+        Returns:
+            Truncated token sequence that ends at a complete fragment boundary
+        """
+        if token_ids.size(0) <= max_length:
+            return token_ids
+            
+        if self.close_id == -1:
+            # No fragment markers in vocab - fall back to simple truncation
+            return token_ids[:max_length]
+            
+        # Find the last complete fragment that fits within max_length
+        tokens = token_ids.tolist()
+        last_complete_end = 0
+        
+        i = 0
+        while i < min(len(tokens), max_length):
+            if tokens[i] == self.open_id:
+                # Found start of fragment - find its end
+                depth = 1
+                j = i + 1
+                while j < len(tokens) and depth > 0:
+                    if tokens[j] == self.open_id:
+                        depth += 1
+                    elif tokens[j] == self.close_id:
+                        depth -= 1
+                    j += 1
+                
+                # Check if complete fragment fits within limit
+                if j <= max_length:
+                    last_complete_end = j
+                    i = j
+                else:
+                    # Fragment would exceed limit - stop here
+                    break
+            else:
+                i += 1
+        
+        # Truncate to last complete fragment
+        if last_complete_end > 0:
+            return token_ids[:last_complete_end]
+        else:
+            # No complete fragments fit - return empty
+            return torch.empty(0, dtype=token_ids.dtype, device=token_ids.device)
+
     def _mask_noise_tokens(self, tgt_ids, target_text, noise_mask):
         """
         Selectively mask tokens corresponding to noise boxes in the target sequence.
@@ -543,15 +595,17 @@ class BBOBCollator:  # noqa: N801
                 input_ids_det = empty_tensor.clone()
                 tgt_ids = empty_tensor.clone()  # Use pre-computed empty tensor
             else:
-                # Handle input sequence (may be longer due to noise)
-                remaining_input = max_txt_len - instr_ids.size(0)
-                if input_ids_det.size(0) > remaining_input:
-                    input_ids_det = input_ids_det[:remaining_input]
+                # Compute remaining space once and apply same truncation to both sequences
+                remaining_space = max_txt_len - instr_ids.size(0)
                 
-                # Handle target sequence  
-                remaining_target = max_txt_len - instr_ids.size(0)
-                if tgt_ids.size(0) > remaining_target:
-                    tgt_ids = tgt_ids[:remaining_target]
+                # Use fragment-aware truncation to avoid cutting boxes mid-sequence
+                input_ids_det = self._truncate_at_fragment_boundary(input_ids_det, remaining_space)
+                tgt_ids = self._truncate_at_fragment_boundary(tgt_ids, remaining_space)
+                
+                # Ensure both sequences are exactly the same length after truncation
+                min_len = min(input_ids_det.size(0), tgt_ids.size(0))
+                input_ids_det = input_ids_det[:min_len]
+                tgt_ids = tgt_ids[:min_len]
 
                 # CRITICAL: Fix device mismatches in BOS/EOS token creation
                 # --- ensure a single BOS token starts the instruction sequence ---
