@@ -64,7 +64,9 @@ def format_coordinate(v: float) -> str:
     v_clamped = max(0.0, min(1.0, float(v)))
     quant = round(v_clamped * 1000.0)
     if quant == 0 and v_clamped > 0.0:
-        quant = 1  # avoid zero-width/height after rounding
+        quant = 1  # avoid zero after rounding
+    if quant == 1000 and v_clamped < 1.0:
+        quant = 999  # avoid 1.000 unless value was exactly 1.0
     return f"{quant/1000.0:.3f}"
 
 # ======================================================================
