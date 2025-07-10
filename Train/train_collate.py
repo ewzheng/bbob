@@ -607,7 +607,11 @@ class BBOBCollator:  # noqa: N801
                 input_ids_det = input_ids_det[:min_len]
                 tgt_ids = tgt_ids[:min_len]
 
-                # CRITICAL: Fix device mismatches in BOS/EOS token creation
+                # CRITICAL: Handle BOS/EOS tokens consistently to maintain alignment
+                # Store original lengths before any modifications
+                original_instr_len = instr_ids.size(0)
+                original_tgt_len = tgt_ids.size(0)
+                
                 # --- ensure a single BOS token starts the instruction sequence ---
                 if bos_tensor is not None:
                     if instr_ids.numel() == 0:
@@ -615,7 +619,8 @@ class BBOBCollator:  # noqa: N801
                         instr_ids = bos_tensor.clone()
                     elif instr_ids[0] != bos_id:
                         # prepend or replace first token with <bos> depending on space
-                        if instr_ids.size(0) >= self.tokenizer.model_max_length - tgt_ids.size(0):
+                        total_space_needed = instr_ids.size(0) + 1 + tgt_ids.size(0)  # +1 for potential BOS
+                        if total_space_needed > self.tokenizer.model_max_length:
                             # no room left – overwrite first token
                             instr_ids[0] = bos_id
                         else:
@@ -628,11 +633,19 @@ class BBOBCollator:  # noqa: N801
                         tgt_ids = eos_tensor.clone()
                     elif tgt_ids[-1] != eos_id:
                         # append or replace last token with <eos> depending on space
-                        if tgt_ids.size(0) >= self.tokenizer.model_max_length - instr_ids.size(0):
+                        total_space_needed = instr_ids.size(0) + tgt_ids.size(0) + 1  # +1 for potential EOS
+                        if total_space_needed > self.tokenizer.model_max_length:
                             # no room left – overwrite last token
                             tgt_ids[-1] = eos_id
                         else:
                             tgt_ids = torch.cat([tgt_ids, eos_tensor])
+
+            # SAFETY: Ensure detection sequences are exactly the same length
+            # This is critical since input_ids uses input_ids_det and labels uses tgt_ids
+            if input_ids_det.size(0) != tgt_ids.size(0):
+                min_det_len = min(input_ids_det.size(0), tgt_ids.size(0))
+                input_ids_det = input_ids_det[:min_det_len]
+                tgt_ids = tgt_ids[:min_det_len]
 
             # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
             # NOTE: input_ids still uses placeholder (1 token) which the model will replace with VIS_TOKENS visual tokens
