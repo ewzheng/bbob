@@ -142,7 +142,9 @@ class BBOBCollator:  # noqa: N801
         Returns:
             List of (noise_boxes, noise_labels) tuples for each sample
         """
-        batch_results = []
+        # Pre-initialize results list with correct size
+        batch_size = len(batch_gt_boxes)
+        batch_results = [None] * batch_size
         
         # Collect all GT boxes and their sample indices for vectorized processing
         all_gt_boxes = []
@@ -154,7 +156,7 @@ class BBOBCollator:  # noqa: N801
             if num_noise <= 0:
                 # Use proper device for empty tensors
                 device = gt_boxes.device if gt_boxes.numel() > 0 else torch.device('cpu')
-                batch_results.append((torch.empty((0, 4), device=device), []))
+                batch_results[sample_idx] = (torch.empty((0, 4), device=device), [])
                 continue
                 
             sample_start_indices.append(len(all_gt_boxes))
@@ -168,10 +170,11 @@ class BBOBCollator:  # noqa: N801
         if not all_gt_boxes:
             # No GT boxes in entire batch - generate random noise only
             for i, num_noise in enumerate(batch_noise_counts):
-                # Use proper device for empty GT boxes
-                device = batch_gt_boxes[i].device if batch_gt_boxes[i].numel() > 0 else torch.device('cpu')
-                noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, ["object"], torch.empty((0, 4), device=device))
-                batch_results.append((noise_boxes, noise_labels))
+                if batch_results[i] is None:  # Only fill if not already filled
+                    # Use proper device for empty GT boxes
+                    device = batch_gt_boxes[i].device if batch_gt_boxes[i].numel() > 0 else torch.device('cpu')
+                    noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, ["object"], torch.empty((0, 4), device=device))
+                    batch_results[i] = (noise_boxes, noise_labels)
             return batch_results
         
         # Convert to tensors for vectorized operations
