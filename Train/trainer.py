@@ -153,6 +153,7 @@ class BBOBTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):  # type: ignore[override]
         labels = inputs.get("labels")
+        input_ids = inputs.get("input_ids")
         
         outputs = model(**{k: v for k, v in inputs.items() if k != "labels"})
 
@@ -163,7 +164,8 @@ class BBOBTrainer(Trainer):
         if self._loss_func is not None:
             # CRITICAL: Use aligned labels for main loss function to ensure tensor shape consistency
             loss_labels = aligned_labels if aligned_labels is not None else labels
-            loss = self._loss_func(outputs, loss_labels)
+            # Pass input_ids to loss function for proper logging
+            loss = self._loss_func(outputs, loss_labels, input_ids=input_ids)
         else:
             # Use standard cross-entropy loss when no custom loss function is provided
             if labels is not None and hasattr(outputs, "logits"):

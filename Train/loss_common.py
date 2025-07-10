@@ -113,7 +113,7 @@ class BBOBLoss:
         self._device_cache = device
 
     # callable ----------------------------------------------------------
-    def __call__(self, outputs, labels, **kwargs):
+    def __call__(self, outputs, labels, input_ids=None, **kwargs):
         """Return autoregressive CE loss.
 
         Parameters
@@ -122,6 +122,8 @@ class BBOBLoss:
             Must expose ``logits`` of shape (B, S, V).
         labels : LongTensor (B, S)
             Target token IDs with masking (ignored positions == ``ignore_index``).
+        input_ids : LongTensor (B, S), optional
+            Input token IDs (including noise) for logging purposes.
         """
         logits = outputs.logits  # (B, S, V)
         vocab = logits.size(-1)
@@ -203,13 +205,15 @@ class BBOBLoss:
                 tgt_ids = shift_labels[0].to(device="cpu")
                 
                 # Also get input sequence to see noise interleaving
-                input_ids = labels[0].to(device="cpu")  # Original unshifted input
+                if input_ids is not None:
+                    actual_input_ids = input_ids[0].to(device="cpu")  # Actual input with noise
+                    # Filter out -100 tokens before decoding to avoid overflow error
+                    clean_input_ids = actual_input_ids[actual_input_ids != self.ignore_index]
+                    input_str = self.tokenizer.decode(clean_input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+                else:
+                    input_str = "[input_ids not available]"
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
-                
-                # Filter out -100 tokens before decoding to avoid overflow error
-                clean_input_ids = input_ids[input_ids != self.ignore_index]
-                input_str = self.tokenizer.decode(clean_input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
                 
                 # NEW: Extract and log actual GT objects for monitoring
                 gt_objects = self._extract_gt_objects(tgt_ids)
