@@ -204,7 +204,12 @@ class BBOBLoss:
                 tgt_ids = shift_labels[0].to(device="cpu")
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
+                
+                # NEW: Extract and log actual GT objects for monitoring
+                gt_objects = self._extract_gt_objects(tgt_ids)
+                
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str})
+                self.logger.info({"gt_objects": gt_objects})  # Log parsed GT objects
                 self.logger.info({
                     "loss": loss.item(),
                     "aux_numeric": (self.lambda_digit * aux_loss_digit).item(),
@@ -220,6 +225,62 @@ class BBOBLoss:
         )
 
         return total_loss
+
+    def _extract_gt_objects(self, gt_ids):
+        """
+        Extract ground truth objects from label token IDs for logging.
+        
+        Args:
+            gt_ids: Ground truth token IDs (potentially with -100 ignore tokens)
+            
+        Returns:
+            List of parsed GT objects with class names and coordinates
+        """
+        import re
+        
+        # Clean up ignore tokens
+        clean_ids = [t for t in gt_ids if t != self.ignore_index]
+        
+        if not clean_ids:
+            return []
+        
+        # Decode to text to parse objects
+        try:
+            gt_text = self.tokenizer.decode(clean_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+            
+            # Extract detection fragments using regex
+            fragment_pattern = r'<\|bbob\|>([^<]*?)</\|bbob\|>'
+            matches = re.findall(fragment_pattern, gt_text)
+            
+            objects = []
+            for match in matches:
+                try:
+                    # Parse class and coordinates
+                    if ':' in match:
+                        class_name, coords_part = match.split(':', 1)
+                        class_name = class_name.strip()
+                        
+                        # Extract coordinates using regex
+                        coord_pattern = r'[-+]?\d*\.?\d+'
+                        coords = re.findall(coord_pattern, coords_part)
+                        coords = [float(c) for c in coords[:4]]  # Take first 4 coordinates
+                        
+                        if len(coords) == 4:
+                            # Format coordinates to 3 decimal places
+                            coords_str = f"[{coords[0]:.3f}, {coords[1]:.3f}, {coords[2]:.3f}, {coords[3]:.3f}]"
+                            objects.append(f"{class_name}: {coords_str}")
+                        else:
+                            objects.append(f"{class_name}: [incomplete coords]")
+                    else:
+                        objects.append(f"[malformed]: {match}")
+                        
+                except Exception as e:
+                    objects.append(f"[parse error]: {match}")
+            
+            return objects
+            
+        except Exception as e:
+            return [f"[decode error]: {str(e)}"]
 
 
 # ----------------------------------------------------------------------

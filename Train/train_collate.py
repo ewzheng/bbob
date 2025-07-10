@@ -61,7 +61,7 @@ class BBOBCollator:  # noqa: N801
         *,
         logger=None,
         on_the_fly=False,
-        noise_prob=0.3,  # Probability of adding noise boxes
+        noise_prob=0.0,  # TEMPORARILY DISABLED: Probability of adding noise boxes
         max_noise_boxes=10,  # Max number of noise boxes to add
         use_noise_class=False,  # Use dedicated "noise" class instead of GT labels
         noise_ratio_range=(0.25, 0.75),  # Range for noise count as fraction of GT count
@@ -186,11 +186,14 @@ class BBOBCollator:  # noqa: N801
         if len(full_tokens) > 8192:  # Emergency limit well beyond typical sequences
             if self.logger:
                 self.logger.warning(f"Extremely long sequence detected ({len(full_tokens)} tokens), truncating aggressively")
+                self.logger.warning(f"Fragment count: {len(fragments)}, text preview: {full_text[:200]}...")
             # Force truncation to safe length
             truncated_tokens = full_tokens[:min(max_length, 4096)]
         elif len(full_tokens) > max_length:
             # Use fragment-boundary truncation if possible
             truncated_tokens = self._truncate_at_fragment_boundary(full_tokens, max_length)
+            if self.logger and len(full_tokens) > max_length * 2:  # Log if significantly over limit
+                self.logger.warning(f"Long sequence truncated: {len(full_tokens)} -> {len(truncated_tokens)} tokens")
         else:
             truncated_tokens = full_tokens
         
@@ -274,45 +277,36 @@ class BBOBCollator:  # noqa: N801
         if not any(noise_mask):
             return  # No noise to mask
 
-        # CRITICAL: We need to account for space tokens between fragments
-        # Since the full text is built as " ".join(fragments), we need to tokenize
-        # the exact same way to get proper token boundaries
+        # MUCH SIMPLER APPROACH: Tokenize each fragment individually and track positions
+        current_pos = 0
         
-        # Build the full spaced text just like in the main function
-        full_text = " ".join(fragments)
-        
-        # Tokenize each individual fragment to know their token counts
-        frag_token_counts = []
-        for frag_str in fragments:
-            frag_tokens = self.tokenizer(frag_str, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-            frag_token_counts.append(len(frag_tokens))
-        
-        # Tokenize the full spaced text to understand the actual token layout
-        full_tokens = self.tokenizer(full_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-        
-        # Now we need to find fragment boundaries in the full token sequence
-        # We'll do this by tokenizing progressively longer prefixes
-        cumulative_offset = 0
-        for frag_idx, frag_count in enumerate(frag_token_counts):
+        for frag_idx, frag_str in enumerate(fragments):
             if frag_idx >= len(noise_mask):
                 break
                 
-            # Calculate how many tokens we should have processed so far
-            prefix_text = " ".join(fragments[:frag_idx + 1])
-            prefix_tokens = self.tokenizer(prefix_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+            # Tokenize this fragment to get its length
+            frag_tokens = self.tokenizer(frag_str, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+            frag_len = len(frag_tokens)
             
-            # The fragment starts where the previous fragment ended
-            frag_start = cumulative_offset
-            # The fragment ends at the current prefix length
-            frag_end = len(prefix_tokens)
+            # Check if we need to account for space tokens
+            # The space comes BEFORE this fragment (except for the first one)
+            if frag_idx > 0:
+                # Add space token(s) - tokenize a single space to see how many tokens it creates
+                space_tokens = self.tokenizer(" ", return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+                space_len = len(space_tokens)
+                current_pos += space_len
             
-            if noise_mask[frag_idx]:
+            # Now handle the fragment itself
+            if noise_mask[frag_idx] and current_pos < len(tgt_ids):
                 # This fragment is noise - mask its tokens
-                start_idx = frag_start
-                end_idx = min(frag_end, len(tgt_ids))
-                tgt_ids[start_idx:end_idx] = -100
+                end_pos = min(current_pos + frag_len, len(tgt_ids))
+                tgt_ids[current_pos:end_pos] = -100
             
-            cumulative_offset = frag_end
+            current_pos += frag_len
+            
+            # Safety check to avoid going beyond sequence
+            if current_pos >= len(tgt_ids):
+                break
 
 
     def jitter_bboxes_norm(self, bboxes, dtype, jitter_ratio=0.15):
@@ -669,7 +663,7 @@ def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
         tokenizer,
         image_processor,
         on_the_fly=kwargs.get("on_the_fly", False),
-        noise_prob=kwargs.get("noise_prob", 0.3),
+        noise_prob=kwargs.get("noise_prob", 1),
         max_noise_boxes=kwargs.get("max_noise_boxes", 10),
         use_noise_class=kwargs.get("use_noise_class", False),
         noise_ratio_range=kwargs.get("noise_ratio_range", (0.25, 0.75)),
