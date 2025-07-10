@@ -91,6 +91,21 @@ class BBOBCollator:  # noqa: N801
         self.open_id = tokenizer.convert_tokens_to_ids(TAG_OPEN)
         self.close_id = tokenizer.convert_tokens_to_ids(TAG_CLOSE)
         # Note: space_id no longer needed - tokenizer handles spacing naturally
+        
+        # OPTIMIZATION: Cache for coordinate formatting to avoid repeated string operations
+        # Using LRU cache with reasonable size limit to balance memory vs speed
+        from functools import lru_cache
+        self._coord_cache_size = 1000  # Cache up to 1000 unique coordinate values
+        self._fmt_coord_cached = lru_cache(maxsize=self._coord_cache_size)(self._fmt_coord_impl)
+
+    # OPTIMIZATION: Cached coordinate formatting implementation
+    def _fmt_coord_impl(self, v):
+        """Internal implementation of coordinate formatting with caching."""
+        return f"{max(0.0, min(1.0, v)):.3f}"
+    
+    def fmt_coord(self, v):
+        """Cached coordinate formatting method."""
+        return self._fmt_coord_cached(float(v))  # Ensure hashable input for cache
 
     # ---------------- main callable ------------------------------------
 
@@ -114,6 +129,152 @@ class BBOBCollator:  # noqa: N801
     def reseed(self):
         random.seed()
 
+    def _generate_noise_boxes_batch(self, batch_gt_boxes, batch_label_strs, batch_noise_counts):
+        """
+        OPTIMIZED: Generate noise boxes for entire batch using vectorized operations.
+        Much faster than generating noise per-sample.
+        
+        Args:
+            batch_gt_boxes: List of GT box tensors for each sample in batch
+            batch_label_strs: List of label string lists for each sample
+            batch_noise_counts: List of noise counts for each sample
+            
+        Returns:
+            List of (noise_boxes, noise_labels) tuples for each sample
+        """
+        batch_results = []
+        
+        # Collect all GT boxes and their sample indices for vectorized processing
+        all_gt_boxes = []
+        all_gt_labels = []
+        sample_indices = []
+        sample_start_indices = []
+        
+        for sample_idx, (gt_boxes, label_strs, num_noise) in enumerate(zip(batch_gt_boxes, batch_label_strs, batch_noise_counts)):
+            if num_noise <= 0:
+                batch_results.append((torch.empty((0, 4)), []))
+                continue
+                
+            sample_start_indices.append(len(all_gt_boxes))
+            
+            # Add GT boxes for this sample to the batch
+            for i, (box, label) in enumerate(zip(gt_boxes, label_strs)):
+                all_gt_boxes.append(box)
+                all_gt_labels.append(label)
+                sample_indices.append(sample_idx)
+        
+        if not all_gt_boxes:
+            # No GT boxes in entire batch - generate random noise only
+            for num_noise in batch_noise_counts:
+                noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, ["object"], torch.empty((0, 4)))
+                batch_results.append((noise_boxes, noise_labels))
+            return batch_results
+        
+        # Convert to tensors for vectorized operations
+        all_gt_boxes_tensor = torch.stack(all_gt_boxes) if all_gt_boxes else torch.empty((0, 4))
+        
+        # VECTORIZED NOISE GENERATION
+        total_noise_needed = sum(batch_noise_counts)
+        if total_noise_needed == 0:
+            return [(torch.empty((0, 4)), [])] * len(batch_gt_boxes)
+        
+        # Generate noise categories vectorized
+        n_jittered = max(1, int(total_noise_needed * 0.4))
+        n_shifted = max(1, int(total_noise_needed * 0.3))  
+        n_random = total_noise_needed - n_jittered - n_shifted
+        
+        all_noise_boxes = []
+        all_noise_labels = []
+        
+        # 1. VECTORIZED JITTERED BOXES
+        if len(all_gt_boxes) > 0 and n_jittered > 0:
+            # Randomly select GT boxes to jitter (with replacement)
+            jitter_indices = torch.randint(0, len(all_gt_boxes), (n_jittered,))
+            boxes_to_jitter = all_gt_boxes_tensor[jitter_indices]  # (n_jittered, 4)
+            
+            # Vectorized jitter application
+            x, y, w, h = boxes_to_jitter[:, 0], boxes_to_jitter[:, 1], boxes_to_jitter[:, 2], boxes_to_jitter[:, 3]
+            
+            # Generate all jitter values at once
+            jitter_x = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.4 * w  # 40% jitter
+            jitter_y = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.4 * h  # 40% jitter
+            jitter_w = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.3 * w  # 30% size jitter
+            jitter_h = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.3 * h  # 30% size jitter
+            
+            # Apply jitter and clamp vectorized
+            new_x = torch.clamp(x + jitter_x, 0.0, 1.0 - w)
+            new_y = torch.clamp(y + jitter_y, 0.0, 1.0 - h)
+            new_w = torch.clamp(w + jitter_w, 0.01, 1.0 - new_x)
+            new_h = torch.clamp(h + jitter_h, 0.01, 1.0 - new_y)
+            
+            jittered_boxes = torch.stack([new_x, new_y, new_w, new_h], dim=1)
+            all_noise_boxes.append(jittered_boxes)
+            
+            # Select corresponding labels
+            jittered_labels = [all_gt_labels[idx] for idx in jitter_indices.tolist()]
+            all_noise_labels.extend(jittered_labels)
+        
+        # 2. VECTORIZED SHIFTED BOXES
+        if len(all_gt_boxes) > 0 and n_shifted > 0:
+            shift_indices = torch.randint(0, len(all_gt_boxes), (n_shifted,))
+            boxes_to_shift = all_gt_boxes_tensor[shift_indices]  # (n_shifted, 4)
+            
+            # Extract widths and heights
+            w, h = boxes_to_shift[:, 2], boxes_to_shift[:, 3]
+            
+            # Generate random centers vectorized
+            cx = torch.rand(n_shifted) * (1.0 - w) + w/2
+            cy = torch.rand(n_shifted) * (1.0 - h) + h/2
+            
+            # Convert back to (x, y, w, h)
+            new_x = cx - w/2
+            new_y = cy - h/2
+            
+            shifted_boxes = torch.stack([new_x, new_y, w, h], dim=1)
+            all_noise_boxes.append(shifted_boxes)
+            
+            # Select corresponding labels
+            shifted_labels = [all_gt_labels[idx] for idx in shift_indices.tolist()]
+            all_noise_labels.extend(shifted_labels)
+        
+        # 3. VECTORIZED RANDOM BOXES
+        if n_random > 0:
+            # Generate completely random boxes vectorized
+            x = torch.rand(n_random) * 0.8  # Leave some margin
+            y = torch.rand(n_random) * 0.8
+            w = torch.rand(n_random) * torch.minimum(torch.tensor(0.5), 1.0 - x)
+            h = torch.rand(n_random) * torch.minimum(torch.tensor(0.5), 1.0 - y)
+            
+            random_boxes = torch.stack([x, y, w, h], dim=1)
+            all_noise_boxes.append(random_boxes)
+            
+            # Use random labels from available GT labels
+            if all_gt_labels:
+                random_labels = [random.choice(all_gt_labels) for _ in range(n_random)]
+            else:
+                random_labels = ["object"] * n_random
+            all_noise_labels.extend(random_labels)
+        
+        # Combine all noise boxes
+        if all_noise_boxes:
+            combined_noise_boxes = torch.cat(all_noise_boxes, dim=0)
+        else:
+            combined_noise_boxes = torch.empty((0, 4))
+        
+        # DISTRIBUTE NOISE BACK TO SAMPLES
+        noise_idx = 0
+        for sample_idx, num_noise in enumerate(batch_noise_counts):
+            if num_noise <= 0:
+                continue
+                
+            sample_noise_boxes = combined_noise_boxes[noise_idx:noise_idx + num_noise]
+            sample_noise_labels = all_noise_labels[noise_idx:noise_idx + num_noise]
+            
+            batch_results.append((sample_noise_boxes, sample_noise_labels))
+            noise_idx += num_noise
+        
+        return batch_results
+
     def _generate_noise_boxes(self, num_boxes, label_strs, gt_boxes):
         """Generate noise boxes using Pix2Seq approach: jittered, shifted, and random boxes."""
         if num_boxes <= 0:
@@ -135,8 +296,8 @@ class BBOBCollator:  # noqa: N801
                 gt_idx = random.randint(0, len(gt_boxes) - 1)
                 x, y, w, h = gt_boxes[gt_idx].tolist()
                 
-                # Add large jitter to create clear negative examples (much larger than GT jitter of 15%)
-                jitter_x = random.uniform(-0.4, 0.4) * w  # 40% jitter (vs 15% for GT)
+                # Add large jitter to create clear negative examples 
+                jitter_x = random.uniform(-0.4, 0.4) * w  # 40% jitter 
                 jitter_y = random.uniform(-0.4, 0.4) * h  # 40% jitter
                 jitter_w = random.uniform(-0.3, 0.3) * w  # 30% size jitter
                 jitter_h = random.uniform(-0.3, 0.3) * h  # 30% size jitter
@@ -197,9 +358,10 @@ class BBOBCollator:  # noqa: N801
         noise_boxes_tensor = torch.tensor(noise_boxes, dtype=torch.float32)
         return noise_boxes_tensor, noise_labels
 
-    def _build_and_process_sequence(self, boxes, labels, noise_mask, max_length, fmt_coord):
+    def _build_and_process_sequence(self, boxes, labels, noise_mask, max_length, _unused=None):
         """
         Efficiently build, tokenize, truncate and mask detection sequence in one pass.
+        OPTIMIZED: Uses vectorized tokenization and pre-allocated buffers for better performance.
         
         Args:
             boxes: Tensor of box coordinates 
@@ -215,13 +377,21 @@ class BBOBCollator:  # noqa: N801
             empty = torch.empty(0, dtype=torch.long, device=boxes.device)
             return empty.clone(), empty.clone()
         
-        # Build all fragments with their noise status
+        # OPTIMIZATION 1: Pre-format all coordinates using cached formatter
+        # Convert all coordinates to formatted strings at once with caching
+        coords_formatted = []
+        for bb in boxes.tolist():
+            coord_strs = [self.fmt_coord(v) for v in bb]  # Use cached formatter
+            coords_formatted.append(coord_strs)
+        
+        # OPTIMIZATION 2: Build all fragments in one pass, track noise status
         all_fragments = []
         fragment_is_noise = []
         
-        for bb, lab, is_noise in zip(boxes.tolist(), labels, noise_mask if noise_mask is not None else [False] * len(labels)):
-            fragment = f"<|bbob|>{lab}: [{', '.join(fmt_coord(v) for v in bb)}]</|bbob|>"
+        for i, (coord_strs, lab) in enumerate(zip(coords_formatted, labels)):
+            fragment = f"<|bbob|>{lab}: [{', '.join(coord_strs)}]</|bbob|>"
             all_fragments.append(fragment)
+            is_noise = noise_mask[i] if noise_mask is not None else False
             fragment_is_noise.append(bool(is_noise))
         
         # ALWAYS shuffle to get proper interleaving
@@ -229,31 +399,53 @@ class BBOBCollator:  # noqa: N801
         shuffled_fragments = [all_fragments[i] for i in shuffle_indices.tolist()]
         shuffled_noise_mask = [fragment_is_noise[i] for i in shuffle_indices.tolist()]
         
-        # Build input sequence (all fragments)
-        input_text = " ".join(shuffled_fragments)
-        
-        # Build target sequence with proper masking
-        if noise_mask is not None:
-            # For target: only include GT fragments, skip noise entirely
-            gt_fragments_only = []
-            for frag, is_noise in zip(shuffled_fragments, shuffled_noise_mask):
-                if not is_noise:  # Only keep GT fragments
-                    gt_fragments_only.append(frag)
-            target_text = " ".join(gt_fragments_only)
+        # OPTIMIZATION 3: Vectorized tokenization - tokenize all fragments at once
+        # This is much faster than individual tokenization calls
+        if len(shuffled_fragments) > 1:
+            # Use batch tokenization for multiple fragments
+            input_text = " ".join(shuffled_fragments)
+            
+            if noise_mask is not None:
+                # For target: only include GT fragments, skip noise entirely
+                gt_fragments_only = [frag for frag, is_noise in zip(shuffled_fragments, shuffled_noise_mask) if not is_noise]
+                target_text = " ".join(gt_fragments_only) if gt_fragments_only else ""
+            else:
+                # No noise - same as input
+                target_text = input_text
+            
+            # OPTIMIZATION 4: Batch tokenization instead of individual calls
+            if target_text:
+                # Tokenize both input and target in one batch call
+                texts_to_tokenize = [input_text, target_text]
+                batch_tokens = self.tokenizer(texts_to_tokenize, return_tensors="pt", add_special_tokens=False, padding=False)
+                input_tokens = batch_tokens["input_ids"][0]
+                target_tokens = batch_tokens["input_ids"][1]
+            else:
+                # Only input text
+                input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+                target_tokens = torch.empty(0, dtype=torch.long, device=boxes.device)
+                
         else:
-            # No noise - same as input
-            target_text = input_text
+            # Single fragment - no need for batching
+            input_text = shuffled_fragments[0]
+            if noise_mask is not None and shuffled_noise_mask[0]:
+                # Single noise fragment - target is empty
+                target_text = ""
+                target_tokens = torch.empty(0, dtype=torch.long, device=boxes.device)
+            else:
+                target_text = input_text
+                target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
+            
+            input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
         
-        # Tokenize both sequences
-        input_tokens = self.tokenizer(input_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-        target_tokens = self.tokenizer(target_text, return_tensors="pt", add_special_tokens=False)["input_ids"].squeeze(0)
-        
+        # OPTIMIZATION 5: Pre-allocate padding tensor to avoid repeated tensor creation
         # For noise case: pad target to match input length with -100 (noise positions)
         if noise_mask is not None and len(target_tokens) < len(input_tokens):
-            # Pad target with -100 tokens to match input length
             padding_len = len(input_tokens) - len(target_tokens)
-            padding = torch.full((padding_len,), -100, dtype=target_tokens.dtype)
-            target_tokens = torch.cat([target_tokens, padding])
+            if padding_len > 0:
+                # Pre-allocate padding tensor
+                padding = torch.full((padding_len,), -100, dtype=target_tokens.dtype, device=boxes.device)
+                target_tokens = torch.cat([target_tokens, padding])
         
         # Apply length constraints with VERY aggressive limits to prevent OOM
         max_safe_length = min(max_length, 512)  # Much more aggressive limit
@@ -491,7 +683,7 @@ class BBOBCollator:  # noqa: N801
                 if bx_raw.numel() > 0:  # Only process non-empty bbox lists
                     all_bboxes.append(bx_raw)
         
-        # Vectorized bbox jittering for all bboxes at once
+        # OPTIMIZED: Vectorized bbox jittering for all bboxes at once
         jittered_bboxes = []
         if all_bboxes:
             # Concatenate all bboxes into one tensor
@@ -506,7 +698,42 @@ class BBOBCollator:  # noqa: N801
                 jittered_bboxes.append(jittered_combined[start_idx:end_idx])
                 start_idx = end_idx
 
-        merged_input_ids, merged_labels = [], []
+        # OPTIMIZED: Prepare data for vectorized noise generation
+        batch_gt_boxes = []
+        batch_label_strs = []
+        batch_noise_counts = []
+
+        for i, item in enumerate(batch):
+            if "target_boxes" in item and not self.is_eval:
+                bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
+                label_strs = item.get("target_label_strs", ["obj"] * bx_raw.size(0))[: bx_raw.size(0)]
+                
+                # Determine noise count
+                if random.random() < self.noise_prob and not self.is_eval:
+                    num_gt_boxes = len(label_strs)
+                    if num_gt_boxes > 0:
+                        noise_ratio = random.uniform(*self.noise_ratio_range)
+                        num_noise = max(1, min(self.max_noise_boxes, int(num_gt_boxes * noise_ratio)))
+                    else:
+                        num_noise = random.randint(1, min(2, self.max_noise_boxes))
+                else:
+                    num_noise = 0
+                
+                batch_gt_boxes.append(bx_raw)
+                batch_label_strs.append(label_strs)
+                batch_noise_counts.append(num_noise)
+            else:
+                batch_gt_boxes.append(torch.empty((0, 4)))
+                batch_label_strs.append([])
+                batch_noise_counts.append(0)
+
+        # OPTIMIZED: Generate noise boxes for the entire batch at once
+        batch_noise_results = self._generate_noise_boxes_batch(batch_gt_boxes, batch_label_strs, batch_noise_counts)
+
+        # OPTIMIZED: Pre-allocate output lists with known batch size
+        batch_size = len(batch)
+        merged_input_ids = [None] * batch_size
+        merged_labels = [None] * batch_size
 
         # CRITICAL: Pre-compute common tokens with correct device specification
         image_placeholder = torch.tensor([placeholder_id], dtype=torch.long, device=device)
@@ -536,23 +763,45 @@ class BBOBCollator:  # noqa: N801
         bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device) if bos_id is not None else None
         eos_tensor = torch.tensor([eos_id], dtype=torch.long, device=device) if eos_id is not None else None
         empty_tensor = torch.empty(0, dtype=torch.long, device=device)
+        
+        # OPTIMIZED: Pre-allocate ignore tensor for visual tokens and reuse
+        visual_ignore = torch.full((VIS_TOKENS,), -100, dtype=torch.long, device=device)
 
-        # OPTIMIZED: Pre-compute coordinate formatter to avoid lambda creation in loop
-        def fmt_coord(v):
-            return f"{max(0.0, min(1.0, v)):.3f}"
+        # OPTIMIZED: Batch tokenize all instruction texts at once
+        batch_texts_to_tokenize = []
+        batch_has_input_ids = []
+        for item in batch:
+            if "input_ids" in item:
+                batch_has_input_ids.append(True)
+                batch_texts_to_tokenize.append("")  # Placeholder
+            else:
+                batch_has_input_ids.append(False)
+                batch_texts_to_tokenize.append(item.get("text", ""))
+        
+        # Tokenize all text instructions in one batch call (much faster)
+        texts_needing_tokenization = [text for text, has_ids in zip(batch_texts_to_tokenize, batch_has_input_ids) if not has_ids]
+        if texts_needing_tokenization:
+            batch_tokenized = self.tokenizer(
+                texts_needing_tokenization, 
+                return_tensors="pt", 
+                max_length=max_txt_len, 
+                truncation=True, 
+                padding=False
+            )
+            tokenized_iter = iter(batch_tokenized["input_ids"])
+        else:
+            tokenized_iter = iter([])
 
         bbox_idx = 0
         for i, item in enumerate(batch):
-            if "input_ids" in item:
+            if batch_has_input_ids[i]:
                 instr_ids = torch.as_tensor(item["input_ids"], dtype=torch.long, device=device).flatten()
             else:
-                text = item.get("text", "")
-                tokens = self.tokenizer(text, return_tensors="pt", max_length=max_txt_len, truncation=True)
-                instr_ids = tokens["input_ids"].squeeze(0).to(device)
+                instr_ids = next(tokenized_iter).to(device)
 
             # Decide ground-truth detection text ----------------------------------
             if "target_boxes" in item and not self.is_eval:
-                # TRAIN MODE → use pre-jittered bboxes
+                # TRAIN MODE → use pre-jittered bboxes with vectorized noise
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 if bx_raw.numel() > 0 and bbox_idx < len(jittered_bboxes):
                     bx = jittered_bboxes[bbox_idx]
@@ -564,17 +813,10 @@ class BBOBCollator:  # noqa: N801
                     # Compute remaining space once and apply same truncation to both sequences
                     remaining_space = max_txt_len - instr_ids.size(0)
                     
-                    # STREAMLINED PIPELINE: Build → Shuffle → Truncate+Mask in one pass
-                    if random.random() < self.noise_prob and not self.is_eval:
-                        # Generate noise and create combined box+label lists
-                        num_gt_boxes = len(label_strs)
-                        if num_gt_boxes > 0:
-                            noise_ratio = random.uniform(*self.noise_ratio_range)
-                            num_noise = max(1, min(self.max_noise_boxes, int(num_gt_boxes * noise_ratio)))
-                        else:
-                            num_noise = random.randint(1, min(2, self.max_noise_boxes))
-                        
-                        noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, label_strs, bx)
+                    # OPTIMIZED: Use pre-computed noise from vectorized batch generation
+                    noise_boxes, noise_labels = batch_noise_results[i]
+                    if noise_boxes.numel() > 0:
+                        # Combine GT and noise boxes
                         combined_boxes = torch.cat([bx, noise_boxes], dim=0)
                         combined_labels = label_strs + noise_labels
                         
@@ -586,13 +828,12 @@ class BBOBCollator:  # noqa: N801
                         
                         # Build fragments and tokenize efficiently
                         input_ids_det, tgt_ids = self._build_and_process_sequence(
-                            combined_boxes, combined_labels, noise_mask, remaining_space, fmt_coord
+                            combined_boxes, combined_labels, noise_mask, remaining_space, None  # No formatter needed - handled internally
                         )
-                        
                     else:
                         # No noise - simpler path
                         input_ids_det, tgt_ids = self._build_and_process_sequence(
-                            bx, label_strs, None, remaining_space, fmt_coord
+                            bx, label_strs, None, remaining_space, None  # No formatter needed - handled internally
                         )
                 else:
                     # Empty bboxes case
@@ -655,7 +896,7 @@ class BBOBCollator:  # noqa: N801
                 input_ids_det = input_ids_det[:min_det_len]
                 tgt_ids = tgt_ids[:min_det_len]
 
-            # OPTIMIZED: Concatenate all at once instead of multiple torch.cat calls
+            # OPTIMIZED: Efficient sequence construction with pre-allocated tensors
             # NOTE: input_ids still uses placeholder (1 token) which the model will replace with VIS_TOKENS visual tokens
             
             # SAFETY: Final check for total sequence length before concatenation
@@ -673,20 +914,23 @@ class BBOBCollator:  # noqa: N801
                     input_ids_det = empty_tensor.clone()
                     tgt_ids = empty_tensor.clone()
             
+            # OPTIMIZED: Single tensor allocation for input_ids
             input_ids = torch.cat([image_placeholder, instr_ids, input_ids_det], dim=0)
             
-            # OPTIMIZED: Create labels more efficiently using sizes and correct device
+            # OPTIMIZED: Efficient labels construction using pre-allocated tensors
             # Account for visual token replacement: 1 placeholder becomes VIS_TOKENS visual tokens
             instr_size = instr_ids.size(0)
             
-            # Create ignore labels for visual tokens and instruction
-            # Visual tokens don't need supervision - they're just processed features
-            total_prefix_size = VIS_TOKENS + instr_size  # visual tokens + instruction
-            label_ignore = torch.full((total_prefix_size,), -100, dtype=torch.long, device=device)
-            labels = torch.cat([label_ignore, tgt_ids], dim=0)
+            # Create ignore labels for instruction (reuse pre-allocated visual_ignore)
+            if instr_size > 0:
+                instr_ignore = torch.full((instr_size,), -100, dtype=torch.long, device=device)
+                labels = torch.cat([visual_ignore, instr_ignore, tgt_ids], dim=0)
+            else:
+                labels = torch.cat([visual_ignore, tgt_ids], dim=0)
 
-            merged_input_ids.append(input_ids)
-            merged_labels.append(labels)
+            # OPTIMIZED: Direct assignment instead of append
+            merged_input_ids[i] = input_ids
+            merged_labels[i] = labels
 
         input_ids_padded = pad_sequence(merged_input_ids, batch_first=True, padding_value=pad_token_id)
 
