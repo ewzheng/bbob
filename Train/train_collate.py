@@ -152,7 +152,9 @@ class BBOBCollator:  # noqa: N801
         
         for sample_idx, (gt_boxes, label_strs, num_noise) in enumerate(zip(batch_gt_boxes, batch_label_strs, batch_noise_counts)):
             if num_noise <= 0:
-                batch_results.append((torch.empty((0, 4)), []))
+                # Use proper device for empty tensors
+                device = gt_boxes.device if gt_boxes.numel() > 0 else torch.device('cpu')
+                batch_results.append((torch.empty((0, 4), device=device), []))
                 continue
                 
             sample_start_indices.append(len(all_gt_boxes))
@@ -165,8 +167,10 @@ class BBOBCollator:  # noqa: N801
         
         if not all_gt_boxes:
             # No GT boxes in entire batch - generate random noise only
-            for num_noise in batch_noise_counts:
-                noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, ["object"], torch.empty((0, 4)))
+            for i, num_noise in enumerate(batch_noise_counts):
+                # Use proper device for empty GT boxes
+                device = batch_gt_boxes[i].device if batch_gt_boxes[i].numel() > 0 else torch.device('cpu')
+                noise_boxes, noise_labels = self._generate_noise_boxes(num_noise, ["object"], torch.empty((0, 4), device=device))
                 batch_results.append((noise_boxes, noise_labels))
             return batch_results
         
@@ -195,17 +199,30 @@ class BBOBCollator:  # noqa: N801
             # Vectorized jitter application
             x, y, w, h = boxes_to_jitter[:, 0], boxes_to_jitter[:, 1], boxes_to_jitter[:, 2], boxes_to_jitter[:, 3]
             
-            # Generate all jitter values at once
-            jitter_x = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.4 * w  # 40% jitter
-            jitter_y = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.4 * h  # 40% jitter
-            jitter_w = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.3 * w  # 30% size jitter
-            jitter_h = (torch.rand(n_jittered) * 2.0 - 1.0) * 0.3 * h  # 30% size jitter
+            # Generate all jitter values at once with consistent device
+            device = boxes_to_jitter.device
+            jitter_x = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.4 * w  # 40% jitter
+            jitter_y = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.4 * h  # 40% jitter
+            jitter_w = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.3 * w  # 30% size jitter
+            jitter_h = (torch.rand(n_jittered, device=device) * 2.0 - 1.0) * 0.3 * h  # 30% size jitter
             
-            # Apply jitter and clamp vectorized
-            new_x = torch.clamp(x + jitter_x, 0.0, 1.0 - w)
-            new_y = torch.clamp(y + jitter_y, 0.0, 1.0 - h)
-            new_w = torch.clamp(w + jitter_w, 0.01, 1.0 - new_x)
-            new_h = torch.clamp(h + jitter_h, 0.01, 1.0 - new_y)
+            # Apply jitter and clamp vectorized (step by step to handle bounds properly)
+            jittered_x = x + jitter_x
+            jittered_y = y + jitter_y
+            jittered_w = w + jitter_w
+            jittered_h = h + jitter_h
+            
+            # Clamp coordinates and sizes properly
+            new_x = torch.clamp_min(jittered_x, 0.0)
+            new_y = torch.clamp_min(jittered_y, 0.0)
+            new_w = torch.clamp_min(jittered_w, 0.01)
+            new_h = torch.clamp_min(jittered_h, 0.01)
+            
+            # Ensure boxes stay within image bounds
+            new_x = torch.minimum(new_x, 1.0 - new_w)
+            new_y = torch.minimum(new_y, 1.0 - new_h)
+            new_w = torch.minimum(new_w, 1.0 - new_x)
+            new_h = torch.minimum(new_h, 1.0 - new_y)
             
             jittered_boxes = torch.stack([new_x, new_y, new_w, new_h], dim=1)
             all_noise_boxes.append(jittered_boxes)
@@ -222,9 +239,10 @@ class BBOBCollator:  # noqa: N801
             # Extract widths and heights
             w, h = boxes_to_shift[:, 2], boxes_to_shift[:, 3]
             
-            # Generate random centers vectorized
-            cx = torch.rand(n_shifted) * (1.0 - w) + w/2
-            cy = torch.rand(n_shifted) * (1.0 - h) + h/2
+            # Generate random centers vectorized with consistent device
+            device = boxes_to_shift.device
+            cx = torch.rand(n_shifted, device=device) * (1.0 - w) + w/2
+            cy = torch.rand(n_shifted, device=device) * (1.0 - h) + h/2
             
             # Convert back to (x, y, w, h)
             new_x = cx - w/2
@@ -237,13 +255,17 @@ class BBOBCollator:  # noqa: N801
             shifted_labels = [all_gt_labels[idx] for idx in shift_indices.tolist()]
             all_noise_labels.extend(shifted_labels)
         
-        # 3. VECTORIZED RANDOM BOXES
+        # 3. VECTORIZED RANDOM BOXES  
         if n_random > 0:
-            # Generate completely random boxes vectorized
-            x = torch.rand(n_random) * 0.8  # Leave some margin
-            y = torch.rand(n_random) * 0.8
-            w = torch.rand(n_random) * torch.minimum(torch.tensor(0.5), 1.0 - x)
-            h = torch.rand(n_random) * torch.minimum(torch.tensor(0.5), 1.0 - y)
+            # Generate completely random boxes vectorized with consistent device
+            device = all_gt_boxes_tensor.device if len(all_gt_boxes) > 0 else torch.device('cpu')
+            x = torch.rand(n_random, device=device) * 0.8  # Leave some margin
+            y = torch.rand(n_random, device=device) * 0.8
+            # Calculate max width/height to stay within bounds
+            max_w = torch.minimum(torch.full_like(x, 0.5), 1.0 - x)
+            max_h = torch.minimum(torch.full_like(y, 0.5), 1.0 - y)
+            w = torch.rand(n_random, device=device) * max_w
+            h = torch.rand(n_random, device=device) * max_h
             
             random_boxes = torch.stack([x, y, w, h], dim=1)
             all_noise_boxes.append(random_boxes)
@@ -259,18 +281,25 @@ class BBOBCollator:  # noqa: N801
         if all_noise_boxes:
             combined_noise_boxes = torch.cat(all_noise_boxes, dim=0)
         else:
-            combined_noise_boxes = torch.empty((0, 4))
+            # Use device from GT boxes if available
+            device = all_gt_boxes_tensor.device if len(all_gt_boxes) > 0 else torch.device('cpu')
+            combined_noise_boxes = torch.empty((0, 4), device=device)
         
         # DISTRIBUTE NOISE BACK TO SAMPLES
+        # Note: samples with num_noise <= 0 already have empty results added at the beginning
+        # Only distribute noise to samples that actually need it
         noise_idx = 0
+        remaining_samples = []
         for sample_idx, num_noise in enumerate(batch_noise_counts):
-            if num_noise <= 0:
-                continue
-                
+            if num_noise > 0:
+                remaining_samples.append((sample_idx, num_noise))
+        
+        for sample_idx, num_noise in remaining_samples:
             sample_noise_boxes = combined_noise_boxes[noise_idx:noise_idx + num_noise]
             sample_noise_labels = all_noise_labels[noise_idx:noise_idx + num_noise]
             
-            batch_results.append((sample_noise_boxes, sample_noise_labels))
+            # Insert at correct position (batch_results already has placeholders for num_noise <= 0)
+            batch_results[sample_idx] = (sample_noise_boxes, sample_noise_labels)
             noise_idx += num_noise
         
         return batch_results
