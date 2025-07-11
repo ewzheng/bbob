@@ -10,20 +10,37 @@ import random
 
 TARGET_SIZE = (256, 256)
 
-# Pre-compile transform so it is constructed once per process
+# -------------------------------------------------------------
+# Multi-scale crop that *guarantees* at least one bbox survives.
+# -------------------------------------------------------------
+# We first apply RandomResizedCrop (scale jitter + slight AR jitter) and then
+# force the final window to stay near a randomly chosen GT box by means of
+# RandomCropNearBBox.  This reproduces Pix2Seq-style MS crop but avoids the
+# “empty GT” problem.
+
 _ms_crop_aug = A.Compose(
     [
-        # NOTE: Albumentations 1.x enforces scale values ∈ [0,1].
-        # Pix2Seq-v2 uses up-to-1.5 area scaling; we approximate by first
-        # scaling the image separately (handled below for custom calls).
+        # scale jitter + aspect-ratio jitter
         A.RandomResizedCrop(
-            size=TARGET_SIZE,           # (height, width)
-            scale=(0.4, 1.0),           # valid range for Albumentations
-            ratio=(1.0, 1.0),           # keep aspect ratio
+            height=TARGET_SIZE[0],
+            width =TARGET_SIZE[1],
+            scale=(0.4, 1.0),
+            ratio=(0.75, 1.33),
+            p=1.0,
+        ),
+        # make sure at least one box remains visible
+        A.RandomCropNearBBox(
+            max_part_shift=(0.2, 0.2),
+            crop_height=TARGET_SIZE[0],
+            crop_width =TARGET_SIZE[1],
             p=1.0,
         ),
     ],
-    bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"], min_visibility=0.2),
+    bbox_params=A.BboxParams(
+        format="coco",
+        label_fields=["class_labels"],
+        min_visibility=0.2,
+    ),
 )
 
 def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
@@ -44,7 +61,8 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     boxes = boxes or []
     labels = labels or []
 
-    # If caller wants a custom scale range, rebuild the transform lazily
+    # If caller wants a custom scale range, rebuild the transform lazily.
+    # We still include RandomCropNearBBox so that ≥1 GT survives.
     if scale_range != (0.4, 1.0):
         # Validate scale_range; clamp to (0,1] if necessary to satisfy Albumentations
         lo, hi = scale_range
@@ -54,11 +72,18 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
         aug = A.Compose(
             [
                 A.RandomResizedCrop(
-                    size=TARGET_SIZE,
+                    height=TARGET_SIZE[0],
+                    width =TARGET_SIZE[1],
                     scale=scale_range_valid,
-                    ratio=(1.0, 1.0),
+                    ratio=(0.75, 1.33),
                     p=1.0,
-                )
+                ),
+                A.RandomCropNearBBox(
+                    max_part_shift=(0.2, 0.2),
+                    crop_height=TARGET_SIZE[0],
+                    crop_width =TARGET_SIZE[1],
+                    p=1.0,
+                ),
             ],
             bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"], min_visibility=0.2),
         )
@@ -68,11 +93,34 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     # Ensure numpy uint8 image for Albumentations
     img_np, was_pil = _to_numpy(image)
 
-    try:
-        res = aug(image=img_np, bboxes=boxes, class_labels=labels)
-    except Exception:
-        # Fallback: return original
-        return image, boxes, labels
+    # ------------------------------------------------------------------
+    # If there are *no* GT boxes we cannot run RandomCropNearBBox → fall
+    # back to RandomResizedCrop only (retain scale jitter so behaviour is
+    # still deterministic for empty-box images).
+    # ------------------------------------------------------------------
+
+    if boxes:
+        # normal path – boxes present
+        try:
+            res = aug(image=img_np, bboxes=boxes, class_labels=labels)
+        except Exception:
+            # Any error → fallback to original sample
+            return image, boxes, labels
+    else:
+        # Build a simple jitter-only transform on the fly
+        jitter_only = A.RandomResizedCrop(
+            height=TARGET_SIZE[0],
+            width =TARGET_SIZE[1],
+            scale=scale_range if scale_range != (0.4, 1.0) else (0.4, 1.0),
+            ratio=(0.75, 1.33),
+            p=1.0,
+        )
+        try:
+            res = jitter_only(image=img_np)
+            res["bboxes"] = []
+            res["class_labels"] = []
+        except Exception:
+            return image, boxes, labels
 
     img_out = _restore_type(res["image"], was_pil)
     boxes_out = res["bboxes"]
