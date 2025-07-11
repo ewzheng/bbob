@@ -204,7 +204,8 @@ class BBOBLoss:
             if self.step % (self.log_interval * 4) == 0:
                 # Use original tensors for debug output (shifted tensors cause misalignment)
                 pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu")
-                tgt_ids = shift_labels[0].to(device="cpu")
+                # Use *original* labels row so we get full GT fragments (no shift)
+                tgt_ids = labels[0].to(device="cpu")
                 
                 # Also get input sequence to see noise interleaving
                 if input_ids is not None:
@@ -218,7 +219,7 @@ class BBOBLoss:
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
                 
                 # NEW: Extract and log actual GT objects for monitoring
-                gt_objects = self._extract_gt_objects(tgt_ids)
+                gt_objects = self._extract_gt_objects(actual_input_ids, labels[0].to(device="cpu"))
                 
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str, "sample_input": input_str})
                 self.logger.info({"gt_objects": gt_objects})  # Log parsed GT objects
@@ -238,61 +239,49 @@ class BBOBLoss:
 
         return total_loss
 
-    def _extract_gt_objects(self, gt_ids):
-        """
-        Extract ground truth objects from label token IDs for logging.
-        
-        Args:
-            gt_ids: Ground truth token IDs (potentially with -100 ignore tokens)
-            
-        Returns:
-            List of parsed GT objects with class names and coordinates
+    def _extract_gt_objects(self, input_ids_row, labels_row):
+        """Return list of GT *text* fragments ignoring noise.
+
+        Parameters
+        ----------
+        input_ids_row : LongTensor (S,)
+            The full input sequence (image-placeholder + instruction + GT + noise).
+        labels_row : LongTensor (S,)
+            The label sequence where GT tokens are real IDs and noise tokens are
+            set to ``ignore_index`` (-100).
         """
         import re
-        
-        # Clean up ignore tokens
-        clean_ids = [t for t in gt_ids if t != self.ignore_index]
-        
-        if not clean_ids:
+
+        if input_ids_row.numel() != labels_row.numel():
+            return []  # corrupt row – bail out
+
+        # Keep only positions where label != ignore_index → these belong to GT
+        kept = [int(t) for t, lab in zip(input_ids_row.tolist(), labels_row.tolist()) if lab != self.ignore_index]
+
+        if not kept:
             return []
-        
-        # Decode to text to parse objects
+
         try:
-            gt_text = self.tokenizer.decode(clean_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
-            
-            # Extract detection fragments using regex
-            fragment_pattern = r'<\|bbob\|>([^<]*?)</\|bbob\|>'
-            matches = re.findall(fragment_pattern, gt_text)
-            
+            gt_text = self.tokenizer.decode(kept, skip_special_tokens=False, clean_up_tokenization_spaces=True)
+            frag_pat = r'<\|bbob\|>([^<]*?)</\|bbob\|>'
+            matches = re.findall(frag_pat, gt_text)
             objects = []
-            for match in matches:
-                try:
-                    # Parse class and coordinates
-                    if ':' in match:
-                        class_name, coords_part = match.split(':', 1)
-                        class_name = class_name.strip()
-                        
-                        # Extract coordinates using regex
-                        coord_pattern = r'[-+]?\d*\.?\d+'
-                        coords = re.findall(coord_pattern, coords_part)
-                        coords = [float(c) for c in coords[:4]]  # Take first 4 coordinates
-                        
-                        if len(coords) == 4:
-                            # Format coordinates using quantized special tokens
-                            coords_str = f"[{format_coordinate(coords[0])}, {format_coordinate(coords[1])}, {format_coordinate(coords[2])}, {format_coordinate(coords[3])}]"
-                            objects.append(f"{class_name}: {coords_str}")
-                        else:
-                            objects.append(f"{class_name}: [incomplete coords]")
-                    else:
-                        objects.append(f"[malformed]: {match}")
-                        
-                except Exception as e:
-                    objects.append(f"[parse error]: {match}")
-            
+            for m in matches:
+                if ':' not in m:
+                    objects.append(f"[malformed]: {m}")
+                    continue
+                cls, coord_part = m.split(':', 1)
+                cls = cls.strip()
+                nums = re.findall(r'[-+]?\d*\.?\d+', coord_part)[:4]
+                if len(nums) != 4:
+                    objects.append(f"{cls}: [incomplete coords]")
+                    continue
+                coords_f = [float(x) for x in nums]
+                coords_str = f"[{format_coordinate(coords_f[0])}, {format_coordinate(coords_f[1])}, {format_coordinate(coords_f[2])}, {format_coordinate(coords_f[3])}]"
+                objects.append(f"{cls}: {coords_str}")
             return objects
-            
         except Exception as e:
-            return [f"[decode error]: {str(e)}"]
+            return [f"[decode error]: {e}"]
 
 
 # ----------------------------------------------------------------------
