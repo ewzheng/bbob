@@ -202,10 +202,25 @@ class BBOBLoss:
         if self.logger is not None:
             # every 4× interval: log a decoded prediction / target pair
             if self.step % (self.log_interval * 4) == 0:
-                # Use original tensors for debug output (shifted tensors cause misalignment)
-                pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu")
-                # Use *original* labels row so we get full GT fragments (no shift)
+                # Compute arg-max predictions for the first item in the batch
+                raw_pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu")
+
+                # Use *original* labels (no shift) for GT – they contain -100 at noise positions
                 tgt_ids = labels[0].to(device="cpu")
+
+                # ------------------------------------------------------------------
+                # NEW: Filter out positions where the GT label is *ignore_index* so we
+                # only log predictions that correspond to *real* ground-truth tokens
+                # (i.e. the object fragments).  This avoids showing the model’s free
+                # predictions on noise positions, which are untrained and therefore
+                # can look like random “noise classes”.
+                # ------------------------------------------------------------------
+                keep_mask = tgt_ids != self.ignore_index
+                if keep_mask.sum() == 0:
+                    # Degenerate row – fall back to raw predictions
+                    pred_ids = raw_pred_ids
+                else:
+                    pred_ids = raw_pred_ids[keep_mask]
                 
                 # Also get input sequence to see noise interleaving
                 if input_ids is not None:

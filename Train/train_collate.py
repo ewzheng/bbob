@@ -31,6 +31,13 @@ import re
 VIS_TOKENS: int = 64           # number of visual tokens the model prepends
 TARGET_SIZE = (256, 256)       # spatial resolution used by MobileViT-v2
 
+# ---------------------------------------------------------------------------
+# Coordinate safety margin – keep jittered / synthetic boxes away from exactly
+# 0.000 so that the model does not over-fit to the left/top border token.
+# Matches the 0.001 resolution of the numeric vocabulary.
+# ---------------------------------------------------------------------------
+MIN_COORD = 1.0 / 1000.0  # 0.001
+
 # ====================================================================
 # Scheduled-sampling data collator
 # --------------------------------------------------------------------
@@ -257,8 +264,8 @@ class BBOBCollator:  # noqa: N801
             cy = torch.rand(n_shifted, device=device) * (1.0 - h) + h/2
             
             # Convert back to (x, y, w, h)
-            new_x = cx - w/2
-            new_y = cy - h/2
+            new_x = max(MIN_COORD, cx - w/2)
+            new_y = max(MIN_COORD, cy - h/2)
             
             shifted_boxes = torch.stack([new_x, new_y, w, h], dim=1)
             all_noise_boxes.append(shifted_boxes)
@@ -396,8 +403,8 @@ class BBOBCollator:  # noqa: N801
         # 3. Completely random boxes
         for _ in range(n_random):
             # Generate truly random box coordinates
-            x = random.uniform(0.0, 0.8)  # Leave some margin
-            y = random.uniform(0.0, 0.8)
+            x = random.uniform(MIN_COORD, 0.8)  # Leave some margin and avoid 0
+            y = random.uniform(MIN_COORD, 0.8)
             w = random.uniform(0.1, min(0.5, 1.0 - x))  # Reasonable size
             h = random.uniform(0.1, min(0.5, 1.0 - y))
             
@@ -549,7 +556,8 @@ class BBOBCollator:  # noqa: N801
 
         # back to xywh (top-left origin)
         xy = cxcy - 0.5 * wh
-        xy = torch.clamp(xy, 0.0, 1.0)
+        # Clamp with MIN_COORD lower bound so x/y never hit exactly 0.
+        xy = torch.clamp(xy, MIN_COORD, 1.0)
 
         # clamp sizes so that the box remains inside [0,1] after the xy clamp
         # torch.clamp cannot mix a scalar *min* with a tensor *max* – we therefore
