@@ -46,7 +46,17 @@ def _split_snippet(det: str) -> Tuple[str, List[float]]:
     """Return *(label, xywh)* for one <bbob> snippet (label lower-cased)."""
     parts = det.split(":", 1)
     label = parts[0].strip().lower() if parts else ""
-    xywh, _ = parse_detection_string(det)
+    xyxy, _ = parse_detection_string(det)  # tokens now in (x1,y1,x2,y2)
+
+    if len(xyxy) == 4:
+        x1, y1, x2, y2 = xyxy
+        w = max(0.0, x2 - x1)
+        h = max(0.0, y2 - y1)
+        xywh = [x1, y1, w, h]
+    else:
+        # Fallback to old behaviour (malformed snippet)
+        xywh = xyxy
+
     return label, xywh
 
 
@@ -69,34 +79,22 @@ def _snippets_to_boxes_labels(snippets: List[str]) -> Tuple[torch.Tensor, List[s
 # -----------------------------------------------------------------------------
 
 def detection_metrics_batch(
-    pred_ids: torch.Tensor,  # (B,S)
-    gt_ids: torch.Tensor,    # (B,S)
+    pred_ids: torch.Tensor,          # (B,S)
+    gt_ids: torch.Tensor,            # (B,S)
     tokenizer,
     *,
+    logits: torch.Tensor | None = None,  # (B,S,V) optional – enables noise recovery
     iou_thresh: float = 0.5,
     ignore_index: int = -100,
 ) -> Dict[str, float]:
-    """Compute mean IoU and recall for a batch of predictions.
+    """Compute mean IoU, recall, precision, F1 and related stats for a batch.
 
-    Parameters
-    ----------
-    pred_ids : LongTensor (B,S)
-        Token IDs predicted by the model after arg-max.
-    gt_ids : LongTensor (B,S)
-        Ground-truth token IDs; positions equal to ``ignore_index`` are ignored
-        when decoding.
-    tokenizer : transformers.PreTrainedTokenizerBase
-        Needed to turn IDs back into text.
-    iou_thresh : float, default 0.5
-        Threshold that counts a match as *correct* when IoU ≥ this value.
-    ignore_index : int, default -100
-        Label padding value to discard before decoding.
-
-    Returns
-    -------
-    dict with keys:
-        "mean_iou"  – average IoU of all matched pairs (0 if none).
-        "recall"    – correct_matches / total_gt (0 if no GT boxes).
+    If *logits* (pre-softmax scores) are supplied we will run the **altered
+    inference** routine that replaces the placeholder "noise" class of each
+    fragment with the highest-probability real token(s), using
+    :pyfunc:`_object_scores` under the hood.  When *logits* is *None* the
+    function falls back to the legacy implementation that decodes arg-max IDs
+    as-is (no noise recovery).
     """
     if pred_ids.ndim != 2 or gt_ids.ndim != 2:
         raise ValueError("pred_ids and gt_ids must be (B,S) tensors")
@@ -115,33 +113,73 @@ def detection_metrics_batch(
     class_correct = 0
 
     # ------------------------------------------------------------------
-    # 1. Batch-decode all samples in one tokenizer call (much faster than
-    #    decoding each sequence separately, especially for large batches).
+    # 1. Prepare per-sample predicted boxes & labels
     # ------------------------------------------------------------------
-    pred_filtered: List[List[int]] = [
-        [int(t) for t in row.tolist() if t != ignore_index] for row in pred_ids
-    ]
-    gt_filtered: List[List[int]] = [
-        [int(t) for t in row.tolist() if t != ignore_index] for row in gt_ids
-    ]
+    if logits is not None:
+        # -- noise-recovery path (needs logits) -------------------------
+        if logits.shape[:2] != pred_ids.shape:
+            raise ValueError("logits must match (B,S,⋅) shape of pred_ids")
 
-    # `batch_decode` accepts empty lists fine and returns "" for them.
-    pred_strs: List[str] = tokenizer.batch_decode(
-        pred_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
-    )
-    gt_strs: List[str] = tokenizer.batch_decode(
-        gt_filtered,   skip_special_tokens=False, clean_up_tokenization_spaces=True
-    )
+        pred_boxes_labels: List[Tuple[torch.Tensor, List[str]]] = []
+        for b in range(batch_size):
+            objs = _object_scores(
+                pred_ids[b], logits[b], tokenizer, ignore_index=ignore_index
+            )
+            if objs:
+                boxes = torch.tensor([o[2] for o in objs], dtype=torch.float32, device=device)
+                labels = [o[1] for o in objs]
+            else:
+                boxes = torch.zeros((0, 4), dtype=torch.float32, device=device)
+                labels = []
+            pred_boxes_labels.append((boxes, labels))
 
-    # Iterate over samples; heavy work is now string-processing, not decoding
-    for pred_str, gt_str in zip(pred_strs, gt_strs):
-        # ---------- extract detection snippets ------------------------------
-        pred_snips = _extract_snippets(pred_str)
-        gt_snips = _extract_snippets(gt_str)
+        # GT still decoded via text (labels untouched by noise recovery)
+        gt_filtered: List[List[int]] = [
+            [int(t) for t in row.tolist() if t != ignore_index] for row in gt_ids
+        ]
+        gt_strs: List[str] = tokenizer.batch_decode(
+            gt_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
+        )
+        gt_boxes_labels: List[Tuple[torch.Tensor, List[str]]] = []
+        for gt_str in gt_strs:
+            snips = _extract_snippets(gt_str)
+            boxes, labels = _snippets_to_boxes_labels(snips)
+            gt_boxes_labels.append((boxes.to(device), labels))
 
-        pred_boxes, pred_labels = _snippets_to_boxes_labels(pred_snips)
-        gt_boxes, gt_labels = _snippets_to_boxes_labels(gt_snips)
+    else:
+        # -- legacy arg-max decode path --------------------------------
+        # Batch-decode all samples in one tokenizer call (much faster than
+        # decoding each sequence separately, especially for large batches).
+        pred_filtered: List[List[int]] = [
+            [int(t) for t in row.tolist() if t != ignore_index] for row in pred_ids
+        ]
+        gt_filtered: List[List[int]] = [
+            [int(t) for t in row.tolist() if t != ignore_index] for row in gt_ids
+        ]
 
+        pred_strs: List[str] = tokenizer.batch_decode(
+            pred_filtered, skip_special_tokens=False, clean_up_tokenization_spaces=True
+        )
+        gt_strs: List[str] = tokenizer.batch_decode(
+            gt_filtered,   skip_special_tokens=False, clean_up_tokenization_spaces=True
+        )
+
+        pred_boxes_labels = []
+        for pred_str in pred_strs:
+            snips = _extract_snippets(pred_str)
+            boxes, labels = _snippets_to_boxes_labels(snips)
+            pred_boxes_labels.append((boxes.to(device), labels))
+
+        gt_boxes_labels = []
+        for gt_str in gt_strs:
+            snips = _extract_snippets(gt_str)
+            boxes, labels = _snippets_to_boxes_labels(snips)
+            gt_boxes_labels.append((boxes.to(device), labels))
+
+    # ------------------------------------------------------------------
+    # 2. Iterate over samples – perform label-aware Hungarian matching
+    # ------------------------------------------------------------------
+    for (pred_boxes, pred_labels), (gt_boxes, gt_labels) in zip(pred_boxes_labels, gt_boxes_labels):
         total_gt += gt_boxes.size(0)
         total_pred += pred_boxes.size(0)
         if pred_boxes.numel() == 0 or gt_boxes.numel() == 0:
@@ -151,7 +189,7 @@ def detection_metrics_batch(
         class_total += len(gt_labels)
         class_correct += sum(1 for lab in gt_labels if lab in pred_labels)
 
-        # -------- greedy label-aware matching --------------------------------
+        # -------- greedy label-aware matching ------------------------
         used_pred: set[int] = set()
         used_gt: set[int] = set()
 
@@ -181,6 +219,9 @@ def detection_metrics_batch(
                 if iou_val >= iou_thresh:
                     correct_matches += 1
 
+    # ------------------------------------------------------------------
+    # 3. Aggregate stats
+    # ------------------------------------------------------------------
     mean_iou = iou_sum / iou_count if iou_count else 0.0
     recall = correct_matches / total_gt if total_gt else 0.0
     precision = correct_matches / total_pred if total_pred else 0.0
@@ -203,6 +244,81 @@ def detection_metrics_batch(
 # -----------------------------------------------------------------------------
 # Experimental: object-level confidence & AP (Pix2Seq-style)
 # -----------------------------------------------------------------------------
+
+def _recover_noise_label(pred_ids: torch.Tensor, logp_tokens: torch.Tensor, start_idx: int, end_idx: int, tokenizer) -> Tuple[str, float]:
+    """Return *(label, score)* recovered from a noise fragment.
+
+    Parameters
+    ----------
+    pred_ids : LongTensor (S,)
+        Full predicted ID sequence for the image.
+    logp_tokens : FloatTensor (S,V)
+        Log-probabilities (after softmax+log) for the same sequence.
+    start_idx : int
+        Index of *first* label token (i.e. token right after <|bbob|>).  The
+        function scans forward until it meets a token whose **text** contains
+        a ':' which marks the end of the label.
+    end_idx : int
+        Index of the closing tag (`</|bbob|>`); used as safety bound.
+    tokenizer : transformers.PreTrainedTokenizerBase
+
+    Returns
+    -------
+    label : str
+        Replacement class name (lower-cased).
+    score : float
+        Geometric-mean probability of the chosen label tokens.
+    """
+    bb_open_id, bb_close_id = tokenizer.convert_tokens_to_ids([TAG_OPEN, TAG_CLOSE])
+    try:
+        noise_id = tokenizer.convert_tokens_to_ids("noise")
+    except Exception:
+        noise_id = -1
+
+    banned_ids = {
+        bb_open_id,
+        bb_close_id,
+        noise_id,
+        tokenizer.pad_token_id or -1,
+    }
+
+    label_tokens: list[int] = []
+    label_logps: list[torch.Tensor] = []
+
+    k = start_idx
+    while k < end_idx:
+        tok_id = int(pred_ids[k])
+        tok_txt = tokenizer.convert_ids_to_tokens(tok_id)
+        if ":" in tok_txt:
+            break  # reached delimiter
+
+        logp_row = logp_tokens[k]
+        # top-k search for candidate replacement
+        top_val, top_idx = torch.topk(logp_row, k=32)
+        chosen_id = tok_id  # default
+        chosen_logp = logp_row[tok_id]
+        for cand_id in top_idx.tolist():
+            if cand_id in banned_ids:
+                continue
+            cand_txt = tokenizer.convert_ids_to_tokens(cand_id)
+            stripped = cand_txt.strip().replace(".", "", 1)
+            if not stripped or stripped.isnumeric():
+                continue
+            chosen_id = cand_id
+            chosen_logp = logp_row[cand_id]
+            break
+
+        label_tokens.append(chosen_id)
+        label_logps.append(chosen_logp)
+        k += 1
+
+    if not label_tokens:
+        return "noise", float(torch.exp(logp_tokens[start_idx][noise_id]) if noise_id != -1 else 0.0)
+
+    label = tokenizer.decode(label_tokens, skip_special_tokens=True).strip().lower()
+    score = float(torch.exp(torch.stack(label_logps).mean()).clamp(0.0, 1.0))
+    return label, score
+
 
 def _object_scores(
     pred_ids: torch.Tensor,   # (S,)
@@ -252,6 +368,17 @@ def _object_scores(
         # Convert IDs → text then parse label / box
         frag_text = tokenizer.decode(frag_ids.tolist(), skip_special_tokens=False)
         label, xywh = _split_snippet(frag_text)
+
+        # ------------------------------------------------------------------
+        # Altered inference (Pix2Seq): if the model emitted the placeholder
+        # "noise" label we substitute it with the *most likely* real token at
+        # the position of the first label token.  This lets an open-vocabulary
+        # LLM name any class it recognises while still enjoying the sequence
+        # augmentation benefits of noise fragments during training.
+        # ------------------------------------------------------------------
+        if label == "noise":
+            label, score = _recover_noise_label(pred_ids, logp_tokens, i + 1, j, tokenizer)
+
         objects.append((score, label, xywh))
         i = j + 1
 

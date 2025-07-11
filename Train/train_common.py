@@ -455,8 +455,19 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         # -------------------------------------------------------------
         detection_fragments = []
         for bbox, label in zip(sample_boxes, sample_label_strs):
-            # bbox components are already 0-1; quantize to special digit tokens
-            bbox_txt = ", ".join(format_coordinate(v) for v in bbox)
+            # Convert (x, y, w, h) → (x1, y1, x2, y2) *before* quantisation so
+            # the text sequence follows the original Pix2Seq corner format.
+            x, y, w, h = bbox
+            x2 = x + w
+            y2 = y + h
+
+            # Clamp just in case numerical jitter pushed coords slightly out-of-range
+            x1_q = format_coordinate(max(0.0, min(1.0, x)))
+            y1_q = format_coordinate(max(0.0, min(1.0, y)))
+            x2_q = format_coordinate(max(0.0, min(1.0, x2)))
+            y2_q = format_coordinate(max(0.0, min(1.0, y2)))
+
+            bbox_txt = ", ".join([x1_q, y1_q, x2_q, y2_q])  # xyxy order
             detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
 
         # ---------------------------------------------------------

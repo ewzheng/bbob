@@ -147,6 +147,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
                                         pred_masked,
                                         labels_cpu,
                                         tokenizer,
+                                        logits=logits.detach().cpu(),
                                     )
                                     det_iou_vals.append(det_metrics.get("mean_iou", 0.0))
                                     det_recall_vals.append(det_metrics.get("recall", 0.0))
@@ -160,6 +161,7 @@ def create_metrics_functions(tokenizer, do_detection_metrics=False, logger=None)
                                         pred_masked,  # Already on CPU
                                         labels_cpu,   # Already on CPU
                                         tokenizer,
+                                        logits=logits.detach().cpu(),
                                         iou_thresh=0.25,
                                     )
                                     det_iou25_vals.append(det25.get("mean_iou", 0.0))

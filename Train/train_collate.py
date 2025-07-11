@@ -70,7 +70,7 @@ class BBOBCollator:  # noqa: N801
         logger=None,
         on_the_fly=False,
         noise_prob=1.0,  # ALWAYS add noise objects for proper Pix2Seq training
-        max_noise_boxes=16,  # Max number of noise boxes to add
+        max_noise_boxes=32,  # Max number of noise boxes to add
         noise_ratio_range=(1, 1.25),  # Range for noise count as fraction of GT count
         **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
@@ -448,10 +448,29 @@ class BBOBCollator:  # noqa: N801
         tgt_flat: list[int] = []
         for toks, is_noise in zip(tok_lists, is_noise_list):
             inp_flat.extend(toks)
-            if is_noise:
-                tgt_flat.extend([-100] * len(toks))
-            else:
+
+            # --------------------------------------------------------------
+            # Pix2Seq noise handling:
+            #   – Supervise the *class* token(s) of a noise fragment so the
+            #     decoder learns to identify a background / "noise" object.
+            #   – Ignore (mask) the coordinate tokens so the loss does not
+            #     force any particular numbers for the fake box.
+            # --------------------------------------------------------------
+            if not is_noise:
+                # Regular GT fragment → keep full supervision
                 tgt_flat.extend(toks)
+                continue
+
+            # --- noise fragment ------------------------------------------
+            # Detect where the coordinate list begins.  It always starts at
+            # the first token that contains a '[' character.
+            tok_texts = self.tokenizer.convert_ids_to_tokens(toks)
+            coord_start = next((idx for idx, txt in enumerate(tok_texts) if "[" in txt), len(toks))
+
+            # Copy label-and-punctuation tokens up to the '[' (excluded)
+            tgt_flat.extend(toks[:coord_start])
+            # Mask the coordinate tokens so they do not contribute to loss
+            tgt_flat.extend([-100] * (len(toks) - coord_start))
 
         # ---- 4. Length truncation safety ---------------------------------
         if len(inp_flat) > max_length:
@@ -811,25 +830,48 @@ class BBOBCollator:  # noqa: N801
                     # OPTIMIZED: Use pre-computed noise from vectorized batch generation
                     noise_boxes, noise_labels = batch_noise_results[i]
                     if noise_boxes.numel() > 0:
-                        # Combine GT and noise boxes
-                        combined_boxes = torch.cat([bx, noise_boxes], dim=0)
+                        # Combine GT and noise boxes first
+                        combined_boxes  = torch.cat([bx, noise_boxes], dim=0)
                         combined_labels = label_strs + noise_labels
-                        
-                        # Shuffle at box level
-                        shuffle_indices = torch.randperm(len(combined_labels))
-                        combined_boxes = combined_boxes[shuffle_indices]
-                        combined_labels = [combined_labels[i] for i in shuffle_indices.tolist()]
-                        noise_mask = shuffle_indices >= len(label_strs)
-                        
-                        # Build fragments and tokenize efficiently
-                        input_ids_det, tgt_ids = self._build_and_process_sequence(
-                            combined_boxes, combined_labels, noise_mask, remaining_space, None  # No formatter needed - handled internally
-                        )
+                        noise_boundary  = len(label_strs)
                     else:
-                        # No noise - simpler path
-                        input_ids_det, tgt_ids = self._build_and_process_sequence(
-                            bx, label_strs, None, remaining_space, None  # No formatter needed - handled internally
-                        )
+                        combined_boxes  = bx
+                        combined_labels = label_strs
+                        noise_boundary  = len(combined_labels)  # no noise – boundary at end
+
+                    # ----------------------------------------------------
+                    # Pix2Seq *tail-noise* ordering:
+                    #   1. Shuffle **only** the GT fragments (0‥noise_boundary-1).
+                    #   2. Append all noise fragments afterwards so they are
+                    #      generated last.  We may optionally shuffle *within*
+                    #      the noise tail, but the block itself stays at the
+                    #      end of the sequence.
+                    # ----------------------------------------------------
+                    if combined_boxes.numel() > 0:
+                        # --- 1. Permute GT part --------------------------------
+                        gt_perm = torch.randperm(noise_boundary, device=combined_boxes.device)
+
+                        # --- 2. Keep noise indices contiguous after GT ---------
+                        if len(combined_labels) > noise_boundary:
+                            noise_indices = torch.arange(noise_boundary, len(combined_labels), device=combined_boxes.device)
+                            # Optionally shuffle inside tail to avoid fixed order
+                            # noise_indices = noise_indices[torch.randperm(noise_indices.size(0), device=combined_boxes.device)]
+                            new_order = torch.cat([gt_perm, noise_indices], dim=0)
+                        else:
+                            new_order = gt_perm  # no noise present
+
+                        combined_boxes  = combined_boxes[new_order]
+                        combined_labels = [combined_labels[idx] for idx in new_order.tolist()]
+
+                        # Boolean mask: True for positions belonging to noise tail
+                        noise_mask = new_order >= noise_boundary
+                    else:
+                        noise_mask = None
+
+                    # Build fragments and tokenize efficiently
+                    input_ids_det, tgt_ids = self._build_and_process_sequence(
+                        combined_boxes, combined_labels, noise_mask, remaining_space, None
+                    )
                 else:
                     # Empty bboxes case
                     input_ids_det = empty_tensor.clone()
