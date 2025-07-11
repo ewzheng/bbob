@@ -22,8 +22,7 @@ _ms_crop_aug = A.Compose(
     [
         # scale jitter + aspect-ratio jitter
         A.RandomResizedCrop(
-            height=TARGET_SIZE[0],
-            width =TARGET_SIZE[1],
+            size=TARGET_SIZE,
             scale=(0.4, 1.0),
             ratio=(0.75, 1.33),
             p=1.0,
@@ -72,8 +71,7 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
         aug = A.Compose(
             [
                 A.RandomResizedCrop(
-                    height=TARGET_SIZE[0],
-                    width =TARGET_SIZE[1],
+                    size=TARGET_SIZE,
                     scale=scale_range_valid,
                     ratio=(0.75, 1.33),
                     p=1.0,
@@ -109,8 +107,7 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     else:
         # Build a simple jitter-only transform on the fly
         jitter_only = A.RandomResizedCrop(
-            height=TARGET_SIZE[0],
-            width =TARGET_SIZE[1],
+            size=TARGET_SIZE,
             scale=scale_range if scale_range != (0.4, 1.0) else (0.4, 1.0),
             ratio=(0.75, 1.33),
             p=1.0,

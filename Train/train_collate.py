@@ -245,8 +245,8 @@ class BBOBCollator:  # noqa: N801
             jittered_labels = []
             for idx in jitter_indices.tolist():
                 source_sample = box_to_sample_map[idx]
-                # Use original label from the source box
-                jittered_labels.append(all_gt_labels[idx])
+                # Pix2Seq: noise fragments carry the dedicated "noise" class token
+                jittered_labels.append("noise")
                 noise_sample_assignments.append(source_sample)
             all_noise_labels.extend(jittered_labels)
         
@@ -275,7 +275,7 @@ class BBOBCollator:  # noqa: N801
             for idx in shift_indices.tolist():
                 source_sample = box_to_sample_map[idx]
                 # Use original label from the source box
-                shifted_labels.append(all_gt_labels[idx])
+                shifted_labels.append("noise")
                 noise_sample_assignments.append(source_sample)
             all_noise_labels.extend(shifted_labels)
         
@@ -301,8 +301,7 @@ class BBOBCollator:  # noqa: N801
                 target_sample = random.choice(samples_needing_noise)
                 # Sample label from that specific sample's label pool
                 target_labels = sample_label_pools[target_sample]
-                random_label = random.choice(target_labels) if target_labels else "object"
-                all_noise_labels.append(random_label)
+                all_noise_labels.append("noise")
                 noise_sample_assignments.append(target_sample)
         
         # Combine all noise boxes
@@ -370,8 +369,8 @@ class BBOBCollator:  # noqa: N801
                 new_h = max(0.01, min(1.0 - new_y, h + jitter_h))
                 
                 noise_boxes.append([new_x, new_y, new_w, new_h])
-                # Use real class token from GT
-                noise_labels.append(label_strs[gt_idx] if gt_idx < len(label_strs) else random.choice(label_strs))
+                # Pix2Seq: dedicated noise label
+                noise_labels.append("noise")
         else:
             # No GT boxes available, make them random instead
             n_random += n_jittered
@@ -394,7 +393,7 @@ class BBOBCollator:  # noqa: N801
                 
                 noise_boxes.append([new_x, new_y, w, h])
                 # Use real class token from GT
-                noise_labels.append(label_strs[gt_idx] if gt_idx < len(label_strs) else random.choice(label_strs))
+                noise_labels.append("noise")
         else:
             # No GT boxes available, make them random instead
             n_random += n_shifted
@@ -410,10 +409,7 @@ class BBOBCollator:  # noqa: N801
             
             noise_boxes.append([x, y, w, h])
             # Use real class token
-            if label_strs:
-                noise_labels.append(random.choice(label_strs))
-            else:
-                noise_labels.append("object")  # Fallback
+            noise_labels.append("noise")
         
         # Convert to tensor
         noise_boxes_tensor = torch.tensor(noise_boxes, dtype=torch.float32)
