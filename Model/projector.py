@@ -50,13 +50,28 @@ class Projector(nn.Module):
         # final normalisation applied *after* deep+skip fusion
         self.norm_out = nn.LayerNorm(outdim, eps=1e-5, dtype=dtype)
 
-        # learnable row and column embeddings
+        # ENHANCED: Split spatial embedding into two parts
         max_h = 32  # maximum grid height supported
         max_w = 32  # maximum grid width supported
-        self.row_embedding = nn.Parameter(torch.empty(max_h, outdim, dtype=dtype, device=device))
-        self.col_embedding = nn.Parameter(torch.empty(max_w, outdim, dtype=dtype, device=device))
+        spatial_dim = outdim // 2  # Half for learned embeddings
+        coord_dim = outdim - spatial_dim  # Half for coordinate embeddings
+        
+        # Learned row and column embeddings (reduced dimension)
+        self.row_embedding = nn.Parameter(torch.empty(max_h, spatial_dim, dtype=dtype, device=device))
+        self.col_embedding = nn.Parameter(torch.empty(max_w, spatial_dim, dtype=dtype, device=device))
+        
+        # NEW: Coordinate embedding network
+        self.coord_mlp = nn.Sequential(
+            nn.Linear(2, coord_dim, dtype=dtype),  # 2D coordinates -> embedding
+            nn.GELU(),
+            nn.Linear(coord_dim, coord_dim, dtype=dtype)
+        )
+        
         nn.init.trunc_normal_(self.row_embedding, std=0.02)
         nn.init.trunc_normal_(self.col_embedding, std=0.02)
+        
+        self._spatial_dim = spatial_dim
+        self._coord_dim = coord_dim
 
         self._indim = indim
         self._outdim = outdim
@@ -67,6 +82,7 @@ class Projector(nn.Module):
         self.net.to(self._device)
         self.skip.to(self._device)
         self.norm_out.to(self._device)
+        self.coord_mlp.to(self._device)
 
     '''
     Utils, getters, and setters
@@ -103,6 +119,8 @@ class Projector(nn.Module):
             p.requires_grad = False
         self.row_embedding.requires_grad = False
         self.col_embedding.requires_grad = False
+        for p in self.coord_mlp.parameters():
+            p.requires_grad = False
     
     def unfreeze(self):
         """
@@ -116,6 +134,25 @@ class Projector(nn.Module):
             p.requires_grad = True
         self.row_embedding.requires_grad = True
         self.col_embedding.requires_grad = True
+        for p in self.coord_mlp.parameters():
+            p.requires_grad = True
+
+    def _create_coordinate_features(self, H, W, B):
+        """Create normalized coordinate features for each spatial location"""
+        # Create normalized coordinates [0, 1]
+        y_coords = torch.linspace(0, 1, H, device=self._device, dtype=self._dtype)
+        x_coords = torch.linspace(0, 1, W, device=self._device, dtype=self._dtype)
+        
+        # Create meshgrid
+        y_grid, x_grid = torch.meshgrid(y_coords, x_coords, indexing='ij')
+        
+        # Stack coordinates: (H, W, 2)
+        coords = torch.stack([x_grid, y_grid], dim=-1)
+        
+        # Reshape to (H*W, 2) and expand for batch
+        coords = coords.reshape(H*W, 2).unsqueeze(0).expand(B, -1, -1)
+        
+        return coords
 
     '''
     API Functions
@@ -151,15 +188,24 @@ class Projector(nn.Module):
         # Fuse
         fused = self.norm_out(projected + skip_out)  # (B, N, D)
 
-        # Add spatial embeddings back after projection to restore spatial information
-        pos = (
-            self.row_embedding[:H].unsqueeze(1) +  # (H, 1, outdim)
-            self.col_embedding[:W].unsqueeze(0)    # (1, W, outdim)
-        )  # (H, W, outdim)
-        pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, outdim)
-
-        # add spatial features after projection
-        return fused + pos
+        # ENHANCED: Create two types of spatial embeddings
+        
+        # 1. Learned positional embeddings (reduced dimension)
+        learned_pos = (
+            self.row_embedding[:H].unsqueeze(1) +  # (H, 1, spatial_dim)
+            self.col_embedding[:W].unsqueeze(0)    # (1, W, spatial_dim)
+        )  # (H, W, spatial_dim)
+        learned_pos = learned_pos.reshape(H*W, self._spatial_dim).unsqueeze(0).expand(B, -1, -1)
+        
+        # 2. Coordinate embeddings (new!)
+        coords = self._create_coordinate_features(H, W, B)  # (B, H*W, 2)
+        coord_features = self.coord_mlp(coords)  # (B, H*W, coord_dim)
+        
+        # Concatenate both types of spatial information
+        spatial_features = torch.cat([learned_pos, coord_features], dim=-1)  # (B, H*W, outdim)
+        
+        # Add spatial features to fused features
+        return fused + spatial_features
     
     ''' Saving methods, here if needed '''
 
