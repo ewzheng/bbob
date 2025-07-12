@@ -215,7 +215,9 @@ class BBOBLoss:
                 # predictions on noise positions, which are untrained and therefore
                 # can look like random “noise classes”.
                 # ------------------------------------------------------------------
-                keep_mask = tgt_ids != self.ignore_index
+                # FIXED: Use shifted labels to match the shifted predictions
+                shifted_tgt_ids = tgt_ids[1:]  # Shift to match raw_pred_ids
+                keep_mask = shifted_tgt_ids != self.ignore_index
                 if keep_mask.sum() == 0:
                     # Degenerate row – fall back to raw predictions
                     pred_ids = raw_pred_ids
