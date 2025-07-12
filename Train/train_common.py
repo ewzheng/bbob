@@ -39,7 +39,7 @@ from Utils.class_id_map import init_from_labels, get_id
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
 DEFAULT_TARGET_SIZE = (256, 256)
-MAX_TARGET_TEXT_LENGTH = 256
+MAX_TARGET_TEXT_LENGTH = 526
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
 MAX_BATCH_SIZE = 4096
