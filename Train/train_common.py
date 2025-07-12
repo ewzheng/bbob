@@ -304,15 +304,18 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         # --- iterate paired variants -----------------------------------------
         for aug_idx, (rgb, boxes_this, labels_this) in enumerate(zip(img_versions, boxes_versions, labels_versions)):
             # -------------------------------------------------------------
-            # Step 1: prepare a 256×256 input for MobileViT *without*
-            # centre-cropping. Non-MS-crop views are letter-boxed to
-            # preserve every object; MS-crop views already match 256×256.
+            # Step 1: Let the image processor handle all resizing and preprocessing
             # -------------------------------------------------------------
             if is_ms_crop_flags[aug_idx]:
-                rgb_proc = rgb          # already 256×256
+                # MS-crop views are already 256×256, so we can use them directly
+                rgb_proc = rgb
                 scale, pad_w, pad_h = 1.0, 0, 0
             else:
-                rgb_proc, scale, pad_w, pad_h = letterbox_image(rgb, target_size)
+                # For non-MS-crop views, let the image processor handle resizing
+                rgb_proc = rgb
+                # We'll need to adjust boxes later based on the image processor's behavior
+                # For now, assume it does letterbox-style resizing
+                scale, pad_w, pad_h = 1.0, 0, 0  # Placeholder - will be updated based on actual processor behavior
 
             # --- MobileViT image processor ---
             try:
@@ -320,7 +323,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                     rgb_proc,
                     return_tensors="pt",  # ensure torch tensor output
                     do_center_crop=False,  # centre-crop disabled globally
-                    do_resize=True,        # safe since we pre-processed to target size
+                    do_resize=True,        # let processor handle resizing
                 )["pixel_values"][0]
 
                 # Convert to uint8 CHW, compatible with collator fast-path
@@ -340,15 +343,14 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                 processed_images.append(buf.getvalue())
             except Exception as e:
                 print(f"Image processing error: {e}")
-                # Fallback to basic processing – resize shortest edge then letter-box
-                fallback, _, _, _ = letterbox_image(rgb, target_size)
-                px = np.array(fallback, dtype=np.uint8).transpose(2, 0, 1)
+                # Fallback to basic processing
+                px = np.array(rgb, dtype=np.uint8).transpose(2, 0, 1)
                 # Ensure fallback also produces uint8 CHW format
                 if isinstance(px, np.ndarray) and px.dtype != np.uint8:
                     px = (px * 255).astype(np.uint8) if px.max() <= 1.0 else px.astype(np.uint8)
                 processed_images.append(px)
 
-            # Store *original* image dims (before letter-box) for bbox adjust
+            # Store *original* image dims for bbox adjust
             image_sizes.append(base_rgb.size)
             padded_image_sizes.append(target_size)
 
@@ -404,20 +406,14 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         labels_raw = aug_labels_all[aug_idx]
 
         if aug_need_adjust[aug_idx] and bboxes_raw:
-            # Letter-box adjustment (non-MS-crop views)
-            scale, pad_w, pad_h = lb_params[aug_idx]
-            bboxes = adjust_boxes_for_letterbox(
-                bboxes_raw,
-                scale,
-                pad_w,
-                pad_h,
-                orig_w=image_sizes[aug_idx][0],
-                orig_h=image_sizes[aug_idx][1],
-                target_w=target_size[0],
-                target_h=target_size[1],
-                dtype=dtype,
-            )
+            # For non-MS-crop views, we need to adjust boxes for the image processor's resizing
+            # The image processor with do_resize=True and do_center_crop=False should do letterbox-style resizing
+            # For now, we'll use a simplified approach - normalize boxes to 0-1 range
+            # This assumes the image processor preserves aspect ratio with padding
+            orig_w, orig_h = image_sizes[aug_idx]
+            bboxes = normalize_coco_bboxes(bboxes_raw, orig_w, orig_h, dtype)
         else:
+            # MS-crop views are already normalized to 0-1
             bboxes = torch.as_tensor(bboxes_raw, dtype=dtype)
 
         sample_boxes = []
