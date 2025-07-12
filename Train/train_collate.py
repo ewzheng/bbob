@@ -265,8 +265,8 @@ class BBOBCollator:  # noqa: N801
             cy = torch.rand(n_shifted, device=device) * (1.0 - h) + h/2
             
             # Convert back to (x, y, w, h)
-            new_x = max(MIN_COORD, cx - w/2)
-            new_y = max(MIN_COORD, cy - h/2)
+            new_x = torch.clamp(cx - w/2, min=MIN_COORD)
+            new_y = torch.clamp(cy - h/2, min=MIN_COORD)
             
             shifted_boxes = torch.stack([new_x, new_y, w, h], dim=1)
             all_noise_boxes.append(shifted_boxes)
