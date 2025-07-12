@@ -46,6 +46,7 @@ def train(
 
     model.unfreeze_model()
     model.unfreeze_projector()
+    model.freeze_vision_tower()
 
     cuda = torch.cuda.is_available()
     bf16_supported = cuda and torch.cuda.is_bf16_supported()

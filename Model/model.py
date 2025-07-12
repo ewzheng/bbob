@@ -151,6 +151,14 @@ class BBOB(PreTrainedModel):
         self.projector.train()
         self.projector.unfreeze()
 
+    def freeze_vision_tower(self):
+        """Freeze vision tower parameters."""
+        self.vision_tower.freeze()
+
+    def unfreeze_vision_tower(self):
+        """Unfreeze vision tower parameters."""
+        self.vision_tower.unfreeze()
+
     def freeze_model(self):
         """Freeze language model parameters."""
         self.language_model.eval()

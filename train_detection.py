@@ -1,6 +1,5 @@
 ''' 
 File: train_vision.py
-Author: Auto-generated
 Description: End-to-end training (vision tower + projector + language model) using the composite detection + language modelling loss.  
 Usage: python train_vision.py -m <checkpoint_with_projector> -d <dataset_name> -i <instruction_text> [other args]
 '''
@@ -46,6 +45,7 @@ def train(
 
     model.unfreeze_model()
     model.unfreeze_projector()
+    model.freeze_vision_tower()
 
     cuda = torch.cuda.is_available()
     bf16_supported = cuda and torch.cuda.is_bf16_supported()

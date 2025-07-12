@@ -40,9 +40,13 @@ class VisionTower(nn.Module):
                 c = self.model(dummy, output_hidden_states=False).last_hidden_state.shape[1]
                 self._hidden_size = c
 
-        # vision backbone is frozen
+    def freeze(self):
         for param in self.model.parameters():
             param.requires_grad = False
+    
+    def unfreeze(self):
+        for param in self.model.parameters():
+            param.requires_grad = True  
 
     def process_image(self, images):
         '''

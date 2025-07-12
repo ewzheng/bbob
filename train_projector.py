@@ -56,7 +56,8 @@ def train(
     '''
 
     model.freeze_model()                              
-    model.unfreeze_projector()                  
+    model.unfreeze_projector()    
+    model.freeze_vision_tower()              
 
     # config
     cuda = torch.cuda.is_available()
