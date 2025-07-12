@@ -118,7 +118,7 @@ def train(
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
-    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions()
+    compute_metrics, preprocess_logits_for_metrics = create_metrics_functions(tokenizer=model.get_tokenizer())
 
     trainer = Trainer(
         model          = model,
