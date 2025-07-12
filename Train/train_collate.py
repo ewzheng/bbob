@@ -632,7 +632,13 @@ class BBOBCollator:  # noqa: N801
                         return_tensors="pt",
                         do_center_crop=False,
                         do_resize=True,
+                        size=TARGET_SIZE,  # Explicitly specify target size
                     )["pixel_values"][0]
+                    
+                    # Debug: Check the actual output size
+                    if self.logger and pv.shape[-2:] != TARGET_SIZE[::-1]:
+                        self.logger.warning(f"Image processor output size {pv.shape[-2:]} != expected {TARGET_SIZE[::-1]}")
+                    
                     processed.append(pv.to(device))
                 except Exception as e:
                     # Log the error to understand why image processor is failing
@@ -642,6 +648,12 @@ class BBOBCollator:  # noqa: N801
                     t = pil_to_tensor(img).float().div_(255.0).to(device)
                     processed.append(t)
 
+            # Debug: Check tensor shapes before stacking
+            if self.logger and len(processed) > 1:
+                shapes = [p.shape for p in processed]
+                if len(set(shapes)) > 1:
+                    self.logger.warning(f"Different tensor shapes before stacking: {shapes}")
+            
             pixel_values = torch.stack(processed, 0)
         else:
             # -------------------------------------------------------------
