@@ -16,7 +16,7 @@ TARGET_SIZE = (256, 256)
 # We first apply RandomResizedCrop (scale jitter + slight AR jitter) and then
 # force the final window to stay near a randomly chosen GT box by means of
 # RandomCropNearBBox.  This reproduces Pix2Seq-style MS crop but avoids the
-# “empty GT” problem.
+# "empty GT" problem.
 
 _ms_crop_aug = A.Compose(
     [
@@ -29,9 +29,7 @@ _ms_crop_aug = A.Compose(
         ),
         # make sure at least one box remains visible
         A.RandomCropNearBBox(
-            max_part_shift=(0.2, 0.2),
-            crop_height=TARGET_SIZE[0],
-            crop_width =TARGET_SIZE[1],
+            max_part_shift=0.2,
             p=1.0,
         ),
     ],
@@ -77,9 +75,7 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
                     p=1.0,
                 ),
                 A.RandomCropNearBBox(
-                    max_part_shift=(0.2, 0.2),
-                    crop_height=TARGET_SIZE[0],
-                    crop_width =TARGET_SIZE[1],
+                    max_part_shift=0.2,
                     p=1.0,
                 ),
             ],
