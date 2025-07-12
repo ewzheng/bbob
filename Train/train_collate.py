@@ -21,6 +21,7 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 from torchvision.transforms.functional import pil_to_tensor
+from PIL import Image
 from .loss_helpers import TAG_OPEN, TAG_CLOSE
 from .train_common import format_coordinate
 import random
@@ -606,48 +607,54 @@ class BBOBCollator:  # noqa: N801
         if on_the_fly:
             processed = []
             for img in (item[img_key] for item in batch):
-                try:
-                    pv = self.processor(img, return_tensors="pt", do_center_crop=False)["pixel_values"][0]  # (3,256,256) float32 0-1
-                    processed.append(pv.to(device))  # Ensure on correct device
-                    continue  # success – skip manual fallback
-                except Exception:
-                    # Fallback to legacy manual branch for rare failures
-                    pass
-
-                # ---------------- manual fallback -------------------
+                # Convert to PIL Image first (same as train_common.py)
                 if isinstance(img, torch.Tensor):
-                    t = img.to(dtype=torch.float32, device=device).div_(255.0)
+                    # Convert tensor to PIL for consistent processing
+                    if img.dim() == 3 and img.shape[0] in (1, 3):
+                        img = img.permute(1, 2, 0)  # CHW -> HWC
+                    if img.dtype != torch.uint8:
+                        img = (img * 255).clamp(0, 255).to(torch.uint8)
+                    img = Image.fromarray(img.cpu().numpy())
                 elif isinstance(img, np.ndarray):
-                    t = torch.as_tensor(img, dtype=torch.float32, device=device).div_(255.0)
+                    img = Image.fromarray(img)
                 elif isinstance(img, list):
-                    t = torch.as_tensor(np.array(img, dtype=np.uint8), dtype=torch.float32, device=device).div_(255.0)
-                else:
-                    t = pil_to_tensor(img).float().div_(255.0).to(device)
+                    img = Image.fromarray(np.array(img, dtype=np.uint8))
+                # else: img is already PIL Image
 
-                # channel / shape normalisation (same as old code)
-                if t.dim() == 2:
-                    t = t.unsqueeze(0).expand(3, -1, -1)
-                elif t.dim() == 3 and t.shape[0] not in (1, 3):
-                    t = t.permute(2, 0, 1)
-                    if t.shape[0] == 1:
-                        t = t.expand(3, -1, -1)
-                elif t.dim() != 3:
-                    raise RuntimeError(f"Unsupported image tensor dim {t.dim()}")
+                # Convert to RGB if needed
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
 
-                _, H, W = t.shape
-                if (H, W) != TARGET_SIZE:
-                    scale = min(TARGET_SIZE[1] / H, TARGET_SIZE[0] / W)
-                    nh = max(1, int(H * scale))
-                    nw = max(1, int(W * scale))
-                    t = F.interpolate(t.unsqueeze(0), size=(nh, nw), mode="bilinear", align_corners=False)[0]
+                # Apply letterbox resize (same as train_common.letterbox_image)
+                iw, ih = img.size
+                w, h = TARGET_SIZE
+                scale = min(w / iw, h / ih)
+                nw = max(1, int(iw * scale))
+                nh = max(1, int(ih * scale))
+                img_resized = img.resize((nw, nh), Image.BICUBIC)
+                
+                # Create padded canvas
+                rgb_proc = Image.new('RGB', TARGET_SIZE, (128, 128, 128))
+                pad_w = (w - nw) // 2
+                pad_h = (h - nh) // 2
+                rgb_proc.paste(img_resized, (pad_w, pad_h))
 
-                    canvas = 0.5 * torch.ones(3, *TARGET_SIZE, device=device)  # FIXED: specify device
-                    dh = (TARGET_SIZE[1] - nh) // 2
-                    dw = (TARGET_SIZE[0] - nw) // 2
-                    canvas[:, dh : dh + nh, dw : dw + nw] = t
-                    t = canvas
-
-                processed.append(t)
+                # Now call image processor on the preprocessed image (same as train_common.py)
+                try:
+                    pv = self.processor(
+                        rgb_proc,
+                        return_tensors="pt",  # ensure torch tensor output
+                        do_center_crop=False,  # centre-crop disabled globally
+                        do_resize=True,        # safe since we pre-processed to target size
+                    )["pixel_values"][0]
+                    processed.append(pv.to(device))  # Ensure on correct device
+                except Exception as e:
+                    # Log the error to understand why image processor is failing
+                    if self.logger:
+                        self.logger.warning(f"Image processor failed: {e}. Image type: {type(rgb_proc)}, size: {rgb_proc.size}")
+                    # Fallback to manual processing
+                    t = pil_to_tensor(rgb_proc).float().div_(255.0).to(device)
+                    processed.append(t)
 
             pixel_values = torch.stack(processed, 0)
         else:
