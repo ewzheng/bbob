@@ -296,9 +296,16 @@ def _recover_noise_label(pred_ids: torch.Tensor, logp_tokens: torch.Tensor, star
         # top-k search for candidate replacement
         top_val, top_idx = torch.topk(logp_row, k=32)
         chosen_id = tok_id  # default
-        chosen_logp = logp_row[tok_id]
+        # CRITICAL: Check if tok_id is valid before accessing logp_row
+        if tok_id >= 0 and tok_id < logp_row.size(0):
+            chosen_logp = logp_row[tok_id]
+        else:
+            # Invalid token ID, use a safe default
+            chosen_logp = logp_row[0]  # Use first token as fallback
+            chosen_id = 0
+        
         for cand_id in top_idx.tolist():
-            if cand_id in banned_ids:
+            if cand_id in banned_ids or cand_id < 0 or cand_id >= logp_row.size(0):
                 continue
             cand_txt = tokenizer.convert_ids_to_tokens(cand_id)
             stripped = cand_txt.strip().replace(".", "", 1)
@@ -313,7 +320,11 @@ def _recover_noise_label(pred_ids: torch.Tensor, logp_tokens: torch.Tensor, star
         k += 1
 
     if not label_tokens:
-        return "noise", float(torch.exp(logp_tokens[start_idx][noise_id]) if noise_id != -1 else 0.0)
+        # CRITICAL: Check if noise_id is valid before accessing logp_tokens
+        if noise_id >= 0 and noise_id < logp_tokens.size(-1):
+            return "noise", float(torch.exp(logp_tokens[start_idx][noise_id]))
+        else:
+            return "noise", 0.0
 
     label = tokenizer.decode(label_tokens, skip_special_tokens=True).strip().lower()
     score = float(torch.exp(torch.stack(label_logps).mean()).clamp(0.0, 1.0))

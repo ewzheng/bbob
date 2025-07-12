@@ -417,13 +417,7 @@ class BBOBCollator:  # noqa: N801
         return noise_boxes_tensor, noise_labels
 
     def _build_and_process_sequence(self, boxes, labels, noise_mask, max_length, _unused=None):
-        """Fast fragment→token conversion with perfect Pix2Seq alignment.
-
-        • Tokenise *all* fragments in one batch call (big HF speed-up).
-        • Prepend a space token to every fragment except the first (matches
-          " ".join()).
-        • Build input/target lists in pure Python, then convert to tensors.
-        """
+        """Fixed fragment→token conversion with proper input/target alignment."""
         if not labels:
             empty = torch.empty(0, dtype=torch.long, device=boxes.device)
             return empty, empty
@@ -438,43 +432,40 @@ class BBOBCollator:  # noqa: N801
 
         # ---- 2. Tokenise all fragments in one batch ----------------------
         fragments_pref = [fragments[0]] + [" " + f for f in fragments[1:]]
-        tok_lists = self.tokenizer(fragments_pref, add_special_tokens=False).input_ids  # list[list[int]]
+        tok_lists = self.tokenizer(fragments_pref, add_special_tokens=False).input_ids
 
         # ---- 3. Build flat input / target lists --------------------------
         inp_flat: list[int] = []
         tgt_flat: list[int] = []
+        
         for toks, is_noise in zip(tok_lists, is_noise_list):
+            # FIXED: Input sequence always gets the full tokens
             inp_flat.extend(toks)
 
-            # --------------------------------------------------------------
-            # Pix2Seq noise handling:
-            #   – Supervise the *class* token(s) of a noise fragment so the
-            #     decoder learns to identify a background / "noise" object.
-            #   – Ignore (mask) the coordinate tokens so the loss does not
-            #     force any particular numbers for the fake box.
-            # --------------------------------------------------------------
+            # Target sequence handles noise masking
             if not is_noise:
                 # Regular GT fragment → keep full supervision
                 tgt_flat.extend(toks)
-                continue
-
-            # --- noise fragment ------------------------------------------
-            # Detect where the coordinate list begins.  It always starts at
-            # the first token that contains a '[' character.
-            tok_texts = self.tokenizer.convert_ids_to_tokens(toks)
-            coord_start = next((idx for idx, txt in enumerate(tok_texts) if "[" in txt), len(toks))
-
-            # Copy label-and-punctuation tokens up to the '[' (excluded)
-            tgt_flat.extend(toks[:coord_start])
-            # Mask the coordinate tokens so they do not contribute to loss
-            tgt_flat.extend([-100] * (len(toks) - coord_start))
+            else:
+                # Noise fragment → mask coordinate tokens but keep label tokens
+                tok_texts = self.tokenizer.convert_ids_to_tokens(toks)
+                coord_start = next((idx for idx, txt in enumerate(tok_texts) if "[" in txt), len(toks))
+                
+                # Keep label tokens, mask coordinate tokens
+                tgt_flat.extend(toks[:coord_start])
+                tgt_flat.extend([-100] * (len(toks) - coord_start))
 
         # ---- 4. Length truncation safety ---------------------------------
         if len(inp_flat) > max_length:
             inp_flat = inp_flat[:max_length]
             tgt_flat = tgt_flat[:max_length]
 
-        # ---- 5. Convert to tensors ---------------------------------------
+        # ---- 5. CRITICAL: Ensure sequences are exactly the same length ----
+        min_len = min(len(inp_flat), len(tgt_flat))
+        inp_flat = inp_flat[:min_len]
+        tgt_flat = tgt_flat[:min_len]
+
+        # ---- 6. Convert to tensors ---------------------------------------
         input_ids = torch.tensor(inp_flat, dtype=torch.long, device=boxes.device)
         tgt_ids   = torch.tensor(tgt_flat, dtype=torch.long, device=boxes.device)
 
