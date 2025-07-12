@@ -7,6 +7,7 @@ Description: This script contains the projector class.
 import torch
 import torch.nn as nn
 from safetensors.torch import save_file, load_file
+import torch.nn.functional as F
 
 class Projector(nn.Module):
     '''
@@ -23,7 +24,7 @@ class Projector(nn.Module):
     returns: instance ready for `.forward()`.
     '''
 
-    def __init__(self, indim, outdim, dtype, device):
+    def __init__(self, indim, outdim, dtype, device, output_tokens=64):
         '''
         ctor.
 
@@ -32,6 +33,7 @@ class Projector(nn.Module):
             - outdim (int): see class doc.
             - dtype (torch.dtype): torch dtype.
             - device (str | torch.device): allocation device.
+            - output_tokens (int): number of output tokens (default 64)
         '''
         super().__init__()
         # two layer MLP: visiondim > textdim, GELU activation
@@ -50,7 +52,11 @@ class Projector(nn.Module):
         # final normalisation applied *after* deep+skip fusion
         self.norm_out = nn.LayerNorm(outdim, eps=1e-5, dtype=dtype)
 
-        # learnable row and column embeddings
+        # NEW: Flexible token pooling - automatically handles any input token count
+        self.output_tokens = output_tokens
+        self.output_spatial = (int(output_tokens ** 0.5), int(output_tokens ** 0.5))
+
+        # learnable row and column embeddings (for output spatial size)
         max_h = 32  # maximum grid height supported
         max_w = 32  # maximum grid width supported
         self.row_embedding = nn.Parameter(torch.empty(max_h, outdim, dtype=dtype, device=device))
@@ -130,7 +136,7 @@ class Projector(nn.Module):
         parameters:
             - vision_in (torch.Tensor): shape `(b, c, h, w)`.
 
-        returns: torch.tensor shape `(b, h*w, outdim)`.
+        returns: torch.tensor shape `(b, output_tokens, outdim)`.
         '''
 
         if vision_in is None: return None
@@ -138,11 +144,35 @@ class Projector(nn.Module):
         # vision_in: (B, C, H, W)
         B, C, H, W = vision_in.shape
 
-        if H > self.row_embedding.size(0) or W > self.col_embedding.size(0):
-            raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self.row_embedding.size(0), self.col_embedding.size(0))}")
-
-        # Flatten for projection: (B, C, H, W) > (B, H*W, C)
-        vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
+        # NEW: Flexible token pooling - automatically handles any input token count
+        input_tokens = H * W
+        if input_tokens != self.output_tokens:
+            # Reshape to spatial format for pooling
+            # vision_in: (B, C, H, W) -> (B, C, H*W) -> (B, H*W, C)
+            vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, input_tokens, C)
+            
+            # Calculate input spatial dimensions
+            input_h = int(input_tokens ** 0.5)
+            input_w = input_h
+            
+            # Reshape to spatial format for pooling: (B, input_tokens, C) -> (B, C, input_h, input_w)
+            vision_in = vision_in.transpose(1, 2).reshape(B, C, input_h, input_w)
+            
+            # Pool to output spatial size
+            vision_in = F.adaptive_avg_pool2d(vision_in, self.output_spatial)  # (B, C, output_h, output_w)
+            
+            # Flatten back to tokens: (B, C, output_h, output_w) -> (B, output_tokens, C)
+            vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, output_tokens, C)
+            
+            # Update H, W for positional embeddings
+            H, W = self.output_spatial
+        else:
+            # Original behavior for matching token counts
+            if H > self.row_embedding.size(0) or W > self.col_embedding.size(0):
+                raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self.row_embedding.size(0), self.col_embedding.size(0))}")
+            
+            # Flatten for projection: (B, C, H, W) > (B, H*W, C)
+            vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
 
         # Project to text space first (deep path)
         projected = self.net(vision_in)              # (B, N, D)
@@ -158,7 +188,7 @@ class Projector(nn.Module):
             self.row_embedding[:H].unsqueeze(1) +  # (H, 1, outdim)
             self.col_embedding[:W].unsqueeze(0)    # (1, W, outdim)
         )  # (H, W, outdim)
-        pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, outdim)
+        pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, D)
 
         # add spatial features after projection
         return fused + pos
@@ -166,7 +196,7 @@ class Projector(nn.Module):
     ''' Saving methods, here if needed '''
 
     @classmethod
-    def from_pretrained(cls, model_path, indim, outdim, dtype, device):
+    def from_pretrained(cls, model_path, indim, outdim, dtype, device, output_tokens=64):
         """Load projector weights from a *.safetensors* or legacy *.pt* file.
 
         Parameters
@@ -178,9 +208,11 @@ class Projector(nn.Module):
         dtype : torch.dtype
         device : str | torch.device
             Target device for the loaded projector.
+        output_tokens : int
+            Number of output tokens (default 64).
         """
 
-        projector = cls(indim, outdim, dtype, device)
+        projector = cls(indim, outdim, dtype, device, output_tokens=output_tokens)
 
         try:
             if model_path.endswith(".safetensors"):
