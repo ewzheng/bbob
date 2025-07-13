@@ -461,9 +461,23 @@ class BBOBCollator:  # noqa: N801
                 tok_texts = self.tokenizer.convert_ids_to_tokens(toks)
                 coord_start = next((idx for idx, txt in enumerate(tok_texts) if "[" in txt), len(toks))
                 
-                # Keep label tokens, mask coordinate tokens
-                tgt_flat.extend(toks[:coord_start])
-                tgt_flat.extend([-100] * (len(toks) - coord_start))
+                # Keep label tokens, mask coordinate tokens *but supervise the closing tag*.
+                # We therefore mask everything from the coordinate start up to (but not including)
+                # the last token, assuming that last token is the dedicated closing tag.
+
+                tgt_flat.extend(toks[:coord_start])  # <|bbob|>noise:
+
+                if len(toks) > coord_start:
+                    closing_tok = toks[-1]
+                    # Safety: Only treat the final token as a closing tag if it matches the vocab ID.
+                    if closing_tok == self.close_id:
+                        # Mask coordinate/bracket tokens between coord_start and last-1
+                        mask_len = len(toks) - coord_start - 1
+                        tgt_flat.extend([-100] * mask_len)
+                        tgt_flat.append(closing_tok)  # supervise </|bbob|>
+                    else:
+                        # Fallback: treat all tokens after coord_start as masked (rare)
+                        tgt_flat.extend([-100] * (len(toks) - coord_start))
 
         # ---- 4. Length truncation safety ---------------------------------
         # Use fragment-boundary aware truncation so we do not cut off the
