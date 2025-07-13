@@ -236,9 +236,9 @@ class BBOBLoss:
                 else:
                     pred_ids = raw_pred_ids[keep_mask]
                 
-                # Also get input sequence to see noise interleaving
+                # Also get input sequence to see noise interleaving (same row)
                 if input_ids is not None:
-                    actual_input_ids = input_ids[0].to(device="cpu")  # Actual input with noise
+                    actual_input_ids = input_ids[row_idx].to(device="cpu")  # Actual input with noise
                     # Filter out -100 tokens before decoding to avoid overflow error
                     clean_input_ids = actual_input_ids[actual_input_ids != self.ignore_index]
                     input_str = self.tokenizer.decode(clean_input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True)
@@ -246,9 +246,9 @@ class BBOBLoss:
                     input_str = "[input_ids not available]"
                 
                 pred_str, tgt_str = decode_pred_gt(pred_ids, tgt_ids, self.tokenizer)
-                
-                # NEW: Extract and log actual GT objects for monitoring
-                gt_objects = self._extract_gt_objects(actual_input_ids, labels[0].to(device="cpu"))
+
+                # NEW: Extract and log actual GT objects for monitoring (same row)
+                gt_objects = self._extract_gt_objects(actual_input_ids, labels[row_idx].to(device="cpu"))
                 
                 self.logger.info({"sample_pred": pred_str, "sample_gt": tgt_str, "sample_input": input_str})
                 self.logger.info({"gt_objects": gt_objects})  # Log parsed GT objects

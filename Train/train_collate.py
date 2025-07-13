@@ -466,9 +466,17 @@ class BBOBCollator:  # noqa: N801
                 tgt_flat.extend([-100] * (len(toks) - coord_start))
 
         # ---- 4. Length truncation safety ---------------------------------
-        if len(inp_flat) > max_length:
-            inp_flat = inp_flat[:max_length]
-            tgt_flat = tgt_flat[:max_length]
+        # Use fragment-boundary aware truncation so we do not cut off the
+        # <|bbob|> … </|bbob|> markers and accidentally drop all GT tokens.
+        if max_length is not None and max_length > 0 and len(inp_flat) > max_length:
+            inp_tensor = torch.tensor(inp_flat, dtype=torch.long)
+            tgt_tensor = torch.tensor(tgt_flat, dtype=torch.long)
+
+            inp_trunc = self._truncate_at_fragment_boundary(inp_tensor, max_length)
+            tgt_trunc = self._truncate_at_fragment_boundary(tgt_tensor, max_length)
+
+            inp_flat = inp_trunc.tolist()
+            tgt_flat = tgt_trunc.tolist()
 
         # ---- 5. CRITICAL: Ensure sequences are exactly the same length ----
         min_len = min(len(inp_flat), len(tgt_flat))
