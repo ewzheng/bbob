@@ -346,7 +346,25 @@ def _object_scores(
 
     # 1. Precompute log-prob of each sampled token
     logp_tokens = logits.log_softmax(dim=-1)  # (S,V)
-    token_logp = logp_tokens.gather(1, pred_ids.unsqueeze(1)).squeeze(1)  # (S,)
+    # ------------------------------------------------------------------
+    # NOTE: ``pred_ids`` may contain *ignore_index* (usually ``-100``)
+    # values introduced by loss masking / padding.  Using such negative
+    # indices with ``gather`` raises "index out of bounds" errors.
+    # We therefore replace ignore IDs with a safe token ID (pad token if
+    # available else 0) *before* gathering, then zero-out their log-prob so
+    # they do not contribute to any downstream score computations.
+    # ------------------------------------------------------------------
+    safe_pred_ids = pred_ids.clone()
+    if (safe_pred_ids == ignore_index).any():
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        safe_pred_ids[safe_pred_ids == ignore_index] = pad_id
+
+    token_logp = logp_tokens.gather(1, safe_pred_ids.unsqueeze(1)).squeeze(1)  # (S,)
+
+    # For completeness, ensure ignore positions contribute zero probability.
+    # This keeps tensor shapes unchanged while removing their influence.
+    if (pred_ids == ignore_index).any():
+        token_logp[pred_ids == ignore_index] = 0.0
 
     # 2. Walk through the sequence to find fragments
     bb_open_id = tokenizer.convert_tokens_to_ids(TAG_OPEN)
