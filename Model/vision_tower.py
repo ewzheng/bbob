@@ -36,7 +36,7 @@ class VisionTower(nn.Module):
         else:
             # last resort: run a dummy forward pass to infer channel dim
             with torch.no_grad():
-                img_size = getattr(cfg, "image_size", 256)
+                img_size = getattr(cfg, "image_size", 512)
                 dummy = torch.zeros(1, 3, img_size, img_size, device=self._device, dtype=self._dtype)
                 c = self.model(dummy, output_hidden_states=False).last_hidden_state.shape[1]
                 self._hidden_size = c

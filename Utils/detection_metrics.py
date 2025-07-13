@@ -359,6 +359,12 @@ def _object_scores(
         pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         safe_pred_ids[safe_pred_ids == ignore_index] = pad_id
 
+    # Final safety: clamp all indices into valid [0, V-1] range so gather can never
+    # raise an out-of-bounds error even if some other negative / overflow value
+    # slipped through (e.g. data corruption or unexpected mask value).
+    vocab_size = logp_tokens.size(1)
+    safe_pred_ids = safe_pred_ids.clamp(min=0, max=vocab_size - 1)
+
     token_logp = logp_tokens.gather(1, safe_pred_ids.unsqueeze(1)).squeeze(1)  # (S,)
 
     # For completeness, ensure ignore positions contribute zero probability.

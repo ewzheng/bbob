@@ -52,7 +52,7 @@ class Projector(nn.Module):
         # final normalisation applied *after* deep+skip fusion
         self.norm_out = nn.LayerNorm(outdim, eps=1e-5, dtype=dtype)
 
-        # NEW: Flexible token pooling - automatically handles any input token count
+        # flexible token pooling - automatically handles any input token count
         self.output_tokens = output_tokens
         self.output_spatial = (int(output_tokens ** 0.5), int(output_tokens ** 0.5))
 
