@@ -281,8 +281,26 @@ class BBOBLoss:
         """
         import re
 
+        # --------------------------------------------------------------
+        # SAFETY: Collator prepends a *single* image placeholder token to
+        # `input_ids` but pads *VIS_TOKENS* (64) positions with -100 in
+        # `labels` to ignore the vision embeddings.  This means
+        # `labels_row` is typically 63 tokens longer than `input_ids_row`.
+        # Instead of aborting, we realign by trimming the *leading* portion
+        # of the longer tensor so both have equal length and tokens remain
+        # in sync from the *end* (where all detection fragments live).
+        # --------------------------------------------------------------
         if input_ids_row.numel() != labels_row.numel():
-            return []  # corrupt row – bail out
+            diff = labels_row.numel() - input_ids_row.numel()
+            if diff > 0:
+                # labels is longer → drop the extra *leading* tokens
+                labels_row = labels_row[diff:]
+            elif diff < 0:
+                # input_ids is longer (should not happen but handle) → trim
+                input_ids_row = input_ids_row[-diff:]
+            # If still mismatched, bail out to avoid mis-alignment
+            if input_ids_row.numel() != labels_row.numel():
+                return []
 
         # Keep only positions where label != ignore_index → these belong to GT
         kept = [int(t) for t, lab in zip(input_ids_row.tolist(), labels_row.tolist()) if lab != self.ignore_index]
