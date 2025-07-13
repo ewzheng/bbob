@@ -118,6 +118,58 @@ class BBOBCollator:  # noqa: N801
         """Cached coordinate formatting method."""
         return self._fmt_coord_cached(float(v))  # Ensure hashable input for cache
 
+    # ------------------------------------------------------------------
+    # Helper: shuffle GT and noise fragments independently, then concat.
+    # ------------------------------------------------------------------
+    def _merge_shuffle_gt_noise(
+        self,
+        gt_boxes: torch.Tensor,
+        gt_labels: list[str],
+        noise_boxes: torch.Tensor,
+        noise_labels: list[str],
+    ) -> tuple[torch.Tensor, list[str], torch.Tensor | None]:
+        """Return shuffled GT + noise tensors and a Boolean noise mask.
+
+        GT and noise fragments are shuffled *within* their groups.  The
+        concatenated output always places GT first, noise afterwards so the
+        decoder still emits noise fragments last (Pix2Seq convention).
+        """
+
+        # PATCH 1: determine device robustly even when both tensors are empty
+        if gt_boxes.numel() > 0:
+            device = gt_boxes.device
+        elif noise_boxes.numel() > 0:
+            device = noise_boxes.device
+        else:
+            device = torch.device("cpu")  # safe fallback when both inputs empty
+
+        # shuffle GT
+        if gt_boxes.numel() > 0:
+            perm_gt = torch.randperm(gt_boxes.size(0), device=device)
+            gt_boxes = gt_boxes[perm_gt]
+            gt_labels = [gt_labels[idx] for idx in perm_gt.tolist()]
+
+        # shuffle noise
+        if noise_boxes.numel() > 0:
+            perm_noise = torch.randperm(noise_boxes.size(0), device=device)
+            noise_boxes = noise_boxes[perm_noise]
+            noise_labels = [noise_labels[idx] for idx in perm_noise.tolist()]
+
+        if gt_boxes.numel() == 0 and noise_boxes.numel() == 0:
+            return torch.empty((0, 4), device=device), [], None
+
+        boxes_out = torch.cat([gt_boxes, noise_boxes], dim=0)
+        labels_out = gt_labels + noise_labels
+
+        # noise mask: False for GT positions, True for noise
+        noise_mask = torch.tensor(
+            [False] * gt_boxes.size(0) + [True] * noise_boxes.size(0),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        return boxes_out, labels_out, noise_mask
+
     # ---------------- main callable ------------------------------------
 
     def __call__(self, batch):
@@ -710,7 +762,15 @@ class BBOBCollator:  # noqa: N801
         all_bboxes = []
         
         for i, item in enumerate(batch):
-            if "target_boxes" in item and not self.is_eval:
+            # PATCH 5: early skip – run bbox logic only if non-empty GT boxes exist
+            target_boxes_present = (
+                "target_boxes" in item
+                and not self.is_eval
+                and isinstance(item["target_boxes"], (list, np.ndarray, torch.Tensor))
+                and len(item["target_boxes"]) > 0
+            )
+
+            if target_boxes_present:
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 if bx_raw.numel() > 0:  # Only process non-empty bbox lists
                     all_bboxes.append(bx_raw)
@@ -736,7 +796,15 @@ class BBOBCollator:  # noqa: N801
         batch_noise_counts = []
 
         for i, item in enumerate(batch):
-            if "target_boxes" in item and not self.is_eval:
+            # PATCH 5: early skip – run bbox logic only if non-empty GT boxes exist
+            target_boxes_present = (
+                "target_boxes" in item
+                and not self.is_eval
+                and isinstance(item["target_boxes"], (list, np.ndarray, torch.Tensor))
+                and len(item["target_boxes"]) > 0
+            )
+
+            if target_boxes_present:
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 label_strs = item.get("target_label_strs", ["obj"] * bx_raw.size(0))[: bx_raw.size(0)]
                 
@@ -747,7 +815,9 @@ class BBOBCollator:  # noqa: N801
                         noise_ratio = random.uniform(*self.noise_ratio_range)
                         num_noise = max(1, min(self.max_noise_boxes, int(num_gt_boxes * noise_ratio)))
                     else:
-                        num_noise = random.randint(1, min(2, self.max_noise_boxes))
+                        # PATCH 2: guarantee *some* noise boxes even when there are
+                        # no GT boxes – use 25% of max_noise_boxes as minimum.
+                        num_noise = max(1, int(self.max_noise_boxes * 0.25))
                 else:
                     num_noise = 0
                 
@@ -759,8 +829,15 @@ class BBOBCollator:  # noqa: N801
                 batch_label_strs.append([])
                 batch_noise_counts.append(0)
 
-        # OPTIMIZED: Generate noise boxes for the entire batch at once
-        batch_noise_results = self._generate_noise_boxes_batch(batch_gt_boxes, batch_label_strs, batch_noise_counts)
+        # PATCH 3: Skip heavy noise generation during evaluation
+        if not self.is_eval:
+            batch_noise_results = self._generate_noise_boxes_batch(
+                batch_gt_boxes, batch_label_strs, batch_noise_counts
+            )
+        else:
+            batch_noise_results = [
+                (torch.empty((0, 4), device=device), []) for _ in batch
+            ]
 
         # OPTIMIZED: Pre-allocate output lists with known batch size
         batch_size = len(batch)
@@ -851,49 +928,34 @@ class BBOBCollator:  # noqa: N801
                     
                     # OPTIMIZED: Use pre-computed noise from vectorized batch generation
                     noise_boxes, noise_labels = batch_noise_results[i]
+
+                    # Fallback: if vectorised generator unexpectedly returned no boxes
+                    # for this sample although a positive noise count was requested,
+                    # regenerate noise locally to guarantee training supervision.
+                    if noise_boxes.numel() == 0 and batch_noise_counts[i] > 0:
+                        # PATCH 4: emit warning so we can trace rare failures
+                        if self.logger:
+                            self.logger.warning(
+                                f"Noise generation failed for sample {i}, count={batch_noise_counts[i]} – regenerating locally"
+                            )
+
+                        noise_boxes, noise_labels = self._generate_noise_boxes(
+                            batch_noise_counts[i], label_strs, bx
+                        )
                     if noise_boxes.numel() > 0:
-                        # Combine GT and noise boxes first
-                        combined_boxes  = torch.cat([bx, noise_boxes], dim=0)
-                        combined_labels = label_strs + noise_labels
-                        noise_boundary  = len(label_strs)
+                        # Combine, shuffle, build mask in one step
+                        combined_boxes, combined_labels, noise_mask = self._merge_shuffle_gt_noise(
+                            bx, label_strs, noise_boxes, noise_labels
+                        )
+
+                        # Build fragments and tokenize efficiently
+                        input_ids_det, tgt_ids = self._build_and_process_sequence(
+                            combined_boxes, combined_labels, noise_mask, remaining_space, None
+                        )
                     else:
-                        combined_boxes  = bx
-                        combined_labels = label_strs
-                        noise_boundary  = len(combined_labels)  # no noise – boundary at end
-
-                    # ----------------------------------------------------
-                    # Pix2Seq *tail-noise* ordering:
-                    #   1. Shuffle **only** the GT fragments (0‥noise_boundary-1).
-                    #   2. Append all noise fragments afterwards so they are
-                    #      generated last.  We may optionally shuffle *within*
-                    #      the noise tail, but the block itself stays at the
-                    #      end of the sequence.
-                    # ----------------------------------------------------
-                    if combined_boxes.numel() > 0:
-                        # --- 1. Permute GT part --------------------------------
-                        gt_perm = torch.randperm(noise_boundary, device=combined_boxes.device)
-
-                        # --- 2. Keep noise indices contiguous after GT ---------
-                        if len(combined_labels) > noise_boundary:
-                            noise_indices = torch.arange(noise_boundary, len(combined_labels), device=combined_boxes.device)
-                            # Optionally shuffle inside tail to avoid fixed order
-                            # noise_indices = noise_indices[torch.randperm(noise_indices.size(0), device=combined_boxes.device)]
-                            new_order = torch.cat([gt_perm, noise_indices], dim=0)
-                        else:
-                            new_order = gt_perm  # no noise present
-
-                        combined_boxes  = combined_boxes[new_order]
-                        combined_labels = [combined_labels[idx] for idx in new_order.tolist()]
-
-                        # Boolean mask: True for positions belonging to noise tail
-                        noise_mask = new_order >= noise_boundary
-                    else:
-                        noise_mask = None
-
-                    # Build fragments and tokenize efficiently
-                    input_ids_det, tgt_ids = self._build_and_process_sequence(
-                        combined_boxes, combined_labels, noise_mask, remaining_space, None
-                    )
+                        # If noise generation failed, use empty tensors
+                        input_ids_det = empty_tensor.clone()
+                        tgt_ids = empty_tensor.clone()
                 else:
                     # Empty bboxes case
                     input_ids_det = empty_tensor.clone()
