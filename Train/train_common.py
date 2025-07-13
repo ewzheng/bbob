@@ -405,28 +405,20 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
         bboxes_raw = aug_boxes_all[aug_idx]
         labels_raw = aug_labels_all[aug_idx]
 
-        if aug_need_adjust[aug_idx] and bboxes_raw:
-            # For non-MS-crop views, we need to adjust boxes for the image processor's resizing
-            # The image processor with do_resize=True and do_center_crop=False should do letterbox-style resizing
-            # For now, we'll use a simplified approach - normalize boxes to 0-1 range
-            # This assumes the image processor preserves aspect ratio with padding
-            orig_w, orig_h = image_sizes[aug_idx]
-            bboxes = normalize_coco_bboxes(bboxes_raw, orig_w, orig_h, dtype)
-        else:
-            # MS-crop views come back in *pixel* coords (0‥TARGET_SIZE).
-            # Convert to 0-1 xywh so downstream filtering keeps them.
-            if bboxes_raw:
-                norm = []
-                for x, y, w, h in bboxes_raw:
-                    norm.append([
-                        x / target_size[0],
-                        y / target_size[1],
-                        w / target_size[0],
-                        h / target_size[1],
-                    ])
-                bboxes = torch.tensor(norm, dtype=dtype)
+        # -------------------------------------------------------------
+        # Unified normalisation via helper: if this view still represents
+        # the *original* image (non-MS-crop), use the base width/height.
+        # Otherwise (MS-crop) normalise by TARGET_SIZE since Albumentations
+        # already produced pixel boxes relative to that frame.
+        # -------------------------------------------------------------
+        if bboxes_raw:
+            if aug_need_adjust[aug_idx]:
+                orig_w, orig_h = image_sizes[aug_idx]
+                bboxes = normalize_coco_bboxes(bboxes_raw, orig_w, orig_h, dtype)
             else:
-                bboxes = torch.empty((0, 4), dtype=dtype)
+                bboxes = normalize_coco_bboxes(bboxes_raw, target_size[0], target_size[1], dtype)
+        else:
+            bboxes = torch.empty((0, 4), dtype=dtype)
 
         sample_boxes = []
         sample_label_ids = []   # canonical integer IDs (multi-token aware)

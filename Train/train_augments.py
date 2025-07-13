@@ -14,23 +14,18 @@ MAX_RETRIES = 3
 # -------------------------------------------------------------
 # Multi-scale crop that *guarantees* at least one bbox survives.
 # -------------------------------------------------------------
-# We first apply RandomResizedCrop (scale jitter + slight AR jitter) and then
-# force the final window to stay near a randomly chosen GT box by means of
-# RandomCropNearBBox.  This reproduces Pix2Seq-style MS crop but avoids the
+# We now rely on `RandomSizedBBoxSafeCrop`, which internally performs a
+# RandomResizedCrop-style area/aspect-ratio sampling **and** guarantees that
+# all bounding boxes remain completely inside the cropped window. This removes
+# the need for an explicit `RandomCropNearBBox` while still avoiding the
 # "empty GT" problem.
 
 _ms_crop_aug = A.Compose(
     [
-        # scale jitter + aspect-ratio jitter
-        A.RandomResizedCrop(
-            size=TARGET_SIZE,
-            scale=(0.4, 1.0),
-            ratio=(0.75, 1.33),
-            p=1.0,
-        ),
-        # make sure at least one box remains visible
-        A.RandomCropNearBBox(
-            max_part_shift=0.2,
+        A.RandomSizedBBoxSafeCrop(
+            height=TARGET_SIZE[0],
+            width=TARGET_SIZE[1],
+            erosion_rate=0.0,  # keep boxes tight
             p=1.0,
         ),
     ],
@@ -104,21 +99,17 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     for min_vis in [0.1, 0.05, 0.01]:  # Progressively lower thresholds
         aug = A.Compose(
             [
-                A.RandomResizedCrop(
-                    size=TARGET_SIZE,
-                    scale=scale_range_valid,
-                    ratio=(0.75, 1.33),
-                    p=1.0,
-                ),
-                A.RandomCropNearBBox(
-                    max_part_shift=0.2,
+                A.RandomSizedBBoxSafeCrop(
+                    height=TARGET_SIZE[0],
+                    width=TARGET_SIZE[1],
+                    erosion_rate=0.0,
                     p=1.0,
                 ),
             ],
             bbox_params=A.BboxParams(
-                format="coco", 
-                label_fields=["class_labels"], 
-                min_visibility=min_vis
+                format="coco",
+                label_fields=["class_labels"],
+                min_visibility=min_vis,
             ),
         )
         
@@ -131,21 +122,21 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
             except Exception:
                 continue
     
-    # Strategy 2: If RandomCropNearBBox fails, try without it but with larger crops
-    for scale_min in [0.6, 0.7, 0.8]:  # Progressively larger crops
+    # Strategy 2: If Strategy 1 fails, try with looser crops (higher erosion)
+    for erosion in [0.1, 0.2, 0.3]:  # Progressively looser crops
         aug_no_near = A.Compose(
             [
-                A.RandomResizedCrop(
-                    size=TARGET_SIZE,
-                    scale=(scale_min, 1.0),
-                    ratio=(0.75, 1.33),
+                A.RandomSizedBBoxSafeCrop(
+                    height=TARGET_SIZE[0],
+                    width=TARGET_SIZE[1],
+                    erosion_rate=erosion,
                     p=1.0,
                 ),
             ],
             bbox_params=A.BboxParams(
-                format="coco", 
-                label_fields=["class_labels"], 
-                min_visibility=0.01  # Very low threshold
+                format="coco",
+                label_fields=["class_labels"],
+                min_visibility=0.01,  # Very low threshold
             ),
         )
         
