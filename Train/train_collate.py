@@ -425,11 +425,21 @@ class BBOBCollator:  # noqa: N801
         # ---- 1. Build fragment strings ----------------------------------
         fragments = []
         is_noise_list = []
-        for bb, lab, is_noise in zip(boxes.tolist(), labels, (noise_mask if noise_mask is not None else [False]*len(labels))):
-            coord_txt = ", ".join(self.fmt_coord(v) for v in bb)
+        # Ensure noise_mask is a Python list of booleans for safe zipping
+        noise_mask_list = noise_mask.tolist() if noise_mask is not None else [False] * len(labels)
+
+        # Build fragments: convert (x, y, w, h) → (x1, y1, x2, y2)
+        for bb, lab, is_noise in zip(boxes.tolist(), labels, noise_mask_list):
+            # bb comes in (x, y, w, h) format
+            x, y, w, h = bb
+            x2 = x + w
+            y2 = y + h
+            coords_xyxy = [x, y, x2, y2]
+
+            coord_txt = ", ".join(self.fmt_coord(v) for v in coords_xyxy)
             fragments.append(f"<|bbob|>{lab}: [{coord_txt}]</|bbob|>")
             is_noise_list.append(bool(is_noise))
-
+        
         # ---- 2. Tokenise all fragments in one batch ----------------------
         fragments_pref = [fragments[0]] + [" " + f for f in fragments[1:]]
         tok_lists = self.tokenizer(fragments_pref, add_special_tokens=False).input_ids

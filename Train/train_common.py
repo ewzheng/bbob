@@ -413,8 +413,20 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
             orig_w, orig_h = image_sizes[aug_idx]
             bboxes = normalize_coco_bboxes(bboxes_raw, orig_w, orig_h, dtype)
         else:
-            # MS-crop views are already normalized to 0-1
-            bboxes = torch.as_tensor(bboxes_raw, dtype=dtype)
+            # MS-crop views come back in *pixel* coords (0‥TARGET_SIZE).
+            # Convert to 0-1 xywh so downstream filtering keeps them.
+            if bboxes_raw:
+                norm = []
+                for x, y, w, h in bboxes_raw:
+                    norm.append([
+                        x / target_size[0],
+                        y / target_size[1],
+                        w / target_size[0],
+                        h / target_size[1],
+                    ])
+                bboxes = torch.tensor(norm, dtype=dtype)
+            else:
+                bboxes = torch.empty((0, 4), dtype=dtype)
 
         sample_boxes = []
         sample_label_ids = []   # canonical integer IDs (multi-token aware)
@@ -424,7 +436,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
             # Skip boxes that are out-of-bounds or have zero/neg area after all adjustments
             if bbox[2] <= 0.0 or bbox[3] <= 0.0:
                 continue
-            if bbox[0] >= 1.0 or bbox[1] >= 1.0:
+            if bbox[0] > 1.0 or bbox[1] > 1.0:
                 continue
             if bbox[0] < 0.0 or bbox[1] < 0.0:
                 continue

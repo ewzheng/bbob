@@ -202,11 +202,23 @@ class BBOBLoss:
         if self.logger is not None:
             # every 4× interval: log a decoded prediction / target pair
             if self.step % (self.log_interval * 4) == 0:
-                # Compute arg-max predictions for the first item in the batch
-                raw_pred_ids = shift_logits.argmax(dim=-1)[0].to(device="cpu")
+
+                # ------------------------------------------------------------
+                # Pick the *first* row that actually contains at least one
+                # supervised GT token so logs are meaningful even when the
+                # first batch element is an empty MS-crop.
+                # ------------------------------------------------------------
+                row_idx = 0
+                for b in range(labels.size(0)):
+                    if (labels[b] != self.ignore_index).any():
+                        row_idx = b
+                        break
+
+                # Compute arg-max predictions for that batch row
+                raw_pred_ids = shift_logits.argmax(dim=-1)[row_idx].to(device="cpu")
 
                 # Use *original* labels (no shift) for GT – they contain -100 at noise positions
-                tgt_ids = labels[0].to(device="cpu")
+                tgt_ids = labels[row_idx].to(device="cpu")
 
                 # ------------------------------------------------------------------
                 # NEW: Filter out positions where the GT label is *ignore_index* so we
