@@ -824,15 +824,14 @@ class BBOBCollator:  # noqa: N801
         all_bboxes = []
         
         for i, item in enumerate(batch):
-            # PATCH 5: early skip – run bbox logic only if non-empty GT boxes exist
-            target_boxes_present = (
+            # Determine if sample *has the field* (may still be empty)
+            has_boxes_field = (
                 "target_boxes" in item
-                and not self.is_eval
                 and isinstance(item["target_boxes"], (list, np.ndarray, torch.Tensor))
-                and len(item["target_boxes"]) > 0
+                and not self.is_eval
             )
 
-            if target_boxes_present:
+            if has_boxes_field:
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 if bx_raw.numel() > 0:  # Only process non-empty bbox lists
                     all_bboxes.append(bx_raw)
@@ -858,15 +857,14 @@ class BBOBCollator:  # noqa: N801
         batch_noise_counts = []
 
         for i, item in enumerate(batch):
-            # PATCH 5: early skip – run bbox logic only if non-empty GT boxes exist
-            target_boxes_present = (
+            # Determine if sample *has the field* (may still be empty)
+            has_boxes_field = (
                 "target_boxes" in item
-                and not self.is_eval
                 and isinstance(item["target_boxes"], (list, np.ndarray, torch.Tensor))
-                and len(item["target_boxes"]) > 0
+                and not self.is_eval
             )
 
-            if target_boxes_present:
+            if has_boxes_field:
                 bx_raw = torch.as_tensor(item["target_boxes"], dtype=torch.float32, device=device)
                 label_strs = item.get("target_label_strs", ["obj"] * bx_raw.size(0))[: bx_raw.size(0)]
                 
