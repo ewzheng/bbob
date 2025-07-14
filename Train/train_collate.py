@@ -565,13 +565,33 @@ class BBOBCollator:  # noqa: N801
                     closing_tok = toks[-1]
                     # Safety: Only treat the final token as a closing tag if it matches the vocab ID.
                     if closing_tok == self.close_id:
-                        # Mask coordinate/bracket tokens between coord_start and last-1
-                        mask_len = len(toks) - coord_start - 1
-                        tgt_flat.extend([-100] * mask_len)
+                        # Supervise formatting tokens (brackets/commas); mask numeric tokens
+                        for tok_id_inner, tok_txt_inner in zip(
+                            toks[coord_start:-1], tok_texts[coord_start:-1]
+                        ):
+                            if (
+                                "[" in tok_txt_inner
+                                or "]" in tok_txt_inner
+                                or "," in tok_txt_inner
+                            ):
+                                tgt_flat.append(tok_id_inner)  # keep supervision
+                            else:
+                                tgt_flat.append(-100)  # mask numeric coordinate value
+
                         tgt_flat.append(closing_tok)  # supervise </|bbob|>
                     else:
-                        # Fallback: treat all tokens after coord_start as masked (rare)
-                        tgt_flat.extend([-100] * (len(toks) - coord_start))
+                        # Fallback: mask numeric-like tokens but keep formatting
+                        for tok_id_inner, tok_txt_inner in zip(
+                            toks[coord_start:], tok_texts[coord_start:]
+                        ):
+                            if (
+                                "[" in tok_txt_inner
+                                or "]" in tok_txt_inner
+                                or "," in tok_txt_inner
+                            ):
+                                tgt_flat.append(tok_id_inner)
+                            else:
+                                tgt_flat.append(-100)
 
         # ---- 4. Length truncation safety ---------------------------------
         # Use fragment-boundary aware truncation so we do not cut off the
