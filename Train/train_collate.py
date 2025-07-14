@@ -365,27 +365,69 @@ class BBOBCollator:  # noqa: N801
             combined_noise_boxes = torch.empty((0, 4), device=device)
         
         # DISTRIBUTE NOISE BACK TO SAMPLES based on assignments
-        sample_noise_lists = {idx: ([], []) for idx in range(batch_size) if batch_noise_counts[idx] > 0}
-        
-        for noise_idx, (box, label, target_sample) in enumerate(zip(combined_noise_boxes, all_noise_labels, noise_sample_assignments)):
+        sample_noise_lists: dict[int, tuple[list, list]] = {
+            idx: ([], []) for idx in range(batch_size) if batch_noise_counts[idx] > 0
+        }
+
+        for box, label, target_sample in zip(
+            combined_noise_boxes, all_noise_labels, noise_sample_assignments
+        ):
             if target_sample in sample_noise_lists:
                 sample_noise_lists[target_sample][0].append(box)
                 sample_noise_lists[target_sample][1].append(label)
-        
-        # Convert lists back to tensors and assign to results
-        for sample_idx, (boxes_list, labels_list) in sample_noise_lists.items():
+
+        # ------------------------------------------------------------------
+        # Ensure every requesting sample receives *exactly* the requested
+        # number of noise boxes.  If the vectorised path came up short we
+        # synthesise additional random boxes locally.
+        # ------------------------------------------------------------------
+        for sample_idx in range(batch_size):
+            requested_count = batch_noise_counts[sample_idx]
+
+            if requested_count <= 0:
+                # No noise requested → keep empty result placeholder
+                if batch_results[sample_idx] is None:
+                    device = (
+                        batch_gt_boxes[sample_idx].device
+                        if batch_gt_boxes[sample_idx].numel() > 0
+                        else torch.device("cpu")
+                    )
+                    batch_results[sample_idx] = (torch.empty((0, 4), device=device), [])
+                continue
+
+            boxes_list, labels_list = sample_noise_lists.get(sample_idx, ([], []))
+
+            # Top-up if shortfall
+            if len(boxes_list) < requested_count:
+                missing = requested_count - len(boxes_list)
+                extra_boxes, extra_labels = self._generate_noise_boxes(
+                    missing,
+                    batch_label_strs[sample_idx] or ["noise"],
+                    batch_gt_boxes[sample_idx],
+                )
+                if extra_boxes.numel() > 0:
+                    boxes_list.extend(extra_boxes)
+                    labels_list.extend(extra_labels)
+
+            # Truncate / stack to exactly requested_count
             if boxes_list:
-                sample_boxes = torch.stack(boxes_list)
-                # Truncate to requested count if we generated too many
-                requested_count = batch_noise_counts[sample_idx]
-                if len(boxes_list) > requested_count:
-                    sample_boxes = sample_boxes[:requested_count]
-                    labels_list = labels_list[:requested_count]
-                batch_results[sample_idx] = (sample_boxes, labels_list)
+                boxes_tensor = (
+                    torch.stack(boxes_list[:requested_count])
+                    if isinstance(boxes_list[0], torch.Tensor)
+                    else torch.as_tensor(boxes_list[:requested_count])
+                )
+                labels_final = labels_list[:requested_count]
             else:
-                device = batch_gt_boxes[sample_idx].device if batch_gt_boxes[sample_idx].numel() > 0 else torch.device('cpu')
-                batch_results[sample_idx] = (torch.empty((0, 4), device=device), [])
-        
+                device = (
+                    batch_gt_boxes[sample_idx].device
+                    if batch_gt_boxes[sample_idx].numel() > 0
+                    else torch.device("cpu")
+                )
+                boxes_tensor = torch.empty((0, 4), device=device)
+                labels_final = []
+
+            batch_results[sample_idx] = (boxes_tensor, labels_final)
+
         return batch_results
 
     def _generate_noise_boxes(self, num_boxes, label_strs, gt_boxes):
