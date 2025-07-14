@@ -103,8 +103,22 @@ def train(
 
     logger.info("Preparing dataset …")
 
-    # Collator always hides targets; TF decision moved to BBOBTrainer
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer=tokenizer, image_processor=model.get_image_processor(), logger=logger, on_the_fly=False)
+    # Visual-token count from model
+    vis_tokens = getattr(model, "vis_length", 64)
+
+    # Update train_common global for downstream preprocessing heuristics
+    import Train.train_common as tc
+    tc.VIS_TOKENS = vis_tokens  # type: ignore[attr-defined]
+
+    # Collator uses the dynamic vis_tokens value
+    collate_fn = make_collate_fn(
+        tokenizer.pad_token_id,
+        tokenizer=tokenizer,
+        image_processor=model.get_image_processor(),
+        logger=logger,
+        on_the_fly=False,
+        vis_tokens=vis_tokens,
+    )
     # Composite loss callable
     compute_loss_fn = create_compute_loss_func(tokenizer, logger=logger, log_interval = max(steps_per_epoch//4, 0.05))  
 

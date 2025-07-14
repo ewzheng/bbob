@@ -206,7 +206,7 @@ def adjust_boxes_resize_crop(bboxes, orig_w, orig_h, target=256, dtype=torch.flo
 
     return torch.tensor(adjusted, dtype=dtype)
 
-def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None):
+def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=False, target_size=DEFAULT_TARGET_SIZE, dtype=torch.float32, label_lookup=None, *, vis_tokens: int = 64):
     '''
     build vision-language features for one raw dataset batch.
 
@@ -374,7 +374,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
 
     # Reserve room for the visual tokens that will be prepended later in the
     # model forward pass.  MobileViT-v2 @256 px yields 8×8 = 64 tokens.
-    max_txt_len = tokenizer.model_max_length - VIS_TOKENS
+    max_txt_len = tokenizer.model_max_length - vis_tokens
     if max_txt_len <= 0:
         raise ValueError("Tokenizer max_length is too small to fit visual tokens")
 

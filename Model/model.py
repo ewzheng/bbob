@@ -192,6 +192,10 @@ class BBOB(PreTrainedModel):
     @property
     def device(self):
         return self._device
+    
+    @property
+    def vis_length(self):
+        return self.projector.output_tokens
 
     '''
     API Functions

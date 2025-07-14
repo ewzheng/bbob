@@ -24,7 +24,7 @@ class Projector(nn.Module):
     returns: instance ready for `.forward()`.
     '''
 
-    def __init__(self, indim, outdim, dtype, device, output_tokens=64):
+    def __init__(self, indim, outdim, dtype, device, output_tokens=256):
         '''
         ctor.
 
@@ -146,7 +146,7 @@ class Projector(nn.Module):
 
         # NEW: Flexible token pooling - automatically handles any input token count
         input_tokens = H * W
-        if input_tokens != self.output_tokens:
+        if input_tokens != self.output_tokens or input_tokens < self.output_tokens:
             # Reshape to spatial format for pooling
             # vision_in: (B, C, H, W) -> (B, C, H*W) -> (B, H*W, C)
             vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, input_tokens, C)
