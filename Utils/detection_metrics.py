@@ -18,7 +18,7 @@ from Train.loss_helpers import (
     TAG_OPEN,
     TAG_CLOSE,
     parse_detection_string,
-    iou_matrix_xywh,
+    iou_matrix_xyxy,
 )
 
 # -----------------------------------------------------------------------------
@@ -46,18 +46,9 @@ def _split_snippet(det: str) -> Tuple[str, List[float]]:
     """Return *(label, xywh)* for one <bbob> snippet (label lower-cased)."""
     parts = det.split(":", 1)
     label = parts[0].strip().lower() if parts else ""
-    xyxy, _ = parse_detection_string(det)  # tokens now in (x1,y1,x2,y2)
+    xyxy, _ = parse_detection_string(det)  # already (x1,y1,x2,y2)
 
-    if len(xyxy) == 4:
-        x1, y1, x2, y2 = xyxy
-        w = max(0.0, x2 - x1)
-        h = max(0.0, y2 - y1)
-        xywh = [x1, y1, w, h]
-    else:
-        # Fallback to old behaviour (malformed snippet)
-        xywh = xyxy
-
-    return label, xywh
+    return label, xyxy
 
 
 def _snippets_to_boxes_labels(snippets: List[str]) -> Tuple[torch.Tensor, List[str]]:
@@ -65,8 +56,8 @@ def _snippets_to_boxes_labels(snippets: List[str]) -> Tuple[torch.Tensor, List[s
     coords: List[List[float]] = []
     labels: List[str] = []
     for det in snippets:
-        lab, xywh = _split_snippet(det)
-        coords.append(xywh)
+        lab, xyxy = _split_snippet(det)
+        coords.append(xyxy)
         labels.append(lab)
 
     if coords:
@@ -194,7 +185,7 @@ def detection_metrics_batch(
         used_gt: set[int] = set()
 
         if pred_boxes.numel() and gt_boxes.numel():
-            ious = iou_matrix_xywh(pred_boxes, gt_boxes)
+            ious = iou_matrix_xyxy(pred_boxes, gt_boxes)
 
             # Build list of candidate pairs (pred, gt, iou) where labels match
             candidates: List[Tuple[int, int, float]] = []
@@ -487,7 +478,7 @@ def detection_ap_batch(
 
         matched_gt: set[int] = set()
         if preds_boxes.numel() and gt_boxes.numel():
-            ious = iou_matrix_xywh(preds_boxes, gt_boxes)
+            ious = iou_matrix_xyxy(preds_boxes, gt_boxes)
             # Iterate predictions in *score* order
             order = sorted(range(len(objects)), key=lambda k: preds_scores[k], reverse=True)
             for idx in order:

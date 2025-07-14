@@ -920,15 +920,6 @@ class BBOBCollator:  # noqa: N801
             if self.logger and not hasattr(self, '_logged_override'):
                 self.logger.warning(f"Overriding tokenizer max_length to reasonable limit: {reasonable_max_length}")
                 self._logged_override = True
-
-        # DEBUG: Log sequence length constraints
-        if self.logger and hasattr(self, '_logged_constraints'):
-            if not self._logged_constraints:
-                self.logger.info(f"Sequence constraints: model_max_length={self.tokenizer.model_max_length}, VIS_TOKENS={VIS_TOKENS}, max_txt_len={max_txt_len}")
-                self._logged_constraints = True
-        elif self.logger and not hasattr(self, '_logged_constraints'):
-            self.logger.info(f"Sequence constraints: model_max_length={self.tokenizer.model_max_length}, VIS_TOKENS={VIS_TOKENS}, max_txt_len={max_txt_len}")
-            self._logged_constraints = True
         
         # OPTIMIZED: Pre-compute common tensors outside the loop to avoid repeated creation
         bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device) if bos_id is not None else None

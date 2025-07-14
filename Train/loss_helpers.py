@@ -269,6 +269,41 @@ def iou_matrix_xywh(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
     return inter_area / union
 
 # -----------------------------------------------------------------------------
+# New helper – IoU on (x1,y1,x2,y2) boxes (already absolute corners)
+# -----------------------------------------------------------------------------
+
+def iou_matrix_xyxy(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """Return pairwise IoU for two *xyxy* box tensors.
+
+    Falls back to a vectorised implementation if the optional C++/CUDA
+    `torchvision.ops._box_iou` is unavailable (as on some CPU-only setups).
+    """
+    if boxes1.numel() == 0 or boxes2.numel() == 0:
+        return boxes1.new_zeros((boxes1.size(0), boxes2.size(0)))
+
+    if _box_iou is not None:
+        return _box_iou(boxes1, boxes2)
+
+    # Manual vectorised IoU
+    x1, y1, x2, y2 = boxes1.unbind(-1)
+    x1b, y1b, x2b, y2b = boxes2.unbind(-1)
+
+    # Expand for pairwise max/min operations
+    inter_x1 = torch.max(x1.unsqueeze(1), x1b.unsqueeze(0))
+    inter_y1 = torch.max(y1.unsqueeze(1), y1b.unsqueeze(0))
+    inter_x2 = torch.min(x2.unsqueeze(1), x2b.unsqueeze(0))
+    inter_y2 = torch.min(y2.unsqueeze(1), y2b.unsqueeze(0))
+
+    inter_w = (inter_x2 - inter_x1).clamp(min=0)
+    inter_h = (inter_y2 - inter_y1).clamp(min=0)
+    inter_area = inter_w * inter_h
+
+    area1 = ((x2 - x1) * (y2 - y1)).unsqueeze(1)
+    area2 = ((x2b - x1b) * (y2b - y1b)).unsqueeze(0)
+    union = area1 + area2 - inter_area + EPSILON
+    return inter_area / union
+
+# -----------------------------------------------------------------------------
 # Matching ----------------------------------------------------------------------------
 
 def hungarian_match(pred: torch.Tensor, gt: torch.Tensor) -> List[Tuple[int, int]]:
