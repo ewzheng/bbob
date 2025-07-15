@@ -198,8 +198,12 @@ class BBOBTrainer(Trainer):
         # ------------------------------------------------------------
         # Scheduled sampling (teacher forcing) – per-token Bernoulli
         # ------------------------------------------------------------
-        if self.model.training and "input_ids" in inputs and "labels" in inputs:
-            p = self._tf_prob(min(self.state.global_step, self._tf_total))
+        if "input_ids" in inputs and "labels" in inputs:
+            p = (
+                self._tf_prob(min(self.state.global_step, self._tf_total))
+                if self.model.training
+                else 0.0
+            )
             if p > 0.0:
                 ids = inputs["input_ids"].clone()
                 lbl = inputs["labels"]
@@ -208,7 +212,7 @@ class BBOBTrainer(Trainer):
                 mask = (lbl != -100) & bern
                 ids[mask] = lbl[mask]
                 inputs["input_ids"] = ids
-            elif p == 0.0:
+            else:
                 # Fully student-forced: hide every supervised token so the
                 # model must generate them on its own.  Replace with the
                 # tokenizer pad token (fall back to 0) to keep length.
