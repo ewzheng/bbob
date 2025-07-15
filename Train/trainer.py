@@ -198,35 +198,34 @@ class BBOBTrainer(Trainer):
         # ------------------------------------------------------------
         # Scheduled sampling (teacher forcing) – per-token Bernoulli
         # ------------------------------------------------------------
-        if self.model.training and self.state.global_step < self._tf_total:
-            if "input_ids" in inputs and "labels" in inputs:
-                p = self._tf_prob(self.state.global_step)
-                if p > 0.0:
-                    ids = inputs["input_ids"].clone()
-                    lbl = inputs["labels"]
-                    # create Bernoulli mask only where a ground-truth label exists
-                    bern = torch.rand_like(lbl, dtype=torch.float, device=lbl.device) < p
-                    mask = (lbl != -100) & bern
-                    ids[mask] = lbl[mask]
-                    inputs["input_ids"] = ids
-                elif p == 0.0:
-                    # Fully student-forced: hide every supervised token so the
-                    # model must generate them on its own.  Replace with the
-                    # tokenizer pad token (fall back to 0) to keep length.
-                    ids = inputs["input_ids"].clone()
-                    lbl = inputs["labels"]
+        if self.model.training and "input_ids" in inputs and "labels" in inputs:
+            p = self._tf_prob(min(self.state.global_step, self._tf_total))
+            if p > 0.0:
+                ids = inputs["input_ids"].clone()
+                lbl = inputs["labels"]
+                # create Bernoulli mask only where a ground-truth label exists
+                bern = torch.rand_like(lbl, dtype=torch.float, device=lbl.device) < p
+                mask = (lbl != -100) & bern
+                ids[mask] = lbl[mask]
+                inputs["input_ids"] = ids
+            elif p == 0.0:
+                # Fully student-forced: hide every supervised token so the
+                # model must generate them on its own.  Replace with the
+                # tokenizer pad token (fall back to 0) to keep length.
+                ids = inputs["input_ids"].clone()
+                lbl = inputs["labels"]
 
-                    # Determine pad replacement token
-                    try:
-                        pad_id = self.model.get_tokenizer().pad_token_id  # type: ignore[attr-defined]
-                        if pad_id is None:
-                            pad_id = 0
-                    except Exception:
+                # Determine pad replacement token
+                try:
+                    pad_id = self.model.get_tokenizer().pad_token_id  # type: ignore[attr-defined]
+                    if pad_id is None:
                         pad_id = 0
+                except Exception:
+                    pad_id = 0
 
-                    mask = lbl != -100
-                    if mask.any():
-                        ids[mask] = pad_id
-                        inputs["input_ids"] = ids
+                mask = lbl != -100
+                if mask.any():
+                    ids[mask] = pad_id
+                    inputs["input_ids"] = ids
 
         return inputs 
