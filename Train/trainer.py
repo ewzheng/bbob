@@ -209,5 +209,24 @@ class BBOBTrainer(Trainer):
                     mask = (lbl != -100) & bern
                     ids[mask] = lbl[mask]
                     inputs["input_ids"] = ids
+                elif p == 0.0:
+                    # Fully student-forced: hide every supervised token so the
+                    # model must generate them on its own.  Replace with the
+                    # tokenizer pad token (fall back to 0) to keep length.
+                    ids = inputs["input_ids"].clone()
+                    lbl = inputs["labels"]
+
+                    # Determine pad replacement token
+                    try:
+                        pad_id = self.model.get_tokenizer().pad_token_id  # type: ignore[attr-defined]
+                        if pad_id is None:
+                            pad_id = 0
+                    except Exception:
+                        pad_id = 0
+
+                    mask = lbl != -100
+                    if mask.any():
+                        ids[mask] = pad_id
+                        inputs["input_ids"] = ids
 
         return inputs 
