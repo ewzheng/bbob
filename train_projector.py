@@ -113,8 +113,21 @@ def train(
             logger.warning("Tokenizer config sanitisation skipped: %s", _e)
 
     logger.info(model_size_breakdown(model))
+    # ---------------- visual token length ---------------------------
+    vis_tokens = getattr(model, "vis_length", 64)
+
+    # Keep Train.train_common constant in sync (used by preprocessing helpers)
+    import Train.train_common as tc
+    tc.VIS_TOKENS = vis_tokens  # type: ignore[attr-defined]
+
     # custom collator that injects labels based on *target_text*
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer=model.get_tokenizer(), image_processor=model.get_image_processor(), on_the_fly=True)
+    collate_fn = make_collate_fn(
+        tokenizer.pad_token_id,
+        tokenizer=model.get_tokenizer(),
+        image_processor=model.get_image_processor(),
+        on_the_fly=True,
+        vis_tokens=vis_tokens,
+    )
 
     # Create metrics functions with shared state (no global variables)
     # This creates two functions that share closure variables for accumulating metrics
