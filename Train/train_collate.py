@@ -1016,9 +1016,14 @@ class BBOBCollator:  # noqa: N801
                     input_ids_det = empty_tensor.clone()
                     tgt_ids = empty_tensor.clone()
             else:
-                # EVAL MODE or boxes absent – use stored token list as is
-                input_ids_det = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
+                # Caption-only path (no detection boxes).  *Never* reveal GT
+                # tokens in the inputs – we always conceal them with a neutral
+                # placeholder token so evaluation measures genuine generation
+                # performance without teacher forcing.
                 tgt_ids = torch.as_tensor(item.get("target_text", []), dtype=torch.long, device=device).flatten()
+
+                conceal_tok = self.placeholder_id if self.placeholder_id is not None else (self.pad_id or 0)
+                input_ids_det = torch.full_like(tgt_ids, conceal_tok)
 
             #------ now same instr truncation logic uses tgt_ids variable ----
             input_ids_det = input_ids_det[input_ids_det != pad_token_id]

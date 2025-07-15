@@ -104,8 +104,20 @@ def train(
 
     logger.info("Preparing dataset …")
 
-    # Collator always hides targets; TF decision moved to BBOBTrainer
-    collate_fn = make_collate_fn(tokenizer.pad_token_id, tokenizer=tokenizer, image_processor=model.get_image_processor(), logger=logger, on_the_fly=True)
+    # ---------------- visual token length ---------------------------
+    vis_tokens = getattr(model, "vis_length", 64)
+
+    import Train.train_common as tc
+    tc.VIS_TOKENS = vis_tokens  # type: ignore[attr-defined]
+
+    collate_fn = make_collate_fn(
+        tokenizer.pad_token_id,
+        tokenizer=tokenizer,
+        image_processor=model.get_image_processor(),
+        logger=logger,
+        on_the_fly=True,
+        vis_tokens=vis_tokens,
+    )
 
 
     # Create metrics functions with shared state (no global variables)
