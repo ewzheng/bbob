@@ -38,8 +38,8 @@ def train(
     num_workers: int = 4,
     total_tf_ratio: float = 0,
     tf_ramp_ratio: float = 0,
-    min_tf_p: float = 0,
-    max_tf_p: float = 0
+    min_tf_p: float = 1,
+    max_tf_p: float = 1
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
