@@ -24,7 +24,7 @@ class Projector(nn.Module):
     returns: instance ready for `.forward()`.
     '''
 
-    def __init__(self, indim, outdim, dtype, device, output_tokens=256):
+    def __init__(self, indim, outdim, dtype, device, output_tokens=128):
         '''
         ctor.
 
