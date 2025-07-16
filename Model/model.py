@@ -38,6 +38,7 @@ class BBOBConfig(PretrainedConfig):
         base_model_name: str | None = None,
         max_memory: dict | None = None,
         bnb_config: str | dict | None = None,
+        output_tokens: int | None = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -48,6 +49,8 @@ class BBOBConfig(PretrainedConfig):
         self.base_model_name    = base_model_name    if base_model_name    is not None else "unknown"
         self.max_memory         = max_memory
         self.bnb_config         = bnb_config
+        # store projector token count (defaults handled later)
+        self.output_tokens      = output_tokens
         
         # paths for extra components (filled during save_pretrained)
         self.projector_path: str | None = kwargs.get("projector_path")
@@ -74,6 +77,7 @@ class BBOB(PreTrainedModel):
         super().__init__(config)
         
         # Extract configuration values
+        output_tokens = getattr(config, "output_tokens", None) or 256
         model_path = config.base_model_name
         max_memory = config.max_memory
         bnb_config = config.bnb_config
@@ -111,7 +115,13 @@ class BBOB(PreTrainedModel):
         vision_hidden_size = self.vision_tower.hidden_size
         print(f"Using VisionTower with hidden_size={vision_hidden_size}")
 
-        self.projector = Projector(vision_hidden_size, text_hidden_size, dtype=base_model_dtype, device=base_model_device)
+        self.projector = Projector(
+            vision_hidden_size,
+            text_hidden_size,
+            dtype=base_model_dtype,
+            device=base_model_device,
+            output_tokens=output_tokens,
+        )
 
         # ensure projector on same device/dtype as base model weights
         self.projector.to(base_model_device, dtype=base_model_dtype)
@@ -122,6 +132,8 @@ class BBOB(PreTrainedModel):
         # Update config with actual values
         self.config.vision_hidden_size = vision_hidden_size
         self.config.text_hidden_size = text_hidden_size
+        # persist projector token count
+        self.config.output_tokens = self.projector.output_tokens
             
 
     ''' Helpers for interacting with internal components'''
@@ -560,12 +572,14 @@ class BBOB(PreTrainedModel):
             proj_rel = getattr(config, "projector_path", "projector.safetensors")
             proj_path = os.path.join(ckpt_dir, proj_rel)
             if os.path.isfile(proj_path):
+                output_tokens = getattr(config, "output_tokens", None)
                 obj.projector = Projector.from_pretrained(
                     proj_path,
                     indim=obj.vision_tower.hidden_size,
                     outdim=obj._embedding_layer.weight.shape[1] if hasattr(obj, '_embedding_layer') else obj.projector.outdim,
                     dtype=obj._dtype,
                     device=obj._device,
+                    output_tokens=output_tokens or 256,
                 )
 
             # Load vision tower if available
@@ -670,17 +684,26 @@ class BBOB(PreTrainedModel):
         # Initialize projector
         vision_hidden_size = self.vision_tower.hidden_size
         text_hidden_size = emb_layer.weight.shape[1]
-        self.projector = Projector(vision_hidden_size, text_hidden_size, dtype=base_model_dtype, device=base_model_device)
+        output_tokens = getattr(config, "output_tokens", None) or 256
+        self.projector = Projector(
+            vision_hidden_size,
+            text_hidden_size,
+            dtype=base_model_dtype,
+            device=base_model_device,
+            output_tokens=output_tokens,
+        )
 
         # Load projector weights
         proj_path = os.path.join(ckpt_dir, getattr(config, "projector_path", "projector.safetensors"))
         if os.path.isfile(proj_path):
+            output_tokens_cfg = getattr(config, "output_tokens", None)
             self.projector = Projector.from_pretrained(
                 proj_path,
                 indim=vision_hidden_size,
                 outdim=text_hidden_size,
                 dtype=base_model_dtype,
                 device=base_model_device,
+                output_tokens=output_tokens_cfg or 256,
             )
 
         # Set base model prefix

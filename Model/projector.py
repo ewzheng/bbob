@@ -196,7 +196,7 @@ class Projector(nn.Module):
     ''' Saving methods, here if needed '''
 
     @classmethod
-    def from_pretrained(cls, model_path, indim, outdim, dtype, device, output_tokens=64):
+    def from_pretrained(cls, model_path, indim, outdim, dtype, device, output_tokens=128):
         """Load projector weights from a *.safetensors* or legacy *.pt* file.
 
         Parameters
