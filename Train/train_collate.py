@@ -1098,10 +1098,9 @@ class BBOBCollator:  # noqa: N801
             # teacher-forcing routine will later copy a Bernoulli subset back
             # in when the TF probability > 0.
             # -------------------------------------------------------------
-            # NOTE: Disabled pad-replacement so caption tokens remain visible.
-            # if input_ids_det.numel() > 0:
-            #     pad_tok = pad_token_id if pad_token_id is not None else 0
-            #     input_ids_det = torch.full_like(input_ids_det, pad_tok)
+            if input_ids_det.numel() > 0:
+                pad_tok = pad_token_id if pad_token_id is not None else 0
+                input_ids_det = torch.full_like(input_ids_det, pad_tok)
 
             # OPTIMIZED: Single tensor allocation for input_ids
             input_ids = torch.cat([image_placeholder, instr_ids, input_ids_det], dim=0)
