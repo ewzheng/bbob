@@ -77,7 +77,7 @@ class BBOB(PreTrainedModel):
         super().__init__(config)
         
         # Extract configuration values
-        output_tokens = getattr(config, "output_tokens", None) or 256
+        output_tokens = getattr(config, "output_tokens", None) or 128
         model_path = config.base_model_name
         max_memory = config.max_memory
         bnb_config = config.bnb_config
@@ -579,7 +579,7 @@ class BBOB(PreTrainedModel):
                     outdim=obj._embedding_layer.weight.shape[1] if hasattr(obj, '_embedding_layer') else obj.projector.outdim,
                     dtype=obj._dtype,
                     device=obj._device,
-                    output_tokens=output_tokens or 256,
+                    output_tokens=output_tokens or 128,
                 )
 
             # Load vision tower if available
@@ -684,7 +684,7 @@ class BBOB(PreTrainedModel):
         # Initialize projector
         vision_hidden_size = self.vision_tower.hidden_size
         text_hidden_size = emb_layer.weight.shape[1]
-        output_tokens = getattr(config, "output_tokens", None) or 256
+        output_tokens = getattr(config, "output_tokens", None) or 128
         self.projector = Projector(
             vision_hidden_size,
             text_hidden_size,
@@ -703,7 +703,7 @@ class BBOB(PreTrainedModel):
                 outdim=text_hidden_size,
                 dtype=base_model_dtype,
                 device=base_model_device,
-                output_tokens=output_tokens_cfg or 256,
+                output_tokens=output_tokens_cfg or 128,
             )
 
         # Set base model prefix
