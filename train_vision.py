@@ -111,7 +111,7 @@ def train(
         image_processor=model.get_image_processor(),
         logger=logger,
         on_the_fly=True,
-        # vis_tokens=vis_tokens,  # Remove this line
+        vis_tokens=vis_tokens,  # Remove this line
     )
 
 

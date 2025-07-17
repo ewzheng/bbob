@@ -34,7 +34,7 @@ class VisionTower(nn.Module):
         self.image_processor = CLIPImageProcessor.from_pretrained(
             encoder_name,
             do_center_crop=False,                 # keep full FOV
-            size={"shortest_edge": 512},          # 512-px short side
+            size={"shortest_edge": 512}
         )
 
         self._dtype   = dtype

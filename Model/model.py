@@ -1,3 +1,5 @@
+this is the model code
+
 """BBOB multimodal model and config."""
 
 import torch
@@ -218,23 +220,49 @@ class BBOB(PreTrainedModel):
     def _replace_image_tokens(self, text_embeds, visual_embeds, attention_mask):
         """
         Replace image placeholder tokens with visual embeddings using position-based approach.
-        Now uses dynamic vision token length.
+        
+        OPTIMIZED: Uses vectorized operations instead of Python loops for much better performance.
+        
+        Since the collator always inserts the placeholder at position 0, we can use a position-based
+        approach instead of token matching. This avoids conflicts with legitimate EOS tokens that
+        appear elsewhere in the sequence (e.g., at the end of sequences).
+        
+        Flow:
+        1. Collator creates: [PLACEHOLDER, instruction_tokens...]
+        2. This method transforms: [PLACEHOLDER, instruction_tokens...] 
+           → [visual_emb1, visual_emb2, ..., visual_emb64, instruction_tokens...]
+        
+        parameters:
+            - input_ids (tensor): `(b, t)` input token ids.
+            - text_embeds (tensor): `(b, t, d)` text embeddings.
+            - visual_embeds (tensor|None): `(b, v, d)` visual embeddings or none.
+            - attention_mask (tensor|None): `(b, t)` attention mask.
+            
+        returns: tuple(tensor, tensor) -> combined_embeds, combined_mask.
         """
         if visual_embeds is None:
             return text_embeds, attention_mask
-
-        B, V, D = visual_embeds.shape  # dynamic length
-        text_after = text_embeds[:, 1:]  # skip placeholder
-        combined = torch.cat([visual_embeds, text_after], dim=1)
-
+            
+        batch_size, visual_tokens, embed_dim = visual_embeds.shape
+        device = visual_embeds.device
+        
+        # Vectorized approach: process entire batch at once
+        # Skip first token (placeholder) from text embeddings
+        text_after = text_embeds[:, 1:]  # (batch_size, text_tokens-1, embed_dim)
+        
+        # Concatenate visual embeddings with remaining text embeddings
+        combined_embeds = torch.cat([visual_embeds, text_after], dim=1)
+        
+        # Handle attention mask vectorized
         if attention_mask is not None:
-            mask_after = attention_mask[:, 1:]
-            visual_mask = torch.ones(B, V, dtype=torch.long, device=visual_embeds.device)
+            mask_after = attention_mask[:, 1:]  # Skip first token
+            visual_mask = torch.ones(batch_size, visual_tokens, dtype=torch.long, device=device)
             combined_mask = torch.cat([visual_mask, mask_after], dim=1)
         else:
-            combined_mask = None
-
-        return combined, combined_mask
+            seq_len = visual_tokens + text_embeds.shape[1] - 1
+            combined_mask = torch.ones(batch_size, seq_len, dtype=torch.long, device=device)
+        
+        return combined_embeds, combined_mask
 
     def _prepare_labels_for_replacement(self, input_ids, labels, visual_tokens):
         """
@@ -340,6 +368,16 @@ class BBOB(PreTrainedModel):
     ):
         '''
         multimodal causal-lm pass using image token replacement.
+
+        parameters:
+            - input_ids (tensor|None): token ids (b, t) with IMAGE_TOKEN_INDEX placeholders.
+            - input_embeds (tensor|None): pre-computed embeddings.
+            - attention_mask (tensor|None): mask.
+            - position_ids (tensor|None): position ids.
+            - images (list|tensor|None): raw or processed images.
+            - labels (tensor|None): lm labels.
+
+        returns: transformers.CausalLMOutput.
         '''
 
         visual_embeds = self._prepare_visual_inputs(images)
@@ -350,25 +388,23 @@ class BBOB(PreTrainedModel):
             text_embeds = self._embed_tokens(input_ids)
         else:
             text_embeds = input_embeds
-
+            
         # Replace image tokens with visual embeddings (position-based approach)
         inputs_embeds, combined_mask = self._replace_image_tokens(
             text_embeds, visual_embeds, attention_mask
         )
-
-        # Mask the first vis_len tokens in labels
-        vis_len = visual_embeds.size(1) if visual_embeds is not None else 0
-        if labels is not None and vis_len > 0:
-            labels = labels.clone()
-            labels[:, :vis_len] = IGNORE_INDEX
 
         # Labels are already aligned by the collator, so use them as-is
         # The collator accounts for visual token replacement when creating labels
 
         # Handle position_ids for multimodal inputs
         if position_ids is not None and visual_embeds is not None:
+            # Position IDs need to be adjusted for the new sequence length
+            # after image token replacement
             batch_size = inputs_embeds.shape[0]
             seq_length = inputs_embeds.shape[1]
+            
+            # Optimized position ID generation
             position_ids = torch.arange(seq_length, dtype=torch.long, device=inputs_embeds.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
 

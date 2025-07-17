@@ -1,3 +1,5 @@
+Here's the collator
+
 from __future__ import annotations
 
 import torch
@@ -14,7 +16,7 @@ import torch.utils.data as tud
 import re
 
 # Constants (default value only – actual value comes from model.vis_length)
-# DEFAULT_VIS_TOKENS: int = 64   # fallback if not specified
+DEFAULT_VIS_TOKENS: int = 64   # fallback if not specified
 TARGET_SIZE = (256, 256)       # spatial resolution used by MobileViT-v2
 
 # ---------------------------------------------------------------------------
@@ -57,7 +59,7 @@ class BBOBCollator:  # noqa: N801
         noise_prob=1.0,  # ALWAYS add noise objects for proper Pix2Seq training
         max_noise_boxes=32,  # Max number of noise boxes to add
         noise_ratio_range=(1, 1.25),  # Range for noise count as fraction of GT count
-        # vis_tokens: int | None = None, # Removed
+        vis_tokens: int | None = None,
         **kwargs,  # accept legacy tf_* kwargs but ignore them
     ):
         self.pad_id = pad_token_id
@@ -75,7 +77,7 @@ class BBOBCollator:  # noqa: N801
         self.noise_ratio_range = noise_ratio_range
 
         # Visual-token count – fall back to default when not provided
-        # self.vis_tokens = int(vis_tokens) if vis_tokens is not None else DEFAULT_VIS_TOKENS # Removed
+        self.vis_tokens = int(vis_tokens) if vis_tokens is not None else DEFAULT_VIS_TOKENS
 
         # Pre-compute placeholder id differing from pad id.
         if tokenizer.eos_token_id is not None and tokenizer.eos_token_id != pad_token_id:
@@ -778,9 +780,6 @@ class BBOBCollator:  # noqa: N801
                 if len(set(shapes)) > 1:
                     self.logger.warning(f"Different tensor shapes before stacking: {shapes}")
             
-            max_h = max(t.shape[-2] for t in processed)
-            max_w = max(t.shape[-1] for t in processed)
-            processed = [F.pad(t, (0, max_w - t.shape[-1], 0, max_h - t.shape[-2])) for t in processed]
             pixel_values = torch.stack(processed, 0)
         else:
             # -------------------------------------------------------------
@@ -898,17 +897,16 @@ class BBOBCollator:  # noqa: N801
         image_placeholder = torch.tensor([placeholder_id], dtype=torch.long, device=device)
         bos_id = getattr(self.tokenizer, "bos_token_id", None)
         eos_id = getattr(self.tokenizer, "eos_token_id", None)
-        # max_txt_len = self.tokenizer.model_max_length - self.vis_tokens # Removed
-        max_txt_len = self.tokenizer.model_max_length # Removed
+        max_txt_len = self.tokenizer.model_max_length - self.vis_tokens
         
         # OVERRIDE: Force reasonable sequence limits to prevent OOM
         # Many tokenizers have very high model_max_length (like 1M+) which is impractical
         reasonable_max_length = 2048  # Reasonable limit for detection training
-        if max_txt_len > reasonable_max_length: # Removed
-            max_txt_len = reasonable_max_length # Removed
-            if self.logger and not hasattr(self, '_logged_override'): # Removed
-                self.logger.warning(f"Overriding tokenizer max_length to reasonable limit: {reasonable_max_length}") # Removed
-                self._logged_override = True # Removed
+        if max_txt_len > reasonable_max_length - self.vis_tokens:
+            max_txt_len = reasonable_max_length - self.vis_tokens
+            if self.logger and not hasattr(self, '_logged_override'):
+                self.logger.warning(f"Overriding tokenizer max_length to reasonable limit: {reasonable_max_length}")
+                self._logged_override = True
         
         # OPTIMIZED: Pre-compute common tensors outside the loop to avoid repeated creation
         bos_tensor = torch.tensor([bos_id], dtype=torch.long, device=device) if bos_id is not None else None
@@ -916,7 +914,7 @@ class BBOBCollator:  # noqa: N801
         empty_tensor = torch.empty(0, dtype=torch.long, device=device)
         
         # OPTIMIZED: Pre-allocate ignore tensor for visual tokens and reuse
-        # visual_ignore = torch.full((self.vis_tokens,), -100, dtype=torch.long, device=device) # Removed
+        visual_ignore = torch.full((self.vis_tokens,), -100, dtype=torch.long, device=device)
 
         # OPTIMIZED: Batch tokenize all instruction texts at once
         batch_texts_to_tokenize = []
@@ -1087,10 +1085,6 @@ class BBOBCollator:  # noqa: N801
             instr_size = instr_ids.size(0)
             
             # Create ignore labels for instruction (reuse pre-allocated visual_ignore)
-            vis_len = input_ids_det.size(0)  # number of visual tokens for this sample
-            visual_ignore = torch.full((vis_len,), -100, dtype=torch.long, device=device)
-
-            # Create ignore labels for instruction (reuse pre-allocated visual_ignore)
             if instr_size > 0:
                 instr_ignore = torch.full((instr_size,), -100, dtype=torch.long, device=device)
                 labels = torch.cat([visual_ignore, instr_ignore, tgt_ids], dim=0)
@@ -1139,6 +1133,6 @@ def make_collate_fn(pad_token_id: int, tokenizer, image_processor, **kwargs):
         noise_prob=kwargs.get("noise_prob", 1),
         max_noise_boxes=kwargs.get("max_noise_boxes", 10),
         noise_ratio_range=kwargs.get("noise_ratio_range", (1, 1.25)),
-        # vis_tokens=kwargs.get("vis_tokens"), # Removed
+        vis_tokens=kwargs.get("vis_tokens"),
         logger=kwargs.get("logger"),
     ) 

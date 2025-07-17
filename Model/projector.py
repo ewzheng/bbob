@@ -25,7 +25,7 @@ class Projector(nn.Module):
     returns: instance ready for `.forward()`.
     '''
 
-    def __init__(self, indim, outdim, dtype, device, output_tokens=128):
+    def __init__(self, indim, outdim, dtype, device, output_tokens=1024):
         '''
         ctor.
 
@@ -153,52 +153,30 @@ class Projector(nn.Module):
         # vision_in: (B, C, H, W)
         B, C, H, W = vision_in.shape
 
-        '''
-        # NEW: Flexible token pooling - automatically handles any input token count
-        input_tokens = H * W
-        if input_tokens != self.output_tokens or input_tokens < self.output_tokens:
-            # Reshape to spatial format for pooling
-            # vision_in: (B, C, H, W) -> (B, C, H*W) -> (B, H*W, C)
-            vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, input_tokens, C)
-            
-            # Calculate input spatial dimensions
-            input_h = int(input_tokens ** 0.5)
-            input_w = input_h
-            
-            # Reshape to spatial format for pooling: (B, input_tokens, C) -> (B, C, input_h, input_w)
-            vision_in = vision_in.transpose(1, 2).reshape(B, C, input_h, input_w)
-            
-            # Pool to output spatial size using average + max pooling combo
-            avg_pool = F.adaptive_avg_pool2d(vision_in, self.output_spatial)  # (B, C, output_h, output_w)
-            max_pool = F.adaptive_max_pool2d(vision_in, self.output_spatial)  # (B, C, output_h, output_w)
-            vision_in = avg_pool + max_pool  # (B, C, output_h, output_w)
-            
-            # Flatten back to tokens: (B, C, output_h, output_w) -> (B, output_tokens, C)
-            vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, output_tokens, C)
-            
-            # Update H, W for positional embeddings
+        # ------------------------------------------------------------------
+        # Adaptive pooling: always convert feature map to fixed spatial size
+        # (self.output_spatial) so the projector outputs exactly
+        # `self.output_tokens` tokens regardless of the input resolution.
+        # This preserves edge information because we *never* crop – we only
+        # down-/up-sample the feature map via avg+max pooling combo.
+        # ------------------------------------------------------------------
+        if (H, W) != self.output_spatial:
+            # Combine average + max pooling (empirically better than avg only)
+            # 1. Keep input as BCHW
+            avg_pool = F.adaptive_avg_pool2d(vision_in, self.output_spatial)  # (B,C,h*,w*)
+            max_pool = F.adaptive_max_pool2d(vision_in, self.output_spatial)  # (B,C,h*,w*)
+            vision_in = avg_pool + max_pool                                   # (B,C,h*,w*)
             H, W = self.output_spatial
-        else:
-        '''
-        # Original behavior for matching token counts
-        if H > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1) or W > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1):
-            raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1), self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1))}")
-        
-        # Flatten for projection: (B, C, H, W) > (B, H*W, C)
-        vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
-        
+
+        # Flatten for projection: (B, C, H, W) => (B, H*W, C)
+        vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, N, C) where N = H*W == self.output_tokens
+
         # Project to text space first (deep path)
         projected = self.net(vision_in)              # (B, N, D)
 
-        # Add spatial embeddings back after projection to restore spatial information
-        # pos = (
-        #     self.row_embedding[:H].unsqueeze(1) +  # (H, 1, outdim)
-        #     self.col_embedding[:W].unsqueeze(0)    # (1, W, outdim)
-        # )  # (H, W, outdim)
-        # pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, D)
-        pos = self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).expand(B, -1, -1)  # (B, H*W, D)
+        # Add sinusoidal positional embeddings
+        pos = self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).expand(B, -1, -1)  # (B, N, D)
 
-        # add spatial features after projection
         return projected + pos
     
     ''' Saving methods, here if needed '''
