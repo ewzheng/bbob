@@ -166,16 +166,10 @@ class BBOBTrainer(Trainer):
         code as well as in the training loop.
         """
         
-        print("_apply_teacher_forcing called!")  # Debug: see if method is called
-
         # ------------------------------------------------------------
         # Scheduled sampling (teacher forcing) – per-token Bernoulli
         # ------------------------------------------------------------
         if "input_ids" in inputs and "labels" in inputs:
-
-            print(f"Teacher forcing: force={self.force}, model.training={self.model.training}")
-            print(f"Model type: {type(self.model)}")
-            print(f"Model training mode: {self.model.training}")
             
             if self.force and self.model.training:
                 ids = inputs["input_ids"].clone()
