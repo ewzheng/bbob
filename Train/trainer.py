@@ -54,11 +54,7 @@ class BBOBTrainer(Trainer):
         train_collator: Optional[Any] = None,
         eval_collator: Optional[Any] = None,
         # Teacher-forcing schedule params
-        tf_start_p: float = 1.0,
-        tf_end_p: float = 0.0,
-        total_tf_steps: int = 0,
-        tf_schedule: str = "cosine",
-        tf_ramp_ratio: float = 0.8,
+        force: bool = False,
         compute_loss_func: Optional[Any] = None,
         **kwargs: Any,
     ) -> None:
@@ -79,13 +75,7 @@ class BBOBTrainer(Trainer):
         self._eval_collator = eval_collator or self._train_collator
 
         # Store schedule parameters
-        self._tf_start_p = float(tf_start_p)
-        self._tf_end_p   = float(tf_end_p)
-        self._tf_total   = int(total_tf_steps) if total_tf_steps > 0 else 1
-        self._tf_sched   = tf_schedule
-
-        # store ramp ratio (fraction of steps used for linear/other decay)
-        self._tf_ramp = max(1e-6, float(tf_ramp_ratio))
+        self.force = force
 
     # ------------------------------------------------------------------
     # Overridden DataLoader builders
@@ -115,25 +105,6 @@ class BBOBTrainer(Trainer):
         dl = super().get_test_dataloader(test_dataset)
         dl.collate_fn = self._eval_collator
         return dl
-
-    # ---------------- teacher-forcing schedule helper ------------------
-
-    def _tf_prob(self, step: int) -> float:
-        """Return teacher-forcing probability at *global* optimiser step."""
-        # Normalised progress (0‥1) with 80 % ramp window — parentheses are
-        # critical: without them division precedes multiplication leading to
-        # wildly out-of-range values.
-        denom = self._tf_ramp * self._tf_total
-        t = min(step, denom) / denom
-        if self._tf_sched == "linear":
-            return self._tf_start_p + t * (self._tf_end_p - self._tf_start_p)
-        if self._tf_sched == "cosine":
-            return self._tf_end_p + 0.5 * (self._tf_start_p - self._tf_end_p) * (1 + math.cos(math.pi * t))
-        if self._tf_sched == "exp":
-            k = 5.0
-            return self._tf_end_p + (self._tf_start_p - self._tf_end_p) * math.exp(-k * t)
-        # fallback linear
-        return self._tf_start_p + t * (self._tf_end_p - self._tf_start_p)
 
     # ---------------- batch preprocessing override --------------------
 
@@ -199,17 +170,11 @@ class BBOBTrainer(Trainer):
         # Scheduled sampling (teacher forcing) – per-token Bernoulli
         # ------------------------------------------------------------
         if "input_ids" in inputs and "labels" in inputs:
-            p = (
-                self._tf_prob(min(self.state.global_step, self._tf_total))
-                if self.model.training
-                else 0.0
-            )
-            if p > 0.0:
+            if self.force and self.model.training:
                 ids = inputs["input_ids"].clone()
                 lbl = inputs["labels"]
-                # create Bernoulli mask only where a ground-truth label exists
-                bern = torch.rand_like(lbl, dtype=torch.float, device=lbl.device) < p
-                mask = (lbl != -100) & bern
+                # Copy all ground truth tokens (where label != -100)
+                mask = lbl != -100  # Fixed: was -10, should be -100
                 ids[mask] = lbl[mask]
                 inputs["input_ids"] = ids
             else:
@@ -219,17 +184,24 @@ class BBOBTrainer(Trainer):
                 ids = inputs["input_ids"].clone()
                 lbl = inputs["labels"]
 
-                # Determine pad replacement token
+                # Determine replacement token - use EOS token when teacher forcing is disabled
                 try:
-                    pad_id = self.model.get_tokenizer().pad_token_id  # type: ignore[attr-defined]
-                    if pad_id is None:
-                        pad_id = 0
+                    tokenizer = self.model.get_tokenizer()
+                    # Use EOS token ID instead of pad token ID
+                    replacement_id = tokenizer.eos_token_id
+                    if replacement_id is None:
+                        # Fall back to pad token if EOS is not set
+                        replacement_id = tokenizer.pad_token_id
+                    if replacement_id is None:
+                        # Last resort: use 0
+                        replacement_id = 0
                 except Exception:
-                    pad_id = 0
+                    # If any exception occurs, use 0 as fallback
+                    replacement_id = 0
 
                 mask = lbl != -100
                 if mask.any():
-                    ids[mask] = pad_id
+                    ids[mask] = replacement_id
                     inputs["input_ids"] = ids
 
         return inputs 

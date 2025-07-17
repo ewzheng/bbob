@@ -35,10 +35,6 @@ def train(
     logger=None,
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
-    total_tf_ratio: float = 1,
-    tf_ramp_ratio: float = 0.75,
-    min_tf_p: float = 0.15,
-    max_tf_p: float = 1.0
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
@@ -53,7 +49,6 @@ def train(
     batches_per_epoch = max(math.ceil(len(train_dataset) / batch_size), 1)
     optim_steps_per_epoch = max(math.ceil(batches_per_epoch / grad_acc_steps), 1)
     total_optim_steps = epochs * optim_steps_per_epoch
-    total_tf_steps = int(total_optim_steps) * total_tf_ratio
 
     # Keep the old variable name for backward-compatibility
     steps_per_epoch = optim_steps_per_epoch
@@ -132,11 +127,7 @@ def train(
         eval_dataset=val_dataset,
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
-        tf_start_p=max_tf_p,
-        tf_end_p=min_tf_p,
-        total_tf_steps=total_tf_steps,
-        tf_schedule="linear",
-        tf_ramp_ratio=tf_ramp_ratio,
+        force=True,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,
@@ -160,11 +151,7 @@ def main():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--num_workers", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--bnb_config", type=str, default=None)
-    parser.add_argument("--min_tf_p", type=float, default=0.15)
-    parser.add_argument("--max_tf_p", type=float, default=1.0)
-    parser.add_argument("--total_tf_ratio", type=float, default=1)
-    parser.add_argument("--tf_ramp_ratio", type=float, default=0.75)
+    parser.add_argument("--bnb_config", type=str, default=None) 
     
     args = parser.parse_args()
 
@@ -238,10 +225,6 @@ def main():
         logger=logger,
         num_workers=num_workers,
         warmup_ratio=args.warmup_ratio,
-        total_tf_ratio=args.total_tf_ratio,
-        tf_ramp_ratio=args.tf_ramp_ratio,
-        min_tf_p=args.min_tf_p,
-        max_tf_p=args.max_tf_p
     )
 
     logger.info("Vision training complete. Model saved.")

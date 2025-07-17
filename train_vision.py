@@ -36,10 +36,6 @@ def train(
     logger=None,
     warmup_ratio: float = 0.0,
     num_workers: int = 4,
-    total_tf_ratio: float = 0.5,
-    tf_ramp_ratio: float = 0.3,
-    min_tf_p: float = 0.15,
-    max_tf_p: float = 1,
 ):
     """End-to-end training of the whole BBOB model with composite loss."""
 
@@ -53,8 +49,6 @@ def train(
 
     batches_per_epoch = max(math.ceil(len(train_dataset) / batch_size), 1)
     optim_steps_per_epoch = max(math.ceil(batches_per_epoch / grad_acc_steps), 1)
-    total_optim_steps = epochs * optim_steps_per_epoch
-    total_tf_steps = int(total_optim_steps) * total_tf_ratio
 
     # Keep the old variable name for backward-compatibility
     steps_per_epoch = optim_steps_per_epoch
@@ -132,11 +126,7 @@ def train(
         eval_dataset=val_dataset,
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
-        tf_start_p=max_tf_p,
-        tf_end_p=min_tf_p,
-        total_tf_steps=total_tf_steps,
-        tf_schedule="linear",
-        tf_ramp_ratio=tf_ramp_ratio,
+        force=False,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_metrics=compute_metrics,
