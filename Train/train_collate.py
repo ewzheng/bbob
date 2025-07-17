@@ -1,5 +1,3 @@
-Here's the collator
-
 from __future__ import annotations
 
 import torch
@@ -17,7 +15,7 @@ import re
 
 # Constants (default value only – actual value comes from model.vis_length)
 DEFAULT_VIS_TOKENS: int = 64   # fallback if not specified
-TARGET_SIZE = (256, 256)       # spatial resolution used by MobileViT-v2
+TARGET_SIZE = (512, 512)       # spatial resolution used by MobileViT-v2
 
 # ---------------------------------------------------------------------------
 # Coordinate safety margin – keep jittered / synthetic boxes away from exactly
