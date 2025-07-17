@@ -127,7 +127,7 @@ def train(
         eval_dataset=val_dataset,
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
-        force=False,
+        force=True,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_metrics=compute_metrics,
