@@ -1,19 +1,3 @@
-"""train_collate.py
-
-Data-collator utilities for BBOB training.
-
-This file contains `make_collate_fn`, a factory that returns a collate
-callable tailored for multimodal batches (image + text) and compatible
-with HuggingFace `Trainer`.  Its behaviour matches the latest logic that
-• normalises/letterboxes images,
-• prepends 64 visual placeholders to labels,
-• *hides* target-text tokens from the model inputs so teacher-forcing is
-  avoided by default.
-
-The function can be extended with scheduled-sampling options but starts
-with the deterministic "always hide targets" policy adopted on 2024-06-18.
-"""
-
 from __future__ import annotations
 
 import torch
@@ -1091,16 +1075,6 @@ class BBOBCollator:  # noqa: N801
                     # If instruction is too long, clear detection entirely
                     input_ids_det = empty_tensor.clone()
                     tgt_ids = empty_tensor.clone()
-            
-            # -------------------------------------------------------------
-            # Conceal *all* ground-truth tokens from the model input – both
-            # detection fragments *and* caption text.  The trainer’s
-            # teacher-forcing routine will later copy a Bernoulli subset back
-            # in when the TF probability > 0.
-            # -------------------------------------------------------------
-            if input_ids_det.numel() > 0:
-                pad_tok = pad_token_id if pad_token_id is not None else 0
-                input_ids_det = torch.full_like(input_ids_det, pad_tok)
 
             # OPTIMIZED: Single tensor allocation for input_ids
             input_ids = torch.cat([image_placeholder, instr_ids, input_ids_det], dim=0)

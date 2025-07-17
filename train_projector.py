@@ -125,7 +125,6 @@ def train(
         tokenizer=model.get_tokenizer(),
         image_processor=model.get_image_processor(),
         on_the_fly=True,
-        force=False,
         vis_tokens=vis_tokens,
     )
 
