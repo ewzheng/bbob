@@ -165,6 +165,8 @@ class BBOBTrainer(Trainer):
         return the dict.  Separated so we can call after the new length-fix
         code as well as in the training loop.
         """
+        
+        print("_apply_teacher_forcing called!")  # Debug: see if method is called
 
         # ------------------------------------------------------------
         # Scheduled sampling (teacher forcing) – per-token Bernoulli
