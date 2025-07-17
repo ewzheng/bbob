@@ -1,5 +1,3 @@
-this is the model code
-
 """BBOB multimodal model and config."""
 
 import torch
