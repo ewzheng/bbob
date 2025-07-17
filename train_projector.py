@@ -124,7 +124,8 @@ def train(
         tokenizer.pad_token_id,
         tokenizer=model.get_tokenizer(),
         image_processor=model.get_image_processor(),
-        on_the_fly=True
+        on_the_fly=True,
+        vis_tokens=vis_tokens
     )
 
     # Create metrics functions with shared state (no global variables)
