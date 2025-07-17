@@ -778,6 +778,9 @@ class BBOBCollator:  # noqa: N801
                 if len(set(shapes)) > 1:
                     self.logger.warning(f"Different tensor shapes before stacking: {shapes}")
             
+            max_h = max(t.shape[-2] for t in processed)
+            max_w = max(t.shape[-1] for t in processed)
+            processed = [F.pad(t, (0, max_w - t.shape[-1], 0, max_h - t.shape[-2])) for t in processed]
             pixel_values = torch.stack(processed, 0)
         else:
             # -------------------------------------------------------------
