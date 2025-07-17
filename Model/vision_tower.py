@@ -61,7 +61,7 @@ class VisionTower(nn.Module):
         """
         outs   = self.model(
             images.to(self.device, dtype=self.dtype),
-            output_hidden_states=False
+            output_hidden_states=False,
             interpolate_pos_encoding=True
         )
         tokens = outs.last_hidden_state       # (B, 1 + N, C)
