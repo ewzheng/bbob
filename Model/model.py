@@ -215,7 +215,7 @@ class BBOB(PreTrainedModel):
     API Functions
     '''
 
-    def _replace_image_tokens(self, input_ids, text_embeds, visual_embeds, attention_mask):
+    def _replace_image_tokens(self, text_embeds, visual_embeds, attention_mask):
         """
         Replace image placeholder tokens with visual embeddings using position-based approach.
         
@@ -389,7 +389,7 @@ class BBOB(PreTrainedModel):
             
         # Replace image tokens with visual embeddings (position-based approach)
         inputs_embeds, combined_mask = self._replace_image_tokens(
-            input_ids, text_embeds, visual_embeds, attention_mask
+            text_embeds, visual_embeds, attention_mask
         )
 
         # Labels are already aligned by the collator, so use them as-is
@@ -467,7 +467,7 @@ class BBOB(PreTrainedModel):
 
         # 3) Replace image tokens with visual embeddings (position-based approach)
         inputs_embeds, combined_mask = self._replace_image_tokens(
-            input_ids, text_embeds, visual_embeds, attention_mask
+            text_embeds, visual_embeds, attention_mask
         )
 
         # 4) Call base language model's generate; we provide *inputs_embeds*

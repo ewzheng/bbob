@@ -153,6 +153,7 @@ class Projector(nn.Module):
         # vision_in: (B, C, H, W)
         B, C, H, W = vision_in.shape
 
+        '''
         # NEW: Flexible token pooling - automatically handles any input token count
         input_tokens = H * W
         if input_tokens != self.output_tokens or input_tokens < self.output_tokens:
@@ -178,13 +179,14 @@ class Projector(nn.Module):
             # Update H, W for positional embeddings
             H, W = self.output_spatial
         else:
-            # Original behavior for matching token counts
-            if H > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1) or W > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1):
-                raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1), self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1))}")
-            
-            # Flatten for projection: (B, C, H, W) > (B, H*W, C)
-            vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
-
+        '''
+        # Original behavior for matching token counts
+        if H > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1) or W > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1):
+            raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1), self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1))}")
+        
+        # Flatten for projection: (B, C, H, W) > (B, H*W, C)
+        vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
+        
         # Project to text space first (deep path)
         projected = self.net(vision_in)              # (B, N, D)
 

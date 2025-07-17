@@ -1,9 +1,101 @@
 import torch
 import torch.nn as nn
-from transformers import MobileViTV2Model, MobileViTImageProcessor
-ENCODER = "apple/mobilevitv2-1.5-voc-deeplabv3"
-#ENCODER = "apple/mobilevitv2-2.0-imagenet1k-256"
+from transformers import MobileViTV2Model, MobileViTImageProcessor, CLIPVisionModel, CLIPImageProcessor
+import math
 
+#ENCODER = "apple/mobilevitv2-2.0-imagenet1k-256"
+ENCODER = "openai/clip-vit-base-patch16"
+
+class VisionTower(nn.Module):
+    """
+    Frozen CLIP vision encoder wrapped in the same style as the MobileViT VisionTower.
+    By default it returns a spatial feature map (B, C, H, W).
+    """
+    def __init__(
+        self,
+        dtype: torch.dtype = torch.float16,
+        device: str | torch.device = "cuda",
+        encoder_name: str | None = None,
+        return_spatial: bool = True,        # ← now True by default
+    ):
+        super().__init__()
+        encoder_name = encoder_name or ENCODER
+
+        # backbone + processor -------------------------------------------------
+        self.model = CLIPVisionModel.from_pretrained(encoder_name, torch_dtype=dtype)
+        self.image_processor = CLIPImageProcessor.from_pretrained(encoder_name, do_center_crop=False, size={"shortest_edge": 512})
+        self._dtype  = dtype
+        self._device = torch.device(device)
+
+        self.model.to(self._device).eval()
+        self._hidden_size = self.model.config.hidden_size   # single number in CLIP
+
+        self.return_spatial = return_spatial                # CLS vs (B,C,H,W)
+
+    # --------------------------------------------------------------------- utils
+    def freeze(self):
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    def unfreeze(self):
+        for p in self.model.parameters():
+            p.requires_grad = True
+
+    # ---------------------------------------------------------------- processing
+    def process_image(self, images):
+        """
+        images : list[PIL.Image] or ndarray – anything CLIPImageProcessor accepts.
+        Returns pixel tensor (B,3,H,W) on the tower’s device/dtype.
+        """
+        px = self.image_processor(images=images, return_tensors="pt").pixel_values
+        return px.to(self.device, dtype=self.dtype)
+
+    # ---------------------------------------------------------------- forward
+    @torch.no_grad()
+    def forward(self, images: torch.Tensor):
+        """
+        images : (B,3,H,W) tensor already on the correct device/dtype.
+        Returns
+            * CLS embedding  → (B,hidden_size)  if self.return_spatial is False
+            * Spatial map    → (B,C,h,w)        if self.return_spatial is True
+        """
+        outs   = self.model(
+            images.to(self.device, dtype=self.dtype),
+            output_hidden_states=False
+        )
+        tokens = outs.last_hidden_state       # (B, 1 + N, C)
+
+        if not self.return_spatial:           # just the pooled CLS token
+            return tokens[:, 0]               # (B, C)
+
+        # reshape patch tokens back to 2-D grid -----------------------------
+        patch_tokens = tokens[:, 1:, :]       # (B, N, C)
+        B, N, C      = patch_tokens.shape
+        side         = int(math.sqrt(N))      # assumes square grid
+        if side * side != N:
+            raise ValueError(
+                f"Cannot reshape {N} patches into a square – "
+                "set return_spatial=False or handle non-square grids manually."
+            )
+        spatial = (
+            patch_tokens
+            .permute(0, 2, 1)                # (B, C, N)
+            .reshape(B, C, side, side)       # (B, C, H, W)
+            .contiguous()
+        )
+        return spatial
+
+    # ---------------------------------------------------------------- props
+    @property
+    def dtype(self):         return self._dtype
+    @property
+    def device(self):        return self._device
+    @property
+    def config(self):        return self.model.config
+    @property
+    def hidden_size(self):   return self._hidden_size
+
+"""
 class VisionTower(nn.Module):
     def __init__(self, dtype, device):
         '''
@@ -101,3 +193,4 @@ class VisionTower(nn.Module):
     @property
     def hidden_size(self):
         return self._hidden_size
+"""
