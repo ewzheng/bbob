@@ -77,7 +77,7 @@ def train(
         dataloader_num_workers=num_workers,
         dataloader_prefetch_factor=num_workers,
         dataloader_persistent_workers=False,
-        dataloader_pin_memory=True,
+        dataloader_pin_memory=False,
         save_total_limit=8,
         save_safetensors=True,
         load_best_model_at_end=True,
@@ -111,7 +111,7 @@ def train(
         image_processor=model.get_image_processor(),
         logger=logger,
         on_the_fly=True,
-        vis_tokens=vis_tokens,  # Remove this line
+        vis_tokens=vis_tokens
     )
 
 

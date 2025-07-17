@@ -15,7 +15,6 @@ import re
 
 # Constants (default value only – actual value comes from model.vis_length)
 DEFAULT_VIS_TOKENS: int = 64   # fallback if not specified
-TARGET_SIZE = (512, 512)       # spatial resolution used by MobileViT-v2
 
 # ---------------------------------------------------------------------------
 # Coordinate safety margin – keep jittered / synthetic boxes away from exactly
@@ -759,13 +758,7 @@ class BBOBCollator:  # noqa: N801
                         do_resize=True,
                     )["pixel_values"][0]
                     
-                    # Debug: Check the actual output size
-                    if self.logger and pv.shape[-2:] != TARGET_SIZE[::-1]:
-                        # DEBUG-level only – keep silent during normal training
-                        self.logger.debug(
-                            "Image processor output size %s (expected %s)",
-                            pv.shape[-2:], TARGET_SIZE[::-1]
-                        )
+                    # No fixed TARGET_SIZE any more – variable resolution allowed
                     
                     processed.append(pv.to(device))
                 except Exception as e:
@@ -916,7 +909,7 @@ class BBOBCollator:  # noqa: N801
         
         # OVERRIDE: Force reasonable sequence limits to prevent OOM
         # Many tokenizers have very high model_max_length (like 1M+) which is impractical
-        reasonable_max_length = 2048  # Reasonable limit for detection training
+        reasonable_max_length = 4096  # Reasonable limit for detection training
         if max_txt_len > reasonable_max_length - self.vis_tokens:
             max_txt_len = reasonable_max_length - self.vis_tokens
             if self.logger and not hasattr(self, '_logged_override'):
