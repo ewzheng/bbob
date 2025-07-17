@@ -761,7 +761,11 @@ class BBOBCollator:  # noqa: N801
                     
                     # Debug: Check the actual output size
                     if self.logger and pv.shape[-2:] != TARGET_SIZE[::-1]:
-                        self.logger.warning(f"Image processor output size {pv.shape[-2:]} != expected {TARGET_SIZE[::-1]}")
+                        # DEBUG-level only – keep silent during normal training
+                        self.logger.debug(
+                            "Image processor output size %s (expected %s)",
+                            pv.shape[-2:], TARGET_SIZE[::-1]
+                        )
                     
                     processed.append(pv.to(device))
                 except Exception as e:
@@ -776,7 +780,8 @@ class BBOBCollator:  # noqa: N801
             if self.logger and len(processed) > 1:
                 shapes = [p.shape for p in processed]
                 if len(set(shapes)) > 1:
-                    self.logger.warning(f"Different tensor shapes before stacking: {shapes}")
+                    # log at DEBUG level only
+                    self.logger.debug("Different tensor shapes before stacking: %s", shapes)
  
             # ------------------------------------------------------------------
             # Pad images in the batch to the *largest* H and W so that we can
