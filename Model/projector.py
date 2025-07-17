@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file, load_file
 import torch.nn.functional as F
+import math
 
 class Projector(nn.Module):
     '''
@@ -37,32 +38,23 @@ class Projector(nn.Module):
         '''
         super().__init__()
         # two layer MLP: visiondim > textdim, GELU activation
-        self._hiddendim = max(indim, outdim*2)
         self.net = nn.Sequential(
-            nn.Linear(indim, self._hiddendim, dtype=dtype),
-            nn.GELU(),
-            nn.Linear(self._hiddendim, outdim, dtype=dtype),
+            nn.Linear(indim, outdim, dtype=dtype),
             nn.GELU(),
             nn.Linear(outdim, outdim, dtype=dtype),
         )
-
-        # skip connection (1×1 projection) – bias not needed due to subsequent LN
-        self.skip = nn.Linear(indim, outdim, bias=False, dtype=dtype)
-
-        # final normalisation applied *after* deep+skip fusion
-        self.norm_out = nn.LayerNorm(outdim, eps=1e-5, dtype=dtype)
 
         # flexible token pooling - automatically handles any input token count
         self.output_tokens = output_tokens
         self.output_spatial = (int(output_tokens ** 0.5), int(output_tokens ** 0.5))
 
         # learnable row and column embeddings (for output spatial size)
-        max_h = 32  # maximum grid height supported
-        max_w = 32  # maximum grid width supported
-        self.row_embedding = nn.Parameter(torch.empty(max_h, outdim, dtype=dtype, device=device))
-        self.col_embedding = nn.Parameter(torch.empty(max_w, outdim, dtype=dtype, device=device))
-        nn.init.trunc_normal_(self.row_embedding, std=0.02)
-        nn.init.trunc_normal_(self.col_embedding, std=0.02)
+        # max_h = 32  # maximum grid height supported
+        # max_w = 32  # maximum grid width supported
+        # self.row_embedding = nn.Parameter(torch.empty(max_h, outdim, dtype=dtype, device=device))
+        # self.col_embedding = nn.Parameter(torch.empty(max_w, outdim, dtype=dtype, device=device))
+        # nn.init.trunc_normal_(self.row_embedding, std=0.02)
+        # nn.init.trunc_normal_(self.col_embedding, std=0.02)
 
         self._indim = indim
         self._outdim = outdim
@@ -71,8 +63,6 @@ class Projector(nn.Module):
 
         # move sub-modules to target device
         self.net.to(self._device)
-        self.skip.to(self._device)
-        self.norm_out.to(self._device)
 
     '''
     Utils, getters, and setters
@@ -97,18 +87,41 @@ class Projector(nn.Module):
     def hiddendim(self):
         return self._hiddendim
 
+    def _build_2d_sincos_embedding(self, h, w, dim, device):
+        """
+        Build 2D sinusoidal positional embedding as in ViT.
+        Returns tensor of shape (h*w, dim)
+        """
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(h, dtype=torch.float32, device=device),
+            torch.arange(w, dtype=torch.float32, device=device),
+            indexing='ij'
+        )
+        pos = torch.stack([grid_y, grid_x], dim=-1)  # (h, w, 2)
+        pos = pos.reshape(-1, 2)  # (h*w, 2)
+        dim_half = dim // 2
+        omega = torch.arange(dim_half, dtype=torch.float32, device=device) / dim_half
+        omega = 1.0 / (10000 ** omega)  # (dim_half,)
+        out = []
+        for i in range(2):  # y, x
+            p = pos[:, i].unsqueeze(1)  # (h*w, 1)
+            out.append(torch.sin(p * omega))
+            out.append(torch.cos(p * omega))
+        emb = torch.cat(out, dim=1)  # (h*w, dim)
+        if emb.shape[1] > dim:
+            emb = emb[:, :dim]
+        elif emb.shape[1] < dim:
+            emb = F.pad(emb, (0, dim - emb.shape[1]))
+        return emb.unsqueeze(0)  # (1, h*w, dim)
+
     def freeze(self):
         """
         Freeze all projector parameters to prevent training
         """
         for p in self.net.parameters():
             p.requires_grad = False
-        for p in self.skip.parameters():
-            p.requires_grad = False
-        for p in self.norm_out.parameters():
-            p.requires_grad = False
-        self.row_embedding.requires_grad = False
-        self.col_embedding.requires_grad = False
+        # self.row_embedding.requires_grad = False
+        # self.col_embedding.requires_grad = False
     
     def unfreeze(self):
         """
@@ -116,12 +129,8 @@ class Projector(nn.Module):
         """
         for p in self.net.parameters():
             p.requires_grad = True
-        for p in self.skip.parameters():
-            p.requires_grad = True
-        for p in self.norm_out.parameters():
-            p.requires_grad = True
-        self.row_embedding.requires_grad = True
-        self.col_embedding.requires_grad = True
+        # self.row_embedding.requires_grad = True
+        # self.col_embedding.requires_grad = True
 
 
 
@@ -158,8 +167,10 @@ class Projector(nn.Module):
             # Reshape to spatial format for pooling: (B, input_tokens, C) -> (B, C, input_h, input_w)
             vision_in = vision_in.transpose(1, 2).reshape(B, C, input_h, input_w)
             
-            # Pool to output spatial size
-            vision_in = F.adaptive_avg_pool2d(vision_in, self.output_spatial)  # (B, C, output_h, output_w)
+            # Pool to output spatial size using average + max pooling combo
+            avg_pool = F.adaptive_avg_pool2d(vision_in, self.output_spatial)  # (B, C, output_h, output_w)
+            max_pool = F.adaptive_max_pool2d(vision_in, self.output_spatial)  # (B, C, output_h, output_w)
+            vision_in = avg_pool + max_pool  # (B, C, output_h, output_w)
             
             # Flatten back to tokens: (B, C, output_h, output_w) -> (B, output_tokens, C)
             vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, output_tokens, C)
@@ -168,8 +179,8 @@ class Projector(nn.Module):
             H, W = self.output_spatial
         else:
             # Original behavior for matching token counts
-            if H > self.row_embedding.size(0) or W > self.col_embedding.size(0):
-                raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self.row_embedding.size(0), self.col_embedding.size(0))}")
+            if H > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1) or W > self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1):
+                raise ValueError(f"Input feature map size {(H, W)} exceeds max supported {(self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1), self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).size(1))}")
             
             # Flatten for projection: (B, C, H, W) > (B, H*W, C)
             vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, H*W, C)
@@ -177,21 +188,16 @@ class Projector(nn.Module):
         # Project to text space first (deep path)
         projected = self.net(vision_in)              # (B, N, D)
 
-        # Residual skip path
-        skip_out = self.skip(vision_in)              # (B, N, D)
-
-        # Fuse
-        fused = self.norm_out(projected + skip_out)  # (B, N, D)
-
         # Add spatial embeddings back after projection to restore spatial information
-        pos = (
-            self.row_embedding[:H].unsqueeze(1) +  # (H, 1, outdim)
-            self.col_embedding[:W].unsqueeze(0)    # (1, W, outdim)
-        )  # (H, W, outdim)
-        pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, D)
+        # pos = (
+        #     self.row_embedding[:H].unsqueeze(1) +  # (H, 1, outdim)
+        #     self.col_embedding[:W].unsqueeze(0)    # (1, W, outdim)
+        # )  # (H, W, outdim)
+        # pos = pos.reshape(H * W, self._outdim).unsqueeze(0).expand(B, -1, -1)  # (B, H*W, D)
+        pos = self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).expand(B, -1, -1)  # (B, H*W, D)
 
         # add spatial features after projection
-        return fused + pos
+        return projected + pos
     
     ''' Saving methods, here if needed '''
 
