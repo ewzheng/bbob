@@ -104,14 +104,14 @@ def train(
     import Train.train_common as tc
     tc.VIS_TOKENS = vis_tokens  # type: ignore[attr-defined]
 
+    # Remove vis_tokens from collator factory
     collate_fn = make_collate_fn(
         tokenizer.pad_token_id,
         tokenizer=tokenizer,
         image_processor=model.get_image_processor(),
         logger=logger,
         on_the_fly=True,
-        forced=True,
-        vis_tokens=vis_tokens,
+        # vis_tokens=vis_tokens,  # Remove this line
     )
 
 
@@ -127,7 +127,6 @@ def train(
         eval_dataset=val_dataset,
         train_collator=collate_fn,
         eval_collator=collate_fn,  # same collator works for eval
-        force=True,
         args=cfg,
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_metrics=compute_metrics,

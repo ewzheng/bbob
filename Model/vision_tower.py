@@ -6,95 +6,96 @@ import math
 #ENCODER = "apple/mobilevitv2-2.0-imagenet1k-256"
 ENCODER = "openai/clip-vit-base-patch16"
 
+import math
+import torch
+import torch.nn as nn
+from transformers import CLIPVisionModel, CLIPImageProcessor
+
+ENCODER = "openai/clip-vit-base-patch16"
+
+
 class VisionTower(nn.Module):
     """
-    Frozen CLIP vision encoder wrapped in the same style as the MobileViT VisionTower.
-    By default it returns a spatial feature map (B, C, H, W).
+    Frozen CLIP vision encoder that returns either the CLS token or a (B,C,H,W)
+    spatial map.  Works for square **and** rectangular inputs.
     """
     def __init__(
         self,
         dtype: torch.dtype = torch.float16,
         device: str | torch.device = "cuda",
         encoder_name: str | None = None,
-        return_spatial: bool = True,        # ← now True by default
+        return_spatial: bool = True,
     ):
         super().__init__()
         encoder_name = encoder_name or ENCODER
 
         # backbone + processor -------------------------------------------------
         self.model = CLIPVisionModel.from_pretrained(encoder_name, torch_dtype=dtype)
-        self.image_processor = CLIPImageProcessor.from_pretrained(encoder_name, do_center_crop=False, size={"shortest_edge": 512})
-        self._dtype  = dtype
-        self._device = torch.device(device)
+        self.image_processor = CLIPImageProcessor.from_pretrained(
+            encoder_name,
+            do_center_crop=False,                 # keep full FOV
+            size={"shortest_edge": 512},          # 512-px short side
+        )
 
-        self.model.to(self._device).eval()
-        self._hidden_size = self.model.config.hidden_size   # single number in CLIP
+        self._dtype   = dtype
+        self._device  = torch.device(device)
+        self._hidden_size = self.model.config.hidden_size
 
-        self.return_spatial = return_spatial                # CLS vs (B,C,H,W)
+        self.model.to(self._device).eval()        # keep frozen for Stage-1/2
+        self.return_spatial = return_spatial
 
-    # --------------------------------------------------------------------- utils
-    def freeze(self):
-        for p in self.model.parameters():
-            p.requires_grad = False
-
-    def unfreeze(self):
-        for p in self.model.parameters():
-            p.requires_grad = True
+    # ---------------------------------------------------------------- utils
+    def freeze(self):   self.model.requires_grad_(False)
+    def unfreeze(self): self.model.requires_grad_(True)
 
     # ---------------------------------------------------------------- processing
     def process_image(self, images):
-        """
-        images : list[PIL.Image] or ndarray – anything CLIPImageProcessor accepts.
-        Returns pixel tensor (B,3,H,W) on the tower’s device/dtype.
-        """
         px = self.image_processor(images=images, return_tensors="pt").pixel_values
         return px.to(self.device, dtype=self.dtype)
 
     # ---------------------------------------------------------------- forward
     @torch.no_grad()
     def forward(self, images: torch.Tensor):
-        """
-        images : (B,3,H,W) tensor already on the correct device/dtype.
-        Returns
-            * CLS embedding  → (B,hidden_size)  if self.return_spatial is False
-            * Spatial map    → (B,C,h,w)        if self.return_spatial is True
-        """
-        outs   = self.model(
-            images.to(self.device, dtype=self.dtype),
+        outs = self.model(
+            pixel_values=images.to(self.device, dtype=self.dtype),
             output_hidden_states=False,
-            interpolate_pos_encoding=True
+            interpolate_pos_encoding=True,     # <-- key line
         )
-        tokens = outs.last_hidden_state       # (B, 1 + N, C)
+        tokens = outs.last_hidden_state         # (B, 1+N, C)
 
-        if not self.return_spatial:           # just the pooled CLS token
-            return tokens[:, 0]               # (B, C)
+        if not self.return_spatial:
+            return tokens[:, 0]                 # CLS only (B,C)
 
-        # reshape patch tokens back to 2-D grid -----------------------------
-        patch_tokens = tokens[:, 1:, :]       # (B, N, C)
-        B, N, C      = patch_tokens.shape
-        side         = int(math.sqrt(N))      # assumes square grid
-        if side * side != N:
+        # -------- reshape patch tokens to (B,C,H_grid,W_grid) -------------
+        patch_tokens = tokens[:, 1:]            # drop CLS
+        B, N, C = patch_tokens.shape
+
+        h_grid = images.shape[-2] // 16         # rows  (16-px patch)
+        w_grid = images.shape[-1] // 16         # cols
+        if h_grid * w_grid != N:                # sanity-guard
             raise ValueError(
-                f"Cannot reshape {N} patches into a square – "
-                "set return_spatial=False or handle non-square grids manually."
+                f"Mismatch: tokens={N}, expected {h_grid*w_grid} "
+                f"from {h_grid}×{w_grid} patch grid."
             )
+
         spatial = (
             patch_tokens
-            .permute(0, 2, 1)                # (B, C, N)
-            .reshape(B, C, side, side)       # (B, C, H, W)
+            .permute(0, 2, 1)                   # (B,C,N)
+            .reshape(B, C, h_grid, w_grid)      # (B,C,H,W)
             .contiguous()
         )
         return spatial
 
     # ---------------------------------------------------------------- props
     @property
-    def dtype(self):         return self._dtype
+    def dtype(self):       return self._dtype
     @property
-    def device(self):        return self._device
+    def device(self):      return self._device
     @property
-    def config(self):        return self.model.config
+    def config(self):      return self.model.config
     @property
-    def hidden_size(self):   return self._hidden_size
+    def hidden_size(self): return self._hidden_size
+
 
 """
 class VisionTower(nn.Module):
