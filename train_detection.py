@@ -131,7 +131,8 @@ def train(
         callbacks=[LoggingCallback(logger)] if logger is not None else None,
         compute_loss_func=compute_loss_fn,
         compute_metrics=compute_metrics,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        force=True
     )
 
     logger.info("Starting end-to-end training …")
