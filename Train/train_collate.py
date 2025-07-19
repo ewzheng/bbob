@@ -12,6 +12,7 @@ from .train_common import format_coordinate
 import random
 import torch.utils.data as tud
 import re
+from .train_common import DEFAULT_TARGET_SIZE
 # ---------------------------------------------------------------------------
 # Helper utilities moved to Train.det_helpers to keep this file lean.
 # ---------------------------------------------------------------------------
@@ -250,9 +251,8 @@ class BBOBCollator:  # noqa: N801
                         return_tensors="pt",
                         do_center_crop=False,
                         do_resize=True,
+                        target_size=DEFAULT_TARGET_SIZE,
                     )["pixel_values"][0]
-                    
-                    # No fixed TARGET_SIZE any more – variable resolution allowed
                     
                     processed.append(pv.to(device))
                 except Exception as e:
