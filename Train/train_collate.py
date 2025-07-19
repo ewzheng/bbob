@@ -251,7 +251,6 @@ class BBOBCollator:  # noqa: N801
                         return_tensors="pt",
                         do_center_crop=False,
                         do_resize=True,
-                        target_size=DEFAULT_TARGET_SIZE,
                     )["pixel_values"][0]
                     
                     processed.append(pv.to(device))
@@ -269,18 +268,6 @@ class BBOBCollator:  # noqa: N801
                 if len(set(shapes)) > 1:
                     # log at DEBUG level only
                     self.logger.debug("Different tensor shapes before stacking: %s", shapes)
- 
-            # ------------------------------------------------------------------
-            # Pad images in the batch to the *largest* H and W so that we can
-            # safely stack them into a single BCHW tensor.  This keeps aspect
-            # ratios (padding only adds zeros) and avoids the RuntimeError
-            # that arises when tensors of different spatial size are stacked.
-            # ------------------------------------------------------------------
-            if len(processed) > 0:
-                max_h = max(t.shape[-2] for t in processed)
-                max_w = max(t.shape[-1] for t in processed)
-                if any((t.shape[-2] != max_h or t.shape[-1] != max_w) for t in processed):
-                    processed = [F.pad(t, (0, max_w - t.shape[-1], 0, max_h - t.shape[-2])) for t in processed]
 
             pixel_values = torch.stack(processed, 0)
         else:
