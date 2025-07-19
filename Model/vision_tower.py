@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import MobileViTV2Model, MobileViTImageProcessor
 
-ENCODER = "timm/mobilevitv2_200.cvnets_in22k_ft_in1k_384"
+ENCODER = "apple/mobilevitv2-2.0-imagenet1k-256"
 
 class VisionTower(nn.Module):
     def __init__(self, dtype, device):
