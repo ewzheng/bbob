@@ -1,5 +1,4 @@
 import albumentations as A
-from albumentations.pytorch import ToTensorV2
 import numpy as np
 from PIL import Image
 import random
@@ -162,6 +161,64 @@ def apply_ms_crop(image, boxes, labels, *, scale_range=(0.4, 1.0)):
     print("Warning: MS crop augmentation failed completely, returning original sample")
     return image, boxes, labels
 
+# ---------------------------------------------------------------------------
+# Simple horizontal flip augment (always apply, no retries).
+# ---------------------------------------------------------------------------
+
+
+_hflip_aug = A.Compose(
+    [A.HorizontalFlip(p=1.0)],
+    bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"], min_visibility=0.0),
+)
+
+
+def apply_hflip(image, boxes, labels):
+    """Return a horizontally flipped copy of ``image`` and its boxes.
+
+    Parameters
+    ----------
+    image : PIL.Image | np.ndarray | torch.Tensor(3,H,W)
+    boxes : list[list[float]]
+        Bounding boxes in *normalised* xywh (0‥1) format.
+    labels : list[str]
+        Corresponding label strings.
+
+    Returns
+    -------
+    img_out, boxes_out, labels_out  –  boxes stay xywh 0‥1.
+    """
+
+    # Ensure list types to avoid Albumentations complaints
+    boxes = boxes or []
+    labels = labels or []
+
+    img_np, was_pil = _to_numpy(image)
+    h, w = img_np.shape[:2]
+
+    # Convert normalised boxes → absolute pixel xywh for Albumentations
+    boxes_px = [[x * w, y * h, bw * w, bh * h] for x, y, bw, bh in boxes]
+
+    try:
+        res = _hflip_aug(image=img_np, bboxes=boxes_px, class_labels=labels)
+        img_flipped = res["image"]
+        boxes_px_flipped = res["bboxes"]
+        labels_flipped = res["class_labels"]
+    except Exception as e:
+        # Fallback: manual flip; boxes remain unchanged (mirrored coord)
+        print(f"Horizontal flip failed via Albumentations: {e}; falling back to numpy flip.")
+        img_flipped = np.fliplr(img_np)
+        boxes_px_flipped = []
+        for x, y, bw, bh in boxes_px:
+            new_x = w - x - bw  # mirror left coordinate
+            boxes_px_flipped.append([new_x, y, bw, bh])
+        labels_flipped = labels
+
+    # Back to normalised
+    boxes_out = [[bx / w, by / h, bw / w, bh / h] for bx, by, bw, bh in boxes_px_flipped]
+
+    img_out = _restore_type(img_flipped, was_pil)
+
+    return img_out, boxes_out, labels_flipped
 
 
 def _to_numpy(img):

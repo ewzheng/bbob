@@ -57,7 +57,7 @@ def _extract_snippets(text: str) -> List[str]:
 def _split_snippet(det: str) -> Tuple[str, List[float]]:
     """Return *(label, xywh)* for one <bbob> snippet (label lower-cased)."""
     parts = det.split(":", 1)
-    label = parts[0].strip().lower() if parts else ""
+    label = parts[1].strip().lower() if len(parts) == 2 else ""
     xywh, _ = parse_detection_string(det)
     return label, xywh
 
@@ -175,6 +175,8 @@ def _parse_boxes(logits: torch.Tensor, tokenizer) -> List[List[str]]:
 def parse_detection_string(det: str) -> Tuple[List[float], float]:
     """Parse a single `<bbob>` snippet.
 
+    Expected format: ``[x1, y1, x2, y2]: class`` (bracketed coords first).
+
     Returns
     -------
     coords : list[float]  length-4, clamped to 0‥1
@@ -184,16 +186,20 @@ def parse_detection_string(det: str) -> Tuple[List[float], float]:
     if len(parts) != 2:
         return [0, 0, 0, 0], 1.0
 
-    blank_pen = 0.25 if parts[0].strip() == "" else 0.0
+    # coords are in the *first* part, potentially inside [...] brackets
+    coord_part = parts[0]
+    label_part = parts[1]
 
-    nums = [max(0.0, min(1.0, float(s))) for s in NUMERIC_PATTERN.findall(parts[1])[:4]]
+    blank_pen = 0.25 if label_part.strip() == "" else 0.0
+
+    nums = [max(0.0, min(1.0, float(s))) for s in NUMERIC_PATTERN.findall(coord_part)[:4]]
     missing = 4 - len(nums)
     nums.extend([0.5] * missing)
 
     clip_err = sum(abs(v - max(0.0, min(1.0, v))) for v in nums) / 4.0
     fmt_err = missing / 4.0 + clip_err + blank_pen
 
-    # penalise zero-area boxes
+    # penalise zero-area
     if nums[2] == 0.0 or nums[3] == 0.0:
         fmt_err += 0.25
 

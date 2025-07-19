@@ -25,7 +25,7 @@ class Projector(nn.Module):
     returns: instance ready for `.forward()`.
     '''
 
-    def __init__(self, indim, outdim, dtype, device, output_tokens=1024):
+    def __init__(self, indim, outdim, dtype, device, output_tokens=64):
         '''
         ctor.
 
@@ -143,41 +143,73 @@ class Projector(nn.Module):
         forward pass.
 
         parameters:
-            - vision_in (torch.Tensor): shape `(b, c, h, w)`.
+            - vision_in (torch.Tensor | list[torch.Tensor]):
+                Either a single spatial feature map `(B, C, H, W)` **or** a
+                list/tuple of such maps coming from different layers of the
+                vision backbone.
 
-        returns: torch.tensor shape `(b, output_tokens, outdim)`.
+        returns: torch.tensor shape `(B, N, outdim)` where
+            `N = len(vision_in) * output_tokens` when a list is given (each
+            map contributes the same number of tokens after adaptive pooling).
         '''
 
-        if vision_in is None: return None
+        if vision_in is None:
+            return None
 
-        # vision_in: (B, C, H, W)
-        B, C, H, W = vision_in.shape
+        # Ensure we have an iterable of feature maps ---------------------------------
+        if isinstance(vision_in, torch.Tensor):
+            vision_feats = [vision_in]  # single-map case
+        else:
+            # clone into list to allow in-place mods without touching caller
+            vision_feats = list(vision_in)
+
+        pooled_tokens = []  # collect projected tokens from each map
+
+        for fmap in vision_feats:
+            # Expect fmap: (B, C, H, W)
+            if fmap is None:
+                continue
+
+            B, C, H, W = fmap.shape
+
+            # Adaptive spatial pooling to uniform resolution ------------------------
+            if (H, W) != self.output_spatial:
+                avg_pool = F.adaptive_avg_pool2d(fmap, self.output_spatial)
+                max_pool = F.adaptive_max_pool2d(fmap, self.output_spatial)
+                fmap = avg_pool + max_pool
+                H, W = self.output_spatial
+
+            # Skip feature maps whose channel dim mismatches the projector ---------
+            # (The linear layer expects self._indim channels.)
+            if C != self._indim:
+                # OPTIONAL: could add a 1×1 conv here to reconcile dims.
+                # For simplicity we ignore mismatched maps for now.
+                continue
+
+            # Flatten & project -----------------------------------------------------
+            fmap = fmap.flatten(2).transpose(1, 2)  # (B, N, C)
+            proj = self.net(fmap)                  # (B, N, D)
+            pooled_tokens.append(proj)
+
+        if not pooled_tokens:
+            raise ValueError(
+                "Projector.forward received no feature map with channel dim "
+                f"{self._indim}. Got {[f.shape[1] for f in vision_feats]} instead."
+            )
 
         # ------------------------------------------------------------------
-        # Adaptive pooling: always convert feature map to fixed spatial size
-        # (self.output_spatial) so the projector outputs exactly
-        # `self.output_tokens` tokens regardless of the input resolution.
-        # This preserves edge information because we *never* crop – we only
-        # down-/up-sample the feature map via avg+max pooling combo.
+        # Fuse across maps: average token embeddings so total count remains N
+        # (self.output_tokens).  This avoids blowing up the sequence length
+        # while still blending multi-scale information.
         # ------------------------------------------------------------------
-        if (H, W) != self.output_spatial:
-            # Combine average + max pooling (empirically better than avg only)
-            # 1. Keep input as BCHW
-            avg_pool = F.adaptive_avg_pool2d(vision_in, self.output_spatial)  # (B,C,h*,w*)
-            max_pool = F.adaptive_max_pool2d(vision_in, self.output_spatial)  # (B,C,h*,w*)
-            vision_in = avg_pool + max_pool                                   # (B,C,h*,w*)
-            H, W = self.output_spatial
+        tokens = torch.stack(pooled_tokens, dim=0).mean(0)  # (B, N, D)
 
-        # Flatten for projection: (B, C, H, W) => (B, H*W, C)
-        vision_in = vision_in.flatten(2).transpose(1, 2)  # (B, N, C) where N = H*W == self.output_tokens
+        # Positional encoding (single grid size) -----------------------------------
+        pos = self._build_2d_sincos_embedding(
+            self.output_spatial[0], self.output_spatial[1], self._outdim, tokens.device
+        ).expand(tokens.shape[0], -1, -1)  # (B, N, D)
 
-        # Project to text space first (deep path)
-        projected = self.net(vision_in)              # (B, N, D)
-
-        # Add sinusoidal positional embeddings
-        pos = self._build_2d_sincos_embedding(H, W, self._outdim, vision_in.device).expand(B, -1, -1)  # (B, N, D)
-
-        return projected + pos
+        return tokens + pos
     
     ''' Saving methods, here if needed '''
 

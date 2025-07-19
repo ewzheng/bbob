@@ -33,12 +33,12 @@ import torch.nn.functional as F
 import psutil
 
 # Image augmentations
-from .train_augments import apply_batch_augmentations, apply_ms_crop
+from .train_augments import apply_batch_augmentations, apply_ms_crop, apply_hflip
 from Utils.class_id_map import init_from_labels, get_id
 
 # Constants
 VIS_TOKENS = 64  # Visual tokens that will be prepended by the model
-DEFAULT_TARGET_SIZE = (256, 256)
+DEFAULT_TARGET_SIZE = (384, 384)
 MAX_TARGET_TEXT_LENGTH = 526
 MEMORY_SAFETY_MARGIN = 0.15
 MIN_BATCH_SIZE = 8
@@ -301,6 +301,16 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
                 except Exception as e:
                     print(f"MS-crop augmentation failed (continuing): {e}")
 
+            # ---------------- horizontal flip augmentation -------------------
+            try:
+                img_f, boxes_f, labels_f = apply_hflip(base_rgb, base_boxes, base_labels)
+                img_versions.append(img_f)
+                boxes_versions.append(boxes_f)
+                labels_versions.append(labels_f)
+                is_ms_crop_flags.append(False)  # flip still needs geometry adjust
+            except Exception as e:
+                print(f"HFlip augmentation failed (continuing): {e}")
+
         # --- iterate paired variants -----------------------------------------
         for aug_idx, (rgb, boxes_this, labels_this) in enumerate(zip(img_versions, boxes_versions, labels_versions)):
             # -------------------------------------------------------------
@@ -468,7 +478,7 @@ def preprocess_batch(batch, tokenizer, image_processor, training=False, augment=
             y2_q = format_coordinate(max(0.0, min(1.0, y2)))
 
             bbox_txt = ", ".join([x1_q, y1_q, x2_q, y2_q])  # xyxy order
-            detection_fragments.append(f"<|bbob|>{label}: [{bbox_txt}]</|bbob|>")
+            detection_fragments.append(f"<|bbob|>[{bbox_txt}]: {label}</|bbob|>")
 
         # ---------------------------------------------------------
         # Build the textual target *and* decide how many detections

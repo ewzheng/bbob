@@ -45,7 +45,7 @@ def _extract_snippets(text: str) -> List[str]:
 def _split_snippet(det: str) -> Tuple[str, List[float]]:
     """Return *(label, xywh)* for one <bbob> snippet (label lower-cased)."""
     parts = det.split(":", 1)
-    label = parts[0].strip().lower() if parts else ""
+    label = parts[1].strip().lower() if len(parts)==2 else ""
     xyxy, _ = parse_detection_string(det)  # already (x1,y1,x2,y2)
 
     return label, xyxy

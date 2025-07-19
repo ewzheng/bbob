@@ -5,18 +5,8 @@ from .loss_helpers import (
     decode_pred_gt,
     TAG_OPEN,
     TAG_CLOSE,
-    hungarian_match,
-    xywh_to_xyxy,
-    ids_to_boxes_labels,
 )
 import re
-
-# Torchvision losses – fall back gracefully if not available
-try:
-    from torchvision.ops import complete_box_iou_loss as _ciou_loss_fn  # type: ignore
-except ImportError:  # pragma: no cover
-    _ciou_loss_fn = None
-from torchvision.ops import generalized_box_iou as _g_box_iou  # type: ignore
 
 class BBOBLoss:
     """Minimal language-model cross-entropy loss for BBOB.
@@ -279,7 +269,6 @@ class BBOBLoss:
             The label sequence where GT tokens are real IDs and noise tokens are
             set to ``ignore_index`` (-100).
         """
-        import re
 
         # --------------------------------------------------------------
         # SAFETY: Collator prepends a *single* image placeholder token to
