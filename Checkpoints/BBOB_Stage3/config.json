@@ -1,0 +1,16 @@
+{
+  "base_model_name": "roneneldan/TinyStories-33M",
+  "bnb_config": null,
+  "device_map": "auto",
+  "language_model_path": "language_model",
+  "max_memory": {
+    "0": 79374000000
+  },
+  "model_type": "bbob",
+  "output_tokens": 169,
+  "projector_path": "projector.safetensors",
+  "text_hidden_size": 768,
+  "transformers_version": "4.52.4",
+  "vision_hidden_size": 1024,
+  "vision_tower_path": "vision_tower"
+}
